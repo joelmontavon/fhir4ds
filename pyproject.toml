@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fhir4ds"
-version = "0.4.0"
+version = "0.4.1"
 description = "Production-ready healthcare analytics platform providing 100% SQL-on-FHIR v2.0 compliance with dual database support (DuckDB + PostgreSQL)"
 readme = "README.md"
 requires-python = ">=3.8"
 authors = [
-    {name = "FHIR4DS Team", email = "fhir4ds@example.com"},
+    {name = "Joel Montavon", email = "joelmontavon@gmail.com"},
 ]
-license = {text = "MIT"}
+license = {text = "GNU General Public License v3 (GPLv3)"}
 keywords = [
     "fhir", 
     "sql", 
@@ -28,7 +28,7 @@ classifiers = [
     "Intended Audience :: Healthcare Industry",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
@@ -88,10 +88,10 @@ all = [
 ]
 
 [project.urls]
-Documentation = "https://github.com/fhir4ds/fhir4ds"
-Repository = "https://github.com/fhir4ds/fhir4ds"
-"Bug Tracker" = "https://github.com/fhir4ds/fhir4ds/issues"
-Homepage = "https://github.com/fhir4ds/fhir4ds"
+Documentation = "https://github.com/joelmontavon/fhir4ds/blob/main/docs/README.md"
+Repository = "https://github.com/joelmontavon/fhir4ds"
+"Bug Tracker" = "https://github.com/joelmontavon/fhir4ds/issues"
+Homepage = "https://github.com/joelmontavon/fhir4ds"
 
 [project.scripts]
 fhir4ds-server = "fhir4ds.server:main"
