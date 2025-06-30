@@ -1,0 +1,20 @@
+{
+  "name": "patient_with_where",
+  "resource": "Patient",
+  "description": "Patient with WHERE clause for testing",
+  "select": [
+    {
+      "path": "id",
+      "name": "patient_id"
+    },
+    {
+      "path": "name.given.first()",
+      "name": "first_name"
+    }
+  ],
+  "where": [
+    {
+      "path": "active = true"
+    }
+  ]
+}

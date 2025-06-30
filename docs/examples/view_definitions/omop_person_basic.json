@@ -1,0 +1,19 @@
+{
+  "name": "omop_person_basic",
+  "resource": "Patient",
+  "description": "Basic OMOP Person mapping with essential fields only",
+  "select": [
+    {
+      "path": "id",
+      "name": "person_source_value"
+    },
+    {
+      "path": "gender",
+      "name": "gender_source_value"
+    },
+    {
+      "path": "birthDate",
+      "name": "birth_datetime"
+    }
+  ]
+}

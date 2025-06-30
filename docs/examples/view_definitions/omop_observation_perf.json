@@ -1,0 +1,40 @@
+{
+  "name": "omop_observation_perf",
+  "resource": "Observation",
+  "description": "Simplified OMOP Observation mapping for performance testing",
+  "select": [
+    {
+      "path": "id",
+      "name": "observation_id"
+    },
+    {
+      "path": "subject.reference",
+      "name": "person_source_value"
+    },
+    {
+      "path": "code.coding.first().code",
+      "name": "observation_source_value"
+    },
+    {
+      "path": "value.ofType(Quantity).value",
+      "name": "value_as_number"
+    },
+    {
+      "path": "value.ofType(string)",
+      "name": "value_as_string"
+    },
+    {
+      "path": "effective.ofType(dateTime)",
+      "name": "observation_datetime"
+    },
+    {
+      "path": "status",
+      "name": "observation_status"
+    }
+  ],
+  "where": [
+    {
+      "path": "status = 'final'"
+    }
+  ]
+}

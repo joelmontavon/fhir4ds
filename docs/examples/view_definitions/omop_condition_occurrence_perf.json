@@ -1,0 +1,36 @@
+{
+  "name": "omop_condition_occurrence_perf",
+  "resource": "Condition",
+  "description": "Simplified OMOP Condition Occurrence mapping for performance testing",
+  "select": [
+    {
+      "path": "id",
+      "name": "condition_occurrence_id"
+    },
+    {
+      "path": "subject.reference",
+      "name": "person_source_value"
+    },
+    {
+      "path": "code.coding.first().code",
+      "name": "condition_source_value"
+    },
+    {
+      "path": "code.coding.first().system",
+      "name": "condition_source_vocabulary"
+    },
+    {
+      "path": "onset.ofType(dateTime)",
+      "name": "condition_start_datetime"
+    },
+    {
+      "path": "clinicalStatus.coding.first().code",
+      "name": "condition_status_source_value"
+    }
+  ],
+  "where": [
+    {
+      "path": "clinicalStatus.exists()"
+    }
+  ]
+}

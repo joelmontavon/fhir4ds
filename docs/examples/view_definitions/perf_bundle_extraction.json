@@ -1,0 +1,27 @@
+{
+  "name": "perf_bundle_extraction",
+  "resource": "Bundle",
+  "description": "Performance test for Bundle resource extraction with nested Patient data",
+  "select": [
+    {
+      "path": "id",
+      "name": "bundle_id"
+    },
+    {
+      "path": "type", 
+      "name": "bundle_type"
+    },
+    {
+      "path": "entry.where(resource.resourceType='Patient').resource.id",
+      "name": "patient_id"
+    },
+    {
+      "path": "entry.where(resource.resourceType='Patient').resource.gender",
+      "name": "patient_gender"
+    },
+    {
+      "path": "entry.where(resource.resourceType='Patient').resource.birthDate",
+      "name": "patient_birth_date"
+    }
+  ]
+}

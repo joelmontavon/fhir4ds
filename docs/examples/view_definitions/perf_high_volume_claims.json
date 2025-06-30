@@ -1,0 +1,31 @@
+{
+  "name": "perf_high_volume_claims", 
+  "resource": "Bundle",
+  "description": "Performance test for high-volume Claim resources (51,663 total)",
+  "select": [
+    {
+      "path": "entry.where(resource.resourceType='Claim').resource.id",
+      "name": "claim_id"
+    },
+    {
+      "path": "entry.where(resource.resourceType='Claim').resource.status",
+      "name": "claim_status"
+    },
+    {
+      "path": "entry.where(resource.resourceType='Claim').resource.patient.reference",
+      "name": "patient_reference"
+    },
+    {
+      "path": "entry.where(resource.resourceType='Claim').resource.provider.reference", 
+      "name": "provider_reference"
+    },
+    {
+      "path": "entry.where(resource.resourceType='Claim').resource.total.value",
+      "name": "total_value"
+    },
+    {
+      "path": "entry.where(resource.resourceType='Claim').resource.diagnosis.first().diagnosisCodeableConcept.coding.code",
+      "name": "primary_diagnosis_code"
+    }
+  ]
+}

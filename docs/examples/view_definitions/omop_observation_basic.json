@@ -1,0 +1,27 @@
+{
+  "name": "omop_observation_basic",
+  "resource": "Observation",
+  "description": "Basic OMOP Observation mapping with essential fields only",
+  "select": [
+    {
+      "path": "id",
+      "name": "observation_id"
+    },
+    {
+      "path": "subject.reference",
+      "name": "person_reference"
+    },
+    {
+      "path": "code.coding.first().code",
+      "name": "observation_source_value"
+    },
+    {
+      "path": "value.ofType(Quantity).value",
+      "name": "value_as_number"
+    },
+    {
+      "path": "effective.ofType(dateTime)",
+      "name": "observation_datetime"
+    }
+  ]
+}

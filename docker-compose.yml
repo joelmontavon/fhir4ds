@@ -1,0 +1,103 @@
+# FHIR4DS Analytics Server Docker Compose
+# Provides multiple deployment configurations
+
+version: '3.8'
+
+services:
+  # FHIR4DS Server with DuckDB (default, lightweight)
+  fhir4ds-duckdb:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - fhir4ds-data:/app/data
+      - ./views:/app/views:ro
+    environment:
+      - DATABASE_TYPE=duckdb
+      - DATABASE_PATH=/app/data/fhir4ds.db
+      - VIEWS_DIR=/app/views
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    profiles:
+      - duckdb
+      - default
+
+  # FHIR4DS Server with PostgreSQL
+  fhir4ds-postgresql:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./views:/app/views:ro
+    environment:
+      - DATABASE_TYPE=postgresql
+      - DATABASE_URL=postgresql://fhir4ds:fhir4ds_password@postgres:5432/fhir4ds
+      - VIEWS_DIR=/app/views
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    profiles:
+      - postgresql
+
+  # PostgreSQL Database (for postgresql profile)
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: fhir4ds
+      POSTGRES_USER: fhir4ds
+      POSTGRES_PASSWORD: fhir4ds_password
+      POSTGRES_INITDB_ARGS: "--auth-host=md5"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fhir4ds -d fhir4ds"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    profiles:
+      - postgresql
+
+  # Development mode with hot reload
+  fhir4ds-dev:
+    build: 
+      context: .
+      target: builder
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - fhir4ds-data:/app/data
+    environment:
+      - DATABASE_TYPE=duckdb
+      - DATABASE_PATH=/app/data/fhir4ds.db
+      - RELOAD=true
+    command: ["python", "-m", "fhir4ds.server", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    profiles:
+      - dev
+
+volumes:
+  fhir4ds-data:
+    driver: local
+  postgres-data:
+    driver: local
+
+networks:
+  default:
+    name: fhir4ds-network

@@ -1,0 +1,23 @@
+{
+  "name": "omop_condition_occurrence_basic",
+  "resource": "Condition",
+  "description": "Basic OMOP Condition Occurrence mapping with essential fields only",
+  "select": [
+    {
+      "path": "id",
+      "name": "condition_occurrence_id"
+    },
+    {
+      "path": "subject.reference",
+      "name": "person_reference"
+    },
+    {
+      "path": "code.coding.first().code",
+      "name": "condition_source_value"
+    },
+    {
+      "path": "onset.ofType(dateTime)",
+      "name": "condition_start_datetime"
+    }
+  ]
+}

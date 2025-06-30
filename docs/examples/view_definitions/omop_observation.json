@@ -1,0 +1,158 @@
+{
+  "name": "omop_observation",
+  "resource": "Observation",
+  "description": "OMOP CDM Observation table mapping from FHIR Observation resources",
+  "select": [
+    {
+      "path": "id",
+      "name": "observation_id",
+      "description": "FHIR Observation ID as observation ID"
+    },
+    {
+      "path": "subject.reference",
+      "name": "person_source_value",
+      "description": "Patient reference extracted as person source value"
+    },
+    {
+      "path": "code.coding.first().code",
+      "name": "observation_source_value",
+      "description": "Primary observation code"
+    },
+    {
+      "path": "code.coding.first().system",
+      "name": "observation_source_vocabulary",
+      "description": "Coding system (LOINC, SNOMED, etc.)"
+    },
+    {
+      "path": "code.text",
+      "name": "observation_source_concept_name",
+      "description": "Human-readable observation description"
+    },
+    {
+      "path": "value.ofType(Quantity).value",
+      "name": "value_as_number",
+      "description": "Numeric value from Quantity"
+    },
+    {
+      "path": "value.ofType(Quantity).unit",
+      "name": "unit_source_value",
+      "description": "Unit from Quantity value"
+    },
+    {
+      "path": "value.ofType(string)",
+      "name": "value_as_string",
+      "description": "String value"
+    },
+    {
+      "path": "value.ofType(CodeableConcept).coding.first().code",
+      "name": "value_as_concept_code",
+      "description": "Coded value"
+    },
+    {
+      "path": "value.ofType(CodeableConcept).text",
+      "name": "value_as_concept_name",
+      "description": "Coded value description"
+    },
+    {
+      "path": "value.ofType(boolean)",
+      "name": "value_as_boolean",
+      "description": "Boolean value"
+    },
+    {
+      "path": "value.ofType(dateTime)",
+      "name": "value_as_datetime",
+      "description": "DateTime value"
+    },
+    {
+      "path": "effective.ofType(dateTime)",
+      "name": "observation_datetime",
+      "description": "Observation date/time"
+    },
+    {
+      "path": "effective.ofType(Period).start",
+      "name": "observation_period_start",
+      "description": "Observation period start"
+    },
+    {
+      "path": "effective.ofType(Period).end",
+      "name": "observation_period_end",
+      "description": "Observation period end"
+    },
+    {
+      "path": "issued",
+      "name": "observation_issued_datetime",
+      "description": "When observation was issued/reported"
+    },
+    {
+      "path": "status",
+      "name": "observation_status",
+      "description": "Observation status (final, preliminary, etc.)"
+    },
+    {
+      "path": "category.first().coding.first().code",
+      "name": "observation_category",
+      "description": "Observation category (vital-signs, laboratory, etc.)"
+    },
+    {
+      "path": "interpretation.first().coding.first().code",
+      "name": "observation_interpretation",
+      "description": "Clinical interpretation (normal, high, low, etc.)"
+    },
+    {
+      "path": "referenceRange.first().low.value",
+      "name": "range_low",
+      "description": "Reference range low value"
+    },
+    {
+      "path": "referenceRange.first().high.value",
+      "name": "range_high",
+      "description": "Reference range high value"
+    },
+    {
+      "path": "referenceRange.first().text",
+      "name": "range_text",
+      "description": "Reference range as text"
+    },
+    {
+      "path": "encounter.reference",
+      "name": "visit_occurrence_source_value",
+      "description": "Associated encounter/visit"
+    },
+    {
+      "path": "performer.first().reference",
+      "name": "provider_source_value",
+      "description": "Provider who performed the observation"
+    },
+    {
+      "path": "code.coding.where(system='http://loinc.org').code",
+      "name": "loinc_code",
+      "description": "LOINC code if available"
+    },
+    {
+      "path": "code.coding.where(system='http://snomed.info/sct').code",
+      "name": "snomed_code",
+      "description": "SNOMED CT code if available"
+    },
+    {
+      "path": "method.coding.first().code",
+      "name": "observation_method",
+      "description": "Observation method"
+    },
+    {
+      "path": "bodySite.coding.first().code",
+      "name": "observation_body_site",
+      "description": "Anatomical location"
+    },
+    {
+      "path": "device.reference",
+      "name": "device_source_value",
+      "description": "Device used for observation"
+    }
+  ],
+  "where": [
+    {
+      "path": "status = 'final' or status = 'corrected' or status = 'amended'",
+      "description": "Include only finalized observations"
+    }
+  ]
+}

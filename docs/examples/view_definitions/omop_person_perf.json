@@ -1,0 +1,32 @@
+{
+  "name": "omop_person_perf",
+  "resource": "Patient",
+  "description": "Simplified OMOP Person mapping for performance testing",
+  "select": [
+    {
+      "path": "id",
+      "name": "person_source_value"
+    },
+    {
+      "path": "gender",
+      "name": "gender_source_value"
+    },
+    {
+      "path": "birthDate",
+      "name": "birth_datetime"
+    },
+    {
+      "path": "deceased.ofType(dateTime)",
+      "name": "death_datetime"
+    },
+    {
+      "path": "address.first().state",
+      "name": "location_source_value"
+    }
+  ],
+  "where": [
+    {
+      "path": "active = true"
+    }
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "name": "omop_condition_occurrence",
+  "resource": "Condition",
+  "description": "OMOP CDM Condition Occurrence table mapping from FHIR Condition resources",
+  "select": [
+    {
+      "path": "id",
+      "name": "condition_occurrence_id",
+      "description": "FHIR Condition ID as condition occurrence ID"
+    },
+    {
+      "path": "subject.reference",
+      "name": "person_source_value",
+      "description": "Patient reference extracted as person source value"
+    },
+    {
+      "path": "code.coding.first().code",
+      "name": "condition_source_value",
+      "description": "Primary condition code"
+    },
+    {
+      "path": "code.coding.first().system",
+      "name": "condition_source_vocabulary",
+      "description": "Coding system (ICD-10-CM, SNOMED, etc.)"
+    },
+    {
+      "path": "code.text",
+      "name": "condition_source_concept_name",
+      "description": "Human-readable condition description"
+    },
+    {
+      "path": "onset.ofType(dateTime)",
+      "name": "condition_start_datetime",
+      "description": "Condition onset date/time"
+    },
+    {
+      "path": "onset.ofType(Period).start",
+      "name": "condition_start_datetime_period",
+      "description": "Condition start from Period"
+    },
+    {
+      "path": "abatement.ofType(dateTime)",
+      "name": "condition_end_datetime",
+      "description": "Condition resolution date/time"
+    },
+    {
+      "path": "abatement.ofType(Period).end",
+      "name": "condition_end_datetime_period",
+      "description": "Condition end from Period"
+    },
+    {
+      "path": "clinicalStatus.coding.first().code",
+      "name": "condition_status_source_value",
+      "description": "Clinical status (active, resolved, etc.)"
+    },
+    {
+      "path": "verificationStatus.coding.first().code",
+      "name": "condition_verification_status",
+      "description": "Verification status (confirmed, provisional, etc.)"
+    },
+    {
+      "path": "category.first().coding.first().code",
+      "name": "condition_type_source_value",
+      "description": "Condition category/type"
+    },
+    {
+      "path": "severity.coding.first().code",
+      "name": "condition_severity",
+      "description": "Condition severity"
+    },
+    {
+      "path": "encounter.reference",
+      "name": "visit_occurrence_source_value",
+      "description": "Associated encounter/visit"
+    },
+    {
+      "path": "recorder.reference",
+      "name": "provider_source_value",
+      "description": "Provider who recorded the condition"
+    },
+    {
+      "path": "code.coding.where(system='http://snomed.info/sct').code",
+      "name": "snomed_code",
+      "description": "SNOMED CT code if available"
+    },
+    {
+      "path": "code.coding.where(system='http://hl7.org/fhir/sid/icd-10-cm').code",
+      "name": "icd10_code",
+      "description": "ICD-10-CM code if available"
+    },
+    {
+      "path": "bodySite.first().coding.first().code",
+      "name": "condition_body_site",
+      "description": "Anatomical location"
+    }
+  ],
+  "where": [
+    {
+      "path": "clinicalStatus.exists()",
+      "description": "Include conditions with clinical status"
+    }
+  ]
+}

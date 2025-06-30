@@ -1,0 +1,15 @@
+{
+  "name": "simple_patient_fields",
+  "resource": "Patient",
+  "description": "Simple patient fields for basic testing",
+  "select": [
+    {
+      "path": "id",
+      "name": "patient_id"
+    },
+    {
+      "path": "gender",
+      "name": "gender"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "name": "perf_observation_choice_types",
+  "resource": "Bundle", 
+  "description": "Performance test for Observation value choice types (most common pattern)",
+  "select": [
+    {
+      "path": "entry.where(resource.resourceType='Observation').resource.id",
+      "name": "observation_id"
+    },
+    {
+      "path": "entry.where(resource.resourceType='Observation').resource.code.coding.code",
+      "name": "observation_code"
+    },
+    {
+      "path": "entry.where(resource.resourceType='Observation').resource.value.ofType(Quantity).value",
+      "name": "value_quantity_value"
+    },
+    {
+      "path": "entry.where(resource.resourceType='Observation').resource.value.ofType(Quantity).unit",
+      "name": "value_quantity_unit"
+    },
+    {
+      "path": "entry.where(resource.resourceType='Observation').resource.value.ofType(CodeableConcept).coding.code",
+      "name": "value_concept_code"
+    }
+  ]
+}

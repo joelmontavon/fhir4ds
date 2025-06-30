@@ -1,0 +1,228 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fhir4ds"
+version = "0.4.0"
+description = "Production-ready healthcare analytics platform providing 100% SQL-on-FHIR v2.0 compliance with dual database support (DuckDB + PostgreSQL)"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+    {name = "FHIR4DS Team", email = "fhir4ds@example.com"},
+]
+license = {text = "MIT"}
+keywords = [
+    "fhir", 
+    "sql", 
+    "healthcare", 
+    "viewdefinition", 
+    "fhirpath", 
+    "analytics",
+    "duckdb",
+    "postgresql",
+    "data-science"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Healthcare Industry",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+# Core dependencies
+dependencies = [
+    "duckdb>=0.8.0",
+    "numpy>=1.24.4",
+    "pandas>=1.5.0",
+    "psycopg2-binary>=2.9.10",
+    "pytest>=8.3.5",
+    "typing-extensions>=4.0.0",
+    "wheel>=0.45.1",
+]
+
+[project.optional-dependencies]
+# PostgreSQL support
+postgresql = [
+    "psycopg2-binary>=2.9.0",
+]
+
+# Server functionality
+server = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "pydantic>=2.0.0",
+]
+
+# Enhanced helpers and formatters
+helpers = [
+    "openpyxl>=3.0.0",  # Excel export
+    "pyarrow>=10.0.0",  # Parquet export
+]
+
+# Development dependencies
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=22.0.0",
+    "isort>=5.0.0",
+    "mypy>=1.0.0",
+    "flake8>=5.0.0",
+    "notebook>=6.0.0",
+    "jupyter>=1.0.0",
+]
+
+# All optional dependencies
+all = [
+    "fhir4ds[postgresql,server,helpers,dev]",
+]
+
+[project.urls]
+Documentation = "https://github.com/fhir4ds/fhir4ds"
+Repository = "https://github.com/fhir4ds/fhir4ds"
+"Bug Tracker" = "https://github.com/fhir4ds/fhir4ds/issues"
+Homepage = "https://github.com/fhir4ds/fhir4ds"
+
+[project.scripts]
+fhir4ds-server = "fhir4ds.server:main"
+
+# Hatch build configuration
+[tool.hatch.build.targets.wheel]
+packages = ["fhir4ds"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/fhir4ds",
+    "/tests",
+    "/docs",
+    "/README.md",
+    "/pyproject.toml",
+]
+exclude = [
+    "/datasets",
+    "/archive", 
+    "*.db",
+    "*.log",
+    "__pycache__",
+    "*.pyc",
+    "*.pyo",
+    ".pytest_cache",
+    ".mypy_cache",
+]
+
+# Testing configuration
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "--strict-markers --disable-warnings"
+markers = [
+    "unit: marks tests as unit tests",
+    "integration: marks tests as integration tests", 
+    "slow: marks tests as slow",
+    "postgresql: marks tests requiring PostgreSQL",
+    "duckdb: marks tests requiring DuckDB",
+]
+
+# Coverage configuration
+[tool.coverage.run]
+source = ["fhir4ds"]
+omit = [
+    "*/tests/*",
+    "*/debug_*",
+    "*/__pycache__/*",
+    "*/archive/*",
+    "*/datasets/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+
+# Code formatting with Black
+[tool.black]
+line-length = 88
+target-version = ['py38']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+  | archive
+  | datasets
+)/
+'''
+
+# Import sorting with isort
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+known_first_party = ["fhir4ds"]
+skip_glob = ["archive/*", "datasets/*"]
+
+# Type checking with MyPy
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "duckdb.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "psycopg2.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "pandas.*"
+ignore_missing_imports = true
+
+[tool.uv]
+dev-dependencies = [
+    "build>=1.2.2.post1",
+]

@@ -1,0 +1,68 @@
+{
+  "name": "omop_person",
+  "resource": "Patient",
+  "description": "OMOP CDM Person table mapping from FHIR Patient resources",
+  "select": [
+    {
+      "path": "id",
+      "name": "person_source_value",
+      "description": "FHIR Patient ID as person source value"
+    },
+    {
+      "path": "gender",
+      "name": "gender_source_value",
+      "description": "FHIR gender value"
+    },
+    {
+      "path": "birthDate",
+      "name": "birth_datetime",
+      "description": "Patient birth date"
+    },
+    {
+      "path": "deceased.ofType(dateTime)",
+      "name": "death_datetime",
+      "description": "Death date if patient is deceased"
+    },
+    {
+      "path": "deceased.ofType(boolean)",
+      "name": "death_indicator",
+      "description": "Boolean indicator if patient is deceased"
+    },
+    {
+      "path": "extension.where(url='http://hl7.org/fhir/us/core/StructureDefinition/us-core-race').extension.where(url='ombCategory').value.ofType(Coding).code",
+      "name": "race_source_value",
+      "description": "Race information from US Core extension"
+    },
+    {
+      "path": "extension.where(url='http://hl7.org/fhir/us/core/StructureDefinition/us-core-ethnicity').extension.where(url='ombCategory').value.ofType(Coding).code",
+      "name": "ethnicity_source_value",
+      "description": "Ethnicity information from US Core extension"
+    },
+    {
+      "path": "address.where(use='home').state",
+      "name": "location_source_value",
+      "description": "Home state/province"
+    },
+    {
+      "path": "address.where(use='home').postalCode",
+      "name": "zip_source_value",
+      "description": "Home postal code"
+    },
+    {
+      "path": "generalPractitioner.first().reference",
+      "name": "provider_source_value",
+      "description": "Primary care provider reference"
+    },
+    {
+      "path": "managingOrganization.reference",
+      "name": "care_site_source_value",
+      "description": "Managing organization reference"
+    }
+  ],
+  "where": [
+    {
+      "path": "active = true",
+      "description": "Only include active patients"
+    }
+  ]
+}

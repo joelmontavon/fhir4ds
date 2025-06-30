@@ -1,0 +1,31 @@
+{
+  "name": "perf_medication_requests",
+  "resource": "Bundle", 
+  "description": "Performance test for MedicationRequest resources with complex dosage",
+  "select": [
+    {
+      "path": "entry.where(resource.resourceType='MedicationRequest').resource.id",
+      "name": "medication_request_id"
+    },
+    {
+      "path": "entry.where(resource.resourceType='MedicationRequest').resource.status",
+      "name": "status"
+    },
+    {
+      "path": "entry.where(resource.resourceType='MedicationRequest').resource.subject.reference",
+      "name": "patient_reference"
+    },
+    {
+      "path": "entry.where(resource.resourceType='MedicationRequest').resource.medication.ofType(CodeableConcept).coding.code",
+      "name": "medication_code"
+    },
+    {
+      "path": "entry.where(resource.resourceType='MedicationRequest').resource.dosageInstruction.first().doseAndRate.first().dose.ofType(Quantity).value",
+      "name": "dose_value"
+    },
+    {
+      "path": "entry.where(resource.resourceType='MedicationRequest').resource.dosageInstruction.first().doseAndRate.first().dose.ofType(Quantity).unit",
+      "name": "dose_unit"
+    }
+  ]
+}

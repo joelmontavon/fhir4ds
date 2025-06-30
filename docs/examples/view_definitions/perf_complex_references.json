@@ -1,0 +1,27 @@
+{
+  "name": "perf_complex_references",
+  "resource": "Bundle",
+  "description": "Performance test for complex reference resolution patterns",
+  "select": [
+    {
+      "path": "entry.where(resource.resourceType='Encounter').resource.id",
+      "name": "encounter_id"
+    },
+    {
+      "path": "entry.where(resource.resourceType='Encounter').resource.subject.reference",
+      "name": "patient_reference"
+    },
+    {
+      "path": "entry.where(resource.resourceType='Encounter').resource.participant.individual.reference",
+      "name": "practitioner_references"
+    },
+    {
+      "path": "entry.where(resource.resourceType='Encounter').resource.location.location.reference", 
+      "name": "location_references"
+    },
+    {
+      "path": "entry.where(resource.resourceType='Encounter').resource.serviceProvider.reference",
+      "name": "organization_reference"
+    }
+  ]
+}
