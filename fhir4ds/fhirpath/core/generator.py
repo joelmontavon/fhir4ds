@@ -74,7 +74,7 @@ class SQLGenerator:
         if ast_nodes_module is None:
             from ..parser.ast_nodes import (
                 ASTNode, ThisNode, LiteralNode, IdentifierNode, FunctionCallNode,
-                BinaryOpNode, UnaryOpNode, PathNode, IndexerNode
+                BinaryOpNode, UnaryOpNode, PathNode, IndexerNode, TupleNode
             )
             self.ASTNode = ASTNode
             self.ThisNode = ThisNode
@@ -85,11 +85,12 @@ class SQLGenerator:
             self.UnaryOpNode = UnaryOpNode
             self.PathNode = PathNode
             self.IndexerNode = IndexerNode
+            self.TupleNode = TupleNode
         else:
             # Use injected AST nodes
             (self.ASTNode, self.ThisNode, self.LiteralNode, self.IdentifierNode, 
              self.FunctionCallNode, self.BinaryOpNode, self.UnaryOpNode, 
-             self.PathNode, self.IndexerNode) = ast_nodes_module
+             self.PathNode, self.IndexerNode, self.TupleNode) = ast_nodes_module
             
         if constants_module is None:
             from .constants import FHIR_PRIMITIVE_TYPES_AS_STRING, SQL_OPERATORS
@@ -135,6 +136,41 @@ class SQLGenerator:
             'startswith': CTEConfig(90, 0, 1), 'endswith': CTEConfig(90, 0, 1), 'indexof': CTEConfig(90, 0, 1),
             'trim': CTEConfig(90, 0, 1), 'toupper': CTEConfig(90, 0, 1), 'tolower': CTEConfig(90, 0, 1),
             'tostring': CTEConfig(90, 0, 1), 'tointeger': CTEConfig(90, 0, 1),
+            
+            # Math functions
+            'abs': CTEConfig(50, 0, 1),      # Low complexity
+            'ceiling': CTEConfig(50, 0, 1),  # Low complexity
+            'floor': CTEConfig(50, 0, 1),    # Low complexity
+            'round': CTEConfig(60, 0, 1),    # Medium complexity (optional precision)
+            'sqrt': CTEConfig(50, 0, 1),     # Low complexity
+            'truncate': CTEConfig(50, 0, 1), # Low complexity
+            
+            # Temporal functions
+            'now': CTEConfig(50, 0, 1),      # Low complexity
+            'today': CTEConfig(50, 0, 1),    # Low complexity
+            'timeofday': CTEConfig(50, 0, 1), # Low complexity
+            
+            # Debug functions
+            'trace': CTEConfig(80, 0, 1),    # Medium complexity (optional projection)
+            
+            # Advanced collection functions
+            'aggregate': CTEConfig(200, 2, 3, 100),  # High complexity (custom aggregation functions)
+            'flatten': CTEConfig(150, 1, 2, 80),     # Medium-high complexity (recursive flattening)
+            
+            # FHIR-specific type testing functions
+            'convertstoquantity': CTEConfig(100, 1, 2, 60),  # Medium complexity (type conversion validation)
+            'hasvalue': CTEConfig(80, 0, 1, 50),             # Medium complexity (value existence checking)
+            'hascodedvalue': CTEConfig(120, 1, 2, 70),       # Medium-high complexity (coded value validation)
+            'htmlchecks': CTEConfig(150, 1, 2, 80),          # Medium-high complexity (HTML validation)
+            'hastemplateidof': CTEConfig(100, 1, 2, 60),     # Medium complexity (template ID validation)
+            
+            # String encoding/decoding functions
+            'encode': CTEConfig(90, 0, 1, 50),               # Medium complexity (URL encoding)
+            'decode': CTEConfig(90, 0, 1, 50),               # Medium complexity (URL decoding)
+            
+            # Advanced FHIR functions
+            'conformsto': CTEConfig(200, 1, 2, 100),         # High complexity (profile conformance checking)
+            'memberof': CTEConfig(180, 1, 2, 90),            # High complexity (ValueSet membership)
         }
         
         # Default configuration for unlisted functions
@@ -1558,6 +1594,39 @@ class SQLGenerator:
         """, "getreferencekey_result")
         
         return f"(SELECT getreferencekey_result FROM {getreferencekey_cte_name})"
+
+    def _generate_abs_with_cte(self, func_node, base_expr: str) -> str:
+        """Generate abs() function using CTE approach"""
+        
+        # For abs() function, we need to handle scalar subqueries correctly
+        # Use the same pattern as other math functions
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "abs_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for abs operation with proper scalar handling
+        abs_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    WHEN {base_ref} IS NOT NULL THEN
+                        ABS(CAST({base_ref} AS DOUBLE))
+                    ELSE NULL
+                END as abs_result
+            FROM {from_clause}
+        """, "abs_result")
+        
+        return f"(SELECT abs_result FROM {abs_cte_name} LIMIT 1)"
     
     def visit(self, node) -> str:
         """Visit an AST node and generate SQL"""
@@ -1577,6 +1646,8 @@ class SQLGenerator:
             return self.visit_unary_op(node)
         elif isinstance(node, self.IndexerNode):
             return self.visit_indexer(node)
+        elif isinstance(node, self.TupleNode):
+            return self.visit_tuple(node)
         else:
             raise ValueError(f"Unknown node type: {type(node)}")
     
@@ -2805,6 +2876,617 @@ class SQLGenerator:
             # Original implementation (fallback)
             # Return the resource ID as the key
             return f"json_extract_string({self.json_column}, '$.id')"
+            
+        elif func_name == 'abs':
+            # abs() function - absolute value
+            if len(func_node.args) != 0:
+                raise ValueError("abs() function takes no arguments")
+            
+            # Direct implementation - avoid CTE for now due to scalar subquery issues
+            # TODO: Fix CTE implementation to handle scalar subqueries correctly
+            return f"ABS(CAST({base_expr} AS DOUBLE))"
+            
+        elif func_name == 'ceiling':
+            # ceiling() function - round up to integer
+            if len(func_node.args) != 0:
+                raise ValueError("ceiling() function takes no arguments")
+            
+            # Direct implementation - avoid CTE for now due to scalar subquery issues
+            # TODO: Fix CTE implementation to handle scalar subqueries correctly
+            return f"CEIL(CAST({base_expr} AS DOUBLE))"
+            
+        elif func_name == 'floor':
+            # floor() function - round down to integer
+            if len(func_node.args) != 0:
+                raise ValueError("floor() function takes no arguments")
+            
+            # Direct implementation - avoid CTE for now due to scalar subquery issues
+            # TODO: Fix CTE implementation to handle scalar subqueries correctly
+            return f"FLOOR(CAST({base_expr} AS DOUBLE))"
+            
+        elif func_name == 'round':
+            # round() function - round to nearest integer with optional precision
+            if len(func_node.args) == 0:
+                # round() without precision - round to nearest integer
+                return f"ROUND(CAST({base_expr} AS DOUBLE))"
+            elif len(func_node.args) == 1:
+                # round(precision) with precision
+                precision_expr = self.visit(func_node.args[0])
+                return f"ROUND(CAST({base_expr} AS DOUBLE), CAST({precision_expr} AS INTEGER))"
+            else:
+                raise ValueError("round() function takes 0 or 1 arguments")
+                
+        elif func_name == 'sqrt':
+            # sqrt() function - square root
+            if len(func_node.args) != 0:
+                raise ValueError("sqrt() function takes no arguments")
+            
+            # Direct implementation - avoid CTE for now due to scalar subquery issues
+            # TODO: Fix CTE implementation to handle scalar subqueries correctly
+            # Note: Need to handle negative numbers (sqrt of negative is null/error)
+            return f"CASE WHEN CAST({base_expr} AS DOUBLE) >= 0 THEN SQRT(CAST({base_expr} AS DOUBLE)) ELSE NULL END"
+            
+        elif func_name == 'truncate':
+            # truncate() function - remove decimal part (round towards zero)
+            if len(func_node.args) != 0:
+                raise ValueError("truncate() function takes no arguments")
+            
+            # Direct implementation - avoid CTE for now due to scalar subquery issues
+            # TODO: Fix CTE implementation to handle scalar subqueries correctly
+            # TRUNCATE function removes decimal part by rounding towards zero
+            # For positive numbers: TRUNCATE(3.7) = 3, for negative: TRUNCATE(-3.7) = -3
+            return f"TRUNC(CAST({base_expr} AS DOUBLE))"
+            
+        elif func_name == 'now':
+            # now() function - returns current datetime
+            if len(func_node.args) != 0:
+                raise ValueError("now() function takes no arguments")
+            
+            # Direct implementation - returns current timestamp
+            # Note: This is a context-independent function (doesn't use base_expr)
+            return f"CURRENT_TIMESTAMP"
+            
+        elif func_name == 'today':
+            # today() function - returns current date
+            if len(func_node.args) != 0:
+                raise ValueError("today() function takes no arguments")
+            
+            # Direct implementation - returns current date
+            # Note: This is a context-independent function (doesn't use base_expr)
+            return f"CURRENT_DATE"
+            
+        elif func_name == 'timeofday':
+            # timeOfDay() function - returns current time
+            if len(func_node.args) != 0:
+                raise ValueError("timeOfDay() function takes no arguments")
+            
+            # Direct implementation - returns current time
+            # Note: This is a context-independent function (doesn't use base_expr)
+            return f"CURRENT_TIME"
+            
+        elif func_name == 'trace':
+            # trace(name[, projection]) function - debug tracing functionality
+            if len(func_node.args) < 1 or len(func_node.args) > 2:
+                raise ValueError("trace() function requires 1 or 2 arguments: name[, projection]")
+            
+            # Get the trace name
+            trace_name_expr = self.visit(func_node.args[0])
+            
+            # Handle optional projection argument
+            if len(func_node.args) == 2:
+                projection_expr = self.visit(func_node.args[1])
+                # Apply projection to base_expr, then trace with name
+                traced_expr = f"({projection_expr})"
+            else:
+                # No projection, trace the base expression directly
+                traced_expr = base_expr
+            
+            # For now, trace function just returns the traced expression
+            # In a production system, this would log to a debug system
+            # TODO: Integrate with actual logging system
+            return traced_expr
+            
+        elif func_name == 'aggregate':
+            # aggregate(aggregator[, init]) function - custom aggregation functionality
+            if len(func_node.args) < 1 or len(func_node.args) > 2:
+                raise ValueError("aggregate() function requires 1 or 2 arguments: aggregator[, init]")
+            
+            # Get the aggregator expression
+            aggregator_expr = self.visit(func_node.args[0])
+            
+            # Handle optional init value
+            if len(func_node.args) == 2:
+                init_expr = self.visit(func_node.args[1])
+            else:
+                init_expr = "NULL"
+            
+            # For now, implement basic aggregation using array_agg
+            # TODO: Implement full custom aggregation logic
+            return f"""
+            COALESCE(
+                (SELECT {self.dialect.array_agg_function}({aggregator_expr}) 
+                 FROM (
+                     SELECT value 
+                     FROM {self.dialect.json_each_function}(
+                         CASE WHEN {self.dialect.json_type_function}({base_expr}) = 'ARRAY' 
+                         THEN {base_expr} 
+                         ELSE {self.dialect.json_array_function}({base_expr}) END
+                     ) AS t
+                     WHERE value IS NOT NULL
+                 ) AS items),
+                {init_expr}
+            )
+            """
+            
+        elif func_name == 'flatten':
+            # flatten() function - flattens nested collections
+            if len(func_node.args) != 0:
+                raise ValueError("flatten() function takes no arguments")
+            
+            # Implement recursive flattening using JSON functions
+            return f"""
+            (SELECT {self.dialect.json_array_function}(
+                CASE 
+                    WHEN {self.dialect.json_type_function}(outer.value) = 'ARRAY' THEN
+                        (SELECT {self.dialect.json_array_function}(nested.value)
+                         FROM {self.dialect.json_each_function}(outer.value) AS nested
+                         WHERE nested.value IS NOT NULL)
+                    ELSE outer.value
+                END
+            )
+            FROM {self.dialect.json_each_function}(
+                CASE WHEN {self.dialect.json_type_function}({base_expr}) = 'ARRAY' 
+                THEN {base_expr} 
+                ELSE {self.dialect.json_array_function}({base_expr}) END
+            ) AS outer
+            WHERE outer.value IS NOT NULL)
+            """
+            
+        elif func_name == 'convertstoquantity':
+            # convertsToQuantity() function - tests if value can be converted to a FHIR Quantity
+            if len(func_node.args) != 0:
+                raise ValueError("convertsToQuantity() function takes no arguments")
+            
+            # Check if the value can be converted to a FHIR Quantity
+            # A value can be converted to Quantity if it's:
+            # 1. Already a Quantity object with value and optionally unit
+            # 2. A numeric value (which can become a Quantity with just value)
+            # 3. A string that represents a valid quantity (e.g., "5 mg", "10.5", "100 units")
+            return f"""
+            CASE 
+                -- Check if it's already a Quantity object
+                WHEN {self.dialect.json_type_function}({base_expr}) = 'OBJECT' AND 
+                     {self.dialect.json_extract_function}({base_expr}, '$.value') IS NOT NULL 
+                THEN TRUE
+                -- Check if it's a numeric value (can be converted to Quantity)
+                WHEN {self.dialect.json_type_function}({base_expr}) IN ('DOUBLE', 'BIGINT', 'INTEGER', 'FLOAT', 'DECIMAL', 'NUMBER') 
+                THEN TRUE
+                -- Check if it's a string that can be parsed as a quantity
+                WHEN {self.dialect.json_type_function}({base_expr}) IN ('VARCHAR', 'STRING', 'TEXT') THEN
+                    CASE 
+                        -- Simple numeric string
+                        WHEN {self.dialect.json_extract_string_function}({base_expr}, '$') ~ '^[+-]?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?$' 
+                        THEN TRUE
+                        -- Numeric string with unit (basic pattern)
+                        WHEN {self.dialect.json_extract_string_function}({base_expr}, '$') ~ '^[+-]?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?\\s+[a-zA-Z]+.*$' 
+                        THEN TRUE
+                        ELSE FALSE
+                    END
+                ELSE FALSE
+            END
+            """
+            
+        elif func_name == 'hasvalue':
+            # hasValue() function - tests if value exists (not null/empty)
+            if len(func_node.args) != 0:
+                raise ValueError("hasValue() function takes no arguments")
+            
+            # Check if the value exists and is not null
+            # According to FHIR spec, hasValue() returns true if the value is not null and not empty
+            return f"""
+            CASE 
+                -- Check if value is not null and not empty
+                WHEN {base_expr} IS NOT NULL AND 
+                     {self.dialect.json_type_function}({base_expr}) != 'NULL' AND
+                     (
+                         -- For strings, check if not empty
+                         ({self.dialect.json_type_function}({base_expr}) IN ('VARCHAR', 'STRING', 'TEXT') AND 
+                          {self.dialect.json_extract_string_function}({base_expr}, '$') != '') OR
+                         -- For arrays, check if not empty
+                         ({self.dialect.json_type_function}({base_expr}) = 'ARRAY' AND 
+                          {self.dialect.json_array_length_function}({base_expr}) > 0) OR
+                         -- For objects, check if not empty
+                         ({self.dialect.json_type_function}({base_expr}) = 'OBJECT' AND 
+                          {self.dialect.json_extract_function}({base_expr}, '$') != '{{}}') OR
+                         -- For numeric types, always true if not null
+                         {self.dialect.json_type_function}({base_expr}) IN ('DOUBLE', 'BIGINT', 'INTEGER', 'FLOAT', 'DECIMAL', 'NUMBER') OR
+                         -- For boolean types, always true if not null
+                         {self.dialect.json_type_function}({base_expr}) = 'BOOLEAN'
+                     )
+                THEN TRUE
+                ELSE FALSE
+            END
+            """
+
+        elif func_name == 'hascodedvalue':
+            # hasCodedValue() function - tests if value is a coded value (CodeableConcept or Coding)
+            if len(func_node.args) != 0:
+                raise ValueError("hasCodedValue() function takes no arguments")
+            
+            # Check if the value is a coded value according to FHIR specification
+            # A coded value is either a CodeableConcept or a Coding object
+            return f"""
+            CASE 
+                -- Check if it's a CodeableConcept (has 'coding' array)
+                WHEN {base_expr} IS NOT NULL AND 
+                     {self.dialect.json_type_function}({base_expr}) = 'OBJECT' AND 
+                     {self.dialect.json_extract_function}({base_expr}, '$.coding') IS NOT NULL AND
+                     {self.dialect.json_type_function}({self.dialect.json_extract_function}({base_expr}, '$.coding')) = 'ARRAY' AND
+                     {self.dialect.json_array_length_function}({self.dialect.json_extract_function}({base_expr}, '$.coding')) > 0
+                THEN TRUE
+                -- Check if it's a Coding (has 'system' and/or 'code' properties)
+                WHEN {base_expr} IS NOT NULL AND 
+                     {self.dialect.json_type_function}({base_expr}) = 'OBJECT' AND 
+                     (
+                         {self.dialect.json_extract_function}({base_expr}, '$.system') IS NOT NULL OR
+                         {self.dialect.json_extract_function}({base_expr}, '$.code') IS NOT NULL
+                     )
+                THEN TRUE
+                -- Check if it's a simple string code (in some contexts)
+                WHEN {base_expr} IS NOT NULL AND 
+                     {self.dialect.json_type_function}({base_expr}) IN ('VARCHAR', 'STRING', 'TEXT') AND
+                     {self.dialect.json_extract_string_function}({base_expr}, '$') != ''
+                THEN TRUE
+                ELSE FALSE
+            END
+            """
+
+        elif func_name == 'htmlchecks':
+            # htmlChecks() function - performs HTML validation and security checks
+            if len(func_node.args) != 0:
+                raise ValueError("htmlChecks() function takes no arguments")
+            
+            # Check for HTML content and potential security issues
+            # This is a simplified implementation - in production, you'd want more comprehensive checks
+            return f"""
+            CASE 
+                -- Check if it's a string that might contain HTML
+                WHEN {base_expr} IS NOT NULL AND 
+                     {self.dialect.json_type_function}({base_expr}) IN ('VARCHAR', 'STRING', 'TEXT')
+                THEN
+                    CASE 
+                        -- Check for HTML tags
+                        WHEN {self.dialect.json_extract_string_function}({base_expr}, '$') ~ '<[^>]*>' THEN
+                            CASE 
+                                -- Check for potentially dangerous tags/attributes
+                                WHEN {self.dialect.json_extract_string_function}({base_expr}, '$') ~ '(?i)<(script|iframe|object|embed|form|input|meta|link|style)' OR
+                                     {self.dialect.json_extract_string_function}({base_expr}, '$') ~ '(?i)(javascript:|vbscript:|data:|on\\w+\\s*=)' OR
+                                     {self.dialect.json_extract_string_function}({base_expr}, '$') ~ '(?i)(expression\\s*\\(|@import|behavior\\s*:)'
+                                THEN 'unsafe'
+                                -- Check for incomplete or malformed tags
+                                WHEN {self.dialect.json_extract_string_function}({base_expr}, '$') ~ '<[^>]*$' OR
+                                     {self.dialect.json_extract_string_function}({base_expr}, '$') ~ '[^<]*>' OR
+                                     {self.dialect.json_extract_string_function}({base_expr}, '$') ~ '<[^>]*</[^>]*[^>]$'
+                                THEN 'malformed'
+                                -- Basic HTML content that appears safe
+                                ELSE 'safe'
+                            END
+                        -- Plain text (no HTML tags)
+                        ELSE 'text'
+                    END
+                -- Non-string values
+                ELSE 'non-string'
+            END
+            """
+
+        elif func_name == 'hastemplateidof':
+            # hasTemplateIdOf() function - checks if value has a specific template ID
+            if len(func_node.args) != 1:
+                raise ValueError("hasTemplateIdOf() function takes exactly one argument")
+            
+            # Get the template ID to check for
+            template_id_arg = func_node.args[0]
+            if hasattr(template_id_arg, 'value'):
+                template_id = template_id_arg.value
+            else:
+                template_id = str(template_id_arg)
+            
+            # Escape the template_id for SQL injection prevention
+            template_id = template_id.replace("'", "''")
+            
+            # Check if the value has the specified template ID
+            # Template IDs are typically found in extensions or meta.profile
+            return f"""
+            CASE 
+                -- Check if it's an object that might contain template IDs
+                WHEN {base_expr} IS NOT NULL AND 
+                     {self.dialect.json_type_function}({base_expr}) = 'OBJECT'
+                THEN
+                    CASE 
+                        -- Check in meta.profile array
+                        WHEN {self.dialect.json_extract_function}({base_expr}, '$.meta.profile') IS NOT NULL AND
+                             {self.dialect.json_type_function}({self.dialect.json_extract_function}({base_expr}, '$.meta.profile')) = 'ARRAY'
+                        THEN
+                            CASE 
+                                WHEN EXISTS (
+                                    SELECT 1 FROM json_each({self.dialect.json_extract_function}({base_expr}, '$.meta.profile')) 
+                                    WHERE {self.dialect.json_extract_string_function}(value, '$') = '{template_id}'
+                                )
+                                THEN TRUE
+                                ELSE FALSE
+                            END
+                        -- Check in templateId extension (common in CDA-style templates)
+                        WHEN {self.dialect.json_extract_function}({base_expr}, '$.templateId') IS NOT NULL
+                        THEN
+                            CASE 
+                                -- Single templateId object
+                                WHEN {self.dialect.json_type_function}({self.dialect.json_extract_function}({base_expr}, '$.templateId')) = 'OBJECT' AND
+                                     {self.dialect.json_extract_string_function}({self.dialect.json_extract_function}({base_expr}, '$.templateId'), '$.root') = '{template_id}'
+                                THEN TRUE
+                                -- Array of templateId objects
+                                WHEN {self.dialect.json_type_function}({self.dialect.json_extract_function}({base_expr}, '$.templateId')) = 'ARRAY' AND
+                                     EXISTS (
+                                         SELECT 1 FROM json_each({self.dialect.json_extract_function}({base_expr}, '$.templateId')) 
+                                         WHERE {self.dialect.json_extract_string_function}(value, '$.root') = '{template_id}'
+                                     )
+                                THEN TRUE
+                                ELSE FALSE
+                            END
+                        -- Check in extensions for template-related URLs
+                        WHEN {self.dialect.json_extract_function}({base_expr}, '$.extension') IS NOT NULL AND
+                             {self.dialect.json_type_function}({self.dialect.json_extract_function}({base_expr}, '$.extension')) = 'ARRAY'
+                        THEN
+                            CASE 
+                                WHEN EXISTS (
+                                    SELECT 1 FROM json_each({self.dialect.json_extract_function}({base_expr}, '$.extension')) 
+                                    WHERE {self.dialect.json_extract_string_function}(value, '$.url') LIKE '%template%' AND
+                                          ({self.dialect.json_extract_string_function}(value, '$.valueString') = '{template_id}' OR
+                                           {self.dialect.json_extract_string_function}(value, '$.valueUri') = '{template_id}')
+                                )
+                                THEN TRUE
+                                ELSE FALSE
+                            END
+                        -- Check direct string comparison for simple cases
+                        ELSE FALSE
+                    END
+                -- For string values, check direct comparison
+                WHEN {base_expr} IS NOT NULL AND 
+                     {self.dialect.json_type_function}({base_expr}) IN ('VARCHAR', 'STRING', 'TEXT') AND
+                     {self.dialect.json_extract_string_function}({base_expr}, '$') = '{template_id}'
+                THEN TRUE
+                ELSE FALSE
+            END
+            """
+
+        elif func_name == 'encode':
+            # encode() function - URL/percent encoding of strings
+            if len(func_node.args) != 0:
+                raise ValueError("encode() function takes no arguments")
+            
+            # URL encode the string value
+            # In SQL, we need to implement URL encoding manually since there's no standard function
+            return f"""
+            CASE 
+                -- Only encode string values
+                WHEN {base_expr} IS NOT NULL AND 
+                     {self.dialect.json_type_function}({base_expr}) IN ('VARCHAR', 'STRING', 'TEXT')
+                THEN
+                    -- Basic URL encoding implementation
+                    -- This is a simplified implementation - production systems might use stored procedures
+                    REPLACE(
+                        REPLACE(
+                            REPLACE(
+                                REPLACE(
+                                    REPLACE(
+                                        REPLACE(
+                                            REPLACE(
+                                                REPLACE(
+                                                    REPLACE(
+                                                        REPLACE(
+                                                            {self.dialect.json_extract_string_function}({base_expr}, '$'),
+                                                            '%', '%25'
+                                                        ),
+                                                        ' ', '%20'
+                                                    ),
+                                                    '!', '%21'
+                                                ),
+                                                '#', '%23'
+                                            ),
+                                            '$', '%24'
+                                        ),
+                                        '&', '%26'
+                                    ),
+                                    '''', '%27'
+                                ),
+                                '(', '%28'
+                            ),
+                            ')', '%29'
+                        ),
+                        '+', '%2B'
+                    )
+                -- Non-string values return null
+                ELSE NULL
+            END
+            """
+
+        elif func_name == 'decode':
+            # decode() function - URL/percent decoding of strings
+            if len(func_node.args) != 0:
+                raise ValueError("decode() function takes no arguments")
+            
+            # URL decode the string value
+            # In SQL, we need to implement URL decoding manually since there's no standard function
+            return f"""
+            CASE 
+                -- Only decode string values
+                WHEN {base_expr} IS NOT NULL AND 
+                     {self.dialect.json_type_function}({base_expr}) IN ('VARCHAR', 'STRING', 'TEXT')
+                THEN
+                    -- Basic URL decoding implementation (reverse of encode)
+                    -- This is a simplified implementation - production systems might use stored procedures
+                    REPLACE(
+                        REPLACE(
+                            REPLACE(
+                                REPLACE(
+                                    REPLACE(
+                                        REPLACE(
+                                            REPLACE(
+                                                REPLACE(
+                                                    REPLACE(
+                                                        REPLACE(
+                                                            {self.dialect.json_extract_string_function}({base_expr}, '$'),
+                                                            '%2B', '+'
+                                                        ),
+                                                        '%29', ')'
+                                                    ),
+                                                    '%28', '('
+                                                ),
+                                                '%27', ''''
+                                            ),
+                                            '%26', '&'
+                                        ),
+                                        '%24', '$'
+                                    ),
+                                    '%23', '#'
+                                ),
+                                '%21', '!'
+                            ),
+                            '%20', ' '
+                        ),
+                        '%25', '%'
+                    )
+                -- Non-string values return null
+                ELSE NULL
+            END
+            """
+
+        elif func_name == 'conformsto':
+            # conformsTo() function - checks if resource conforms to a profile
+            if len(func_node.args) != 1:
+                raise ValueError("conformsTo() function takes exactly one argument")
+            
+            # Get the profile URI to check for
+            profile_uri_arg = func_node.args[0]
+            if hasattr(profile_uri_arg, 'value'):
+                profile_uri = profile_uri_arg.value
+            else:
+                profile_uri = str(profile_uri_arg)
+            
+            # Escape the profile_uri for SQL injection prevention
+            profile_uri = profile_uri.replace("'", "''")
+            
+            # Check if the resource conforms to the specified profile
+            # This is a simplified implementation - full conformance checking would require
+            # validating against the actual profile definition
+            return f"""
+            CASE 
+                -- Check if it's a FHIR resource that might have profile information
+                WHEN {base_expr} IS NOT NULL AND 
+                     {self.dialect.json_type_function}({base_expr}) = 'OBJECT' AND
+                     {self.dialect.json_extract_function}({base_expr}, '$.resourceType') IS NOT NULL
+                THEN
+                    CASE 
+                        -- Check in meta.profile array
+                        WHEN {self.dialect.json_extract_function}({base_expr}, '$.meta.profile') IS NOT NULL AND
+                             {self.dialect.json_type_function}({self.dialect.json_extract_function}({base_expr}, '$.meta.profile')) = 'ARRAY'
+                        THEN
+                            CASE 
+                                WHEN EXISTS (
+                                    SELECT 1 FROM json_each({self.dialect.json_extract_function}({base_expr}, '$.meta.profile')) 
+                                    WHERE {self.dialect.json_extract_string_function}(value, '$') = '{profile_uri}'
+                                )
+                                THEN TRUE
+                                ELSE FALSE
+                            END
+                        -- Check if it's a base resource type match (simplified conformance)
+                        WHEN '{profile_uri}' LIKE '%' || {self.dialect.json_extract_string_function}({base_expr}, '$.resourceType') || '%'
+                        THEN TRUE
+                        -- Check for implicit conformance based on resource type
+                        WHEN '{profile_uri}' LIKE 'http://hl7.org/fhir/StructureDefinition/%' AND
+                             LOWER('{profile_uri}') LIKE '%' || LOWER({self.dialect.json_extract_string_function}({base_expr}, '$.resourceType')) || '%'
+                        THEN TRUE
+                        ELSE FALSE
+                    END
+                -- Non-resource values cannot conform to profiles
+                ELSE FALSE
+            END
+            """
+
+        elif func_name == 'memberof':
+            # memberOf() function - checks if coded value is a member of a ValueSet
+            if len(func_node.args) != 1:
+                raise ValueError("memberOf() function takes exactly one argument")
+            
+            # Get the ValueSet URI to check for membership
+            valueset_uri_arg = func_node.args[0]
+            if hasattr(valueset_uri_arg, 'value'):
+                valueset_uri = valueset_uri_arg.value
+            else:
+                valueset_uri = str(valueset_uri_arg)
+            
+            # Escape the valueset_uri for SQL injection prevention
+            valueset_uri = valueset_uri.replace("'", "''")
+            
+            # Check if the coded value is a member of the specified ValueSet
+            # This is a simplified implementation - full ValueSet membership would require
+            # resolving the actual ValueSet definition and checking all included codes
+            return f"""
+            CASE 
+                -- Check if it's a coded value (CodeableConcept or Coding)
+                WHEN {base_expr} IS NOT NULL AND 
+                     {self.dialect.json_type_function}({base_expr}) = 'OBJECT'
+                THEN
+                    CASE 
+                        -- Check if it's a CodeableConcept with coding array
+                        WHEN {self.dialect.json_extract_function}({base_expr}, '$.coding') IS NOT NULL AND
+                             {self.dialect.json_type_function}({self.dialect.json_extract_function}({base_expr}, '$.coding')) = 'ARRAY' AND
+                             {self.dialect.json_array_length_function}({self.dialect.json_extract_function}({base_expr}, '$.coding')) > 0
+                        THEN
+                            CASE 
+                                -- Check if any coding in the array matches the ValueSet
+                                WHEN EXISTS (
+                                    SELECT 1 FROM json_each({self.dialect.json_extract_function}({base_expr}, '$.coding')) 
+                                    WHERE {self.dialect.json_extract_string_function}(value, '$.system') IS NOT NULL AND
+                                          (
+                                              -- Direct system match (simplified ValueSet membership)
+                                              {self.dialect.json_extract_string_function}(value, '$.system') = '{valueset_uri}' OR
+                                              -- Check if the system is part of the ValueSet URI
+                                              '{valueset_uri}' LIKE '%' || {self.dialect.json_extract_string_function}(value, '$.system') || '%' OR
+                                              -- Check if the ValueSet references the system
+                                              {self.dialect.json_extract_string_function}(value, '$.system') LIKE '%' || REPLACE('{valueset_uri}', 'ValueSet/', '') || '%'
+                                          )
+                                )
+                                THEN TRUE
+                                ELSE FALSE
+                            END
+                        -- Check if it's a direct Coding object
+                        WHEN {self.dialect.json_extract_function}({base_expr}, '$.system') IS NOT NULL AND
+                             {self.dialect.json_extract_function}({base_expr}, '$.code') IS NOT NULL
+                        THEN
+                            CASE 
+                                -- Check if the Coding system matches the ValueSet
+                                WHEN {self.dialect.json_extract_string_function}({base_expr}, '$.system') = '{valueset_uri}' OR
+                                     '{valueset_uri}' LIKE '%' || {self.dialect.json_extract_string_function}({base_expr}, '$.system') || '%' OR
+                                     {self.dialect.json_extract_string_function}({base_expr}, '$.system') LIKE '%' || REPLACE('{valueset_uri}', 'ValueSet/', '') || '%'
+                                THEN TRUE
+                                ELSE FALSE
+                            END
+                        -- Check if it's a simple string code (context-dependent)
+                        WHEN {self.dialect.json_type_function}({base_expr}) IN ('VARCHAR', 'STRING', 'TEXT')
+                        THEN
+                            CASE 
+                                -- Very simplified check - in practice, would need context
+                                WHEN {self.dialect.json_extract_string_function}({base_expr}, '$') != '' AND
+                                     '{valueset_uri}' LIKE '%code%'
+                                THEN TRUE
+                                ELSE FALSE
+                            END
+                        ELSE FALSE
+                    END
+                -- Non-coded values cannot be members of ValueSets
+                ELSE FALSE
+            END
+            """
 
         else:
             raise ValueError(f"Unknown function: {func_name}")
@@ -2849,7 +3531,8 @@ class SQLGenerator:
         # or applied to the implicit root context (e.g. where(...))
         # should be handled by apply_function_to_expression with self.json_column as base_expr.
         if func_name in ['exists', 'empty', 'first', 'last', 'count', 'where', 'join', 'length', 'contains', 'select',
-                         'substring', 'startswith', 'endswith', 'indexof', 'replace', 'toupper', 'tolower', 'upper', 'lower', 'trim', 'split', 'all', 'distinct', 'tostring', 'getresourcekey', 'getreferencekey']:
+                         'substring', 'startswith', 'endswith', 'indexof', 'replace', 'toupper', 'tolower', 'upper', 'lower', 'trim', 'split', 'all', 'distinct', 'tostring', 'getresourcekey', 'getreferencekey',
+                         'abs', 'ceiling', 'floor', 'round', 'sqrt', 'truncate', 'now', 'today', 'timeofday', 'trace', 'aggregate', 'flatten', 'convertstoquantity', 'hasvalue', 'hascodedvalue', 'htmlchecks', 'hastemplateidof', 'encode', 'decode', 'conformsto', 'memberof']:
             return self.apply_function_to_expression(node, self.json_column)
         # Note: The 'where' case here was for root-level where like `where(name.given = 'Peter')`.
         # This is now covered by apply_function_to_expression(node, self.json_column)
@@ -2900,9 +3583,13 @@ class SQLGenerator:
             return f"({left_cast} {sql_op} {right_cast})"
 
         # Handle JSON value comparisons with proper type casting
-        elif node.operator in ['=', '!=', '>', '<', '>=', '<=']:
+        elif node.operator in ['=', '!=', '>', '<', '>=', '<=', '~', '!~']:
             left_cast, right_cast = self.determine_comparison_casts(node.left, node.right, left, right)
             return f"({left_cast} {sql_op} {right_cast})"
+        
+        # Handle collection union operations
+        elif node.operator == '|':
+            return self._generate_union_sql(left, right)
         
         return f"({left} {sql_op} {right})"
     
@@ -3014,6 +3701,27 @@ class SQLGenerator:
             'all': (1, 1),        # exactly 1 argument
             'distinct': (0, 0),   # no arguments
             'tostring': (0, 0),   # no arguments
+            'abs': (0, 0),        # no arguments (applied to expression)
+            'ceiling': (0, 0),    # no arguments (applied to expression)
+            'floor': (0, 0),      # no arguments (applied to expression)
+            'round': (0, 1),      # 0 or 1 arguments (optional precision)
+            'sqrt': (0, 0),       # no arguments (applied to expression)
+            'truncate': (0, 0),   # no arguments (applied to expression)
+            'now': (0, 0),        # no arguments (returns current datetime)
+            'today': (0, 0),      # no arguments (returns current date)
+            'timeofday': (0, 0),  # no arguments (returns current time)
+            'trace': (1, 2),      # 1 or 2 arguments (name[, projection])
+            'aggregate': (1, 2),  # 1 or 2 arguments (aggregator[, init])
+            'flatten': (0, 0),    # no arguments (flattens nested collections)
+            'convertstoquantity': (0, 0),  # no arguments (tests if value can convert to quantity)
+            'hasvalue': (0, 0),            # no arguments (tests if value exists)
+            'hascodedvalue': (0, 0),       # no arguments (tests if value has coded value)
+            'htmlchecks': (0, 0),          # no arguments (validates HTML content)
+            'hastemplateidof': (1, 1),     # 1 argument (template ID to check)
+            'encode': (0, 0),              # no arguments (encodes the current value)
+            'decode': (0, 0),              # no arguments (decodes the current value)
+            'conformsto': (1, 1),          # 1 argument (profile URI to check)
+            'memberof': (1, 1),            # 1 argument (ValueSet URI to check)
         }
         
         if func_name in arg_requirements:
@@ -3353,4 +4061,98 @@ class SQLGenerator:
             Mapped field name (e.g., "valueQuantity", "identifiedDateTime") or None
         """
         return self.fhir_choice_types.get_choice_field_mapping_direct(field_name, type_name)
+    
+    def _generate_union_sql(self, left_sql: str, right_sql: str) -> str:
+        """Generate SQL for collection union operations (|)"""
+        
+        # Collection union in FHIRPath combines two collections
+        # In SQL, this translates to UNION ALL of the two result sets
+        
+        # For union operations, we need to ensure both sides are properly structured
+        # but avoid the scalar subquery issues by creating a unified query structure
+        
+        # Check if we're dealing with simple literal values
+        if self._is_simple_literal(left_sql) and self._is_simple_literal(right_sql):
+            return f"""
+SELECT {left_sql} as result FROM {self.table_name}
+UNION ALL
+SELECT {right_sql} as result FROM {self.table_name}
+"""
+        
+        # Handle the case where both sides are already complete SELECT statements
+        if (left_sql.strip().startswith('SELECT') or left_sql.strip().startswith('WITH')) and \
+           (right_sql.strip().startswith('SELECT') or right_sql.strip().startswith('WITH')):
+            return f"({left_sql}) UNION ALL ({right_sql})"
+        
+        # For other cases, create a unified structure that avoids scalar subquery issues
+        # This is more complex but necessary for proper union semantics
+        return f"""
+WITH left_union_results AS (
+    {self._ensure_select_structure(left_sql)}
+),
+right_union_results AS (
+    {self._ensure_select_structure(right_sql)}
+)
+SELECT result FROM left_union_results
+UNION ALL
+SELECT result FROM right_union_results
+"""
+    
+    def _is_simple_literal(self, sql_expr: str) -> bool:
+        """Check if SQL expression is a simple literal value"""
+        sql_expr = sql_expr.strip()
+        # Check for string literals, numeric literals, boolean literals
+        return (sql_expr.startswith("'") and sql_expr.endswith("'")) or \
+               sql_expr.replace('.', '').replace('-', '').isdigit() or \
+               sql_expr.lower() in ['true', 'false', 'null']
+    
+    def _ensure_select_structure(self, sql_expr: str) -> str:
+        """Ensure SQL expression is structured as a proper SELECT statement"""
+        sql_expr = sql_expr.strip()
+        
+        # If it's already a SELECT or WITH statement, return as-is
+        if sql_expr.startswith('SELECT') or sql_expr.startswith('WITH'):
+            return sql_expr
+        
+        # Otherwise, wrap it as a SELECT statement with proper FROM clause
+        return f"""SELECT
+    ({sql_expr}) as result
+FROM {self.table_name}"""
+    
+    def _wrap_as_select_if_needed(self, sql_expr: str) -> str:
+        """Wrap a SQL expression as a SELECT statement if it's not already one"""
+        
+        # If it's already a SELECT statement, return as-is
+        if sql_expr.strip().startswith('SELECT') or sql_expr.strip().startswith('(SELECT'):
+            return sql_expr
+        
+        # If it's a WITH clause (CTE), return as-is
+        if sql_expr.strip().startswith('WITH'):
+            return sql_expr
+            
+        # Otherwise, wrap it as a SELECT statement
+        # Use the current table name and JSON column for context
+        return f"""SELECT
+    ({sql_expr}) as result
+FROM {self.table_name}"""
+    
+    def visit_tuple(self, node) -> str:
+        """Visit a tuple literal node and generate JSON object construction"""
+        
+        if not node.elements:
+            # Empty tuple - generate empty JSON object
+            return f"{self.dialect.json_object_function}()"
+        
+        # Generate JSON object construction from key-value pairs
+        json_pairs = []
+        for key, value_node in node.elements:
+            # Key should be a string literal
+            key_sql = f"'{key}'"
+            # Value can be any expression
+            value_sql = self.visit(value_node)
+            json_pairs.extend([key_sql, value_sql])
+        
+        # Build the function call with key-value pairs
+        pairs_str = ", ".join(json_pairs)
+        return f"{self.dialect.json_object_function}({pairs_str})"
     
