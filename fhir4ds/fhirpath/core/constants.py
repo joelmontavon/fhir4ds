@@ -25,6 +25,9 @@ SQL_OPERATORS = {
     'or': 'OR', 
     '=': '=',
     '!=': '!=',
+    '~': 'IS NOT DISTINCT FROM',      # Equivalence operator - treats null as equal to null
+    '!~': 'IS DISTINCT FROM',         # Not equivalence operator - treats null as not equal to null
+    '|': 'UNION ALL',                 # Collection union operator
     '>': '>',
     '<': '<',
     '>=': '>=',

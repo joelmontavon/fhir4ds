@@ -12,7 +12,7 @@ from typing import List, Optional
 
 from .ast_nodes import (
     ASTNode, ThisNode, LiteralNode, IdentifierNode, FunctionCallNode,
-    BinaryOpNode, UnaryOpNode, PathNode, IndexerNode
+    BinaryOpNode, UnaryOpNode, PathNode, IndexerNode, TupleNode
 )
 
 
@@ -28,6 +28,9 @@ class TokenType(Enum):
     RBRACKET = "RBRACKET"
     LPAREN = "LPAREN"
     RPAREN = "RPAREN"
+    LBRACE = "LBRACE"
+    RBRACE = "RBRACE"
+    COLON = "COLON"
     COMMA = "COMMA"
     PIPE = "PIPE"
     AND = "AND"
@@ -35,6 +38,8 @@ class TokenType(Enum):
     NOT = "NOT"
     EQUALS = "EQUALS"
     NOT_EQUALS = "NOT_EQUALS"
+    EQUIVALENT = "EQUIVALENT"
+    NOT_EQUIVALENT = "NOT_EQUIVALENT"
     GREATER = "GREATER"
     LESS_EQUAL = "LESS_EQUAL"
     LESS = "LESS"
@@ -181,15 +186,31 @@ class FHIRPathLexer:
             elif self.current_char == ')':
                 tokens.append(Token(TokenType.RPAREN, ')', pos))
                 self.advance()
+            elif self.current_char == '{':
+                tokens.append(Token(TokenType.LBRACE, '{', pos))
+                self.advance()
+            elif self.current_char == '}':
+                tokens.append(Token(TokenType.RBRACE, '}', pos))
+                self.advance()
+            elif self.current_char == ':':
+                tokens.append(Token(TokenType.COLON, ':', pos))
+                self.advance()
             elif self.current_char == ',':
                 tokens.append(Token(TokenType.COMMA, ',', pos))
                 self.advance()
             elif self.current_char == '|':
                 tokens.append(Token(TokenType.PIPE, '|', pos))
                 self.advance()
+            elif self.current_char == '!' and self.peek() == '~':
+                tokens.append(Token(TokenType.NOT_EQUIVALENT, '!~', pos))
+                self.advance()
+                self.advance()
             elif self.current_char == '!' and self.peek() == '=':
                 tokens.append(Token(TokenType.NOT_EQUALS, '!=', pos))
                 self.advance()
+                self.advance()
+            elif self.current_char == '~':
+                tokens.append(Token(TokenType.EQUIVALENT, '~', pos))
                 self.advance()
             elif self.current_char == '=':
                 tokens.append(Token(TokenType.EQUALS, '=', pos))
@@ -257,7 +278,19 @@ class FHIRPathParser:
     
     def parse(self) -> ASTNode:
         """Parse the tokens into an AST"""
-        return self.parse_or_expression()
+        return self.parse_union_expression()
+    
+    def parse_union_expression(self) -> ASTNode:
+        """Parse union expressions (collection union operator |)"""
+        node = self.parse_or_expression()
+        
+        while self.current_token.type == TokenType.PIPE:
+            op = self.current_token.value
+            self.advance()
+            right = self.parse_or_expression()
+            node = BinaryOpNode(node, op, right)
+        
+        return node
     
     def parse_or_expression(self) -> ASTNode:
         """Parse OR expressions"""
@@ -287,7 +320,7 @@ class FHIRPathParser:
         """Parse equality expressions"""
         node = self.parse_relational_expression()
         
-        while self.current_token.type in [TokenType.EQUALS, TokenType.NOT_EQUALS]:
+        while self.current_token.type in [TokenType.EQUALS, TokenType.NOT_EQUALS, TokenType.EQUIVALENT, TokenType.NOT_EQUIVALENT]:
             op = self.current_token.value
             self.advance()
             right = self.parse_relational_expression()
@@ -369,6 +402,55 @@ class FHIRPathParser:
         else:
             return PathNode(segments)
     
+    def parse_tuple_literal(self) -> ASTNode:
+        """Parse tuple literal {key: value, key: value, ...}"""
+        
+        if self.current_token.type != TokenType.LBRACE:
+            raise ValueError("Expected '{' to start tuple literal")
+        
+        self.advance()  # Skip '{'
+        
+        elements = []
+        
+        # Handle empty tuple
+        if self.current_token.type == TokenType.RBRACE:
+            self.advance()  # Skip '}'
+            return TupleNode(elements)
+        
+        # Parse key-value pairs
+        while True:
+            # Parse key (must be string or identifier)
+            if self.current_token.type == TokenType.STRING:
+                key = self.current_token.value
+                self.advance()
+            elif self.current_token.type == TokenType.IDENTIFIER:
+                key = self.current_token.value
+                self.advance()
+            else:
+                raise ValueError(f"Expected string or identifier for tuple key, found {self.current_token}")
+            
+            # Expect colon
+            if self.current_token.type != TokenType.COLON:
+                raise ValueError(f"Expected ':' after tuple key, found {self.current_token}")
+            self.advance()  # Skip ':'
+            
+            # Parse value (any expression)
+            value = self.parse_or_expression()
+            
+            elements.append((key, value))
+            
+            # Check for comma (more elements) or closing brace
+            if self.current_token.type == TokenType.COMMA:
+                self.advance()  # Skip ','
+                continue
+            elif self.current_token.type == TokenType.RBRACE:
+                self.advance()  # Skip '}'
+                break
+            else:
+                raise ValueError(f"Expected ',' or '}}' in tuple literal, found {self.current_token}")
+        
+        return TupleNode(elements)
+    
     def parse_primary_expression(self) -> ASTNode:
         """Parse primary expressions"""
         node: ASTNode
@@ -419,6 +501,8 @@ class FHIRPathParser:
         elif self.current_token.type == TokenType.DOLLAR_THIS:
             self.advance()
             node = ThisNode()
+        elif self.current_token.type == TokenType.LBRACE:
+            node = self.parse_tuple_literal()
         else:
             raise ValueError(f"Unexpected token: {self.current_token}")
 

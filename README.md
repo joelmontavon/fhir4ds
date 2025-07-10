@@ -2,10 +2,10 @@
 
 Production-ready healthcare analytics platform providing 100% SQL-on-FHIR v2.0 compliance with dual database support (DuckDB + PostgreSQL).
 
-**Current Version**: 0.4.1 (Advanced Architecture & Performance Optimizations)  
-**Test Compliance**: 100% (117/117 tests passing) ✅ Complete Dual Dialect Compliance  
-**Database Support**: DuckDB 100% + PostgreSQL 100% ✅ Production Ready  
-**User Experience**: ✅ One-line setup, multi-format export, batch processing
+**Current Version**: 0.5.0 (Complete FHIRPath Specification Implementation)  
+**Test Compliance**: 100% (117/117 tests passing)
+**Database Support**: DuckDB 100% + PostgreSQL 100%  
+**User Experience**: One-line setup, multi-format export, batch processing
 
 ## Key Features
 

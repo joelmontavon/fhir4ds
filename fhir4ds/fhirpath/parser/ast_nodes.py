@@ -67,3 +67,9 @@ class IndexerNode(ASTNode):
     """Indexer expression node"""
     expression: ASTNode
     index: ASTNode
+
+
+@dataclass
+class TupleNode(ASTNode):
+    """Tuple literal node {key: value, ...}"""
+    elements: List[tuple]  # List of (key, value) pairs where key is string and value is ASTNode

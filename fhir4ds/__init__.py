@@ -92,7 +92,7 @@ except ImportError:
     comprehensive_performance_test = None
     UTILS_AVAILABLE = False
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 __all__ = [
     # Core data management
     "FHIRDataStore",
