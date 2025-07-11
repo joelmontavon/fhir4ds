@@ -22,6 +22,12 @@ class ThisNode(ASTNode):
 
 
 @dataclass
+class VariableNode(ASTNode):
+    """Represents context variables like '$index', '$total', etc."""
+    name: str  # 'index', 'total', etc. (without the $ prefix)
+
+
+@dataclass
 class LiteralNode(ASTNode):
     """Literal value node"""
     value: Any
@@ -72,4 +78,4 @@ class IndexerNode(ASTNode):
 @dataclass
 class TupleNode(ASTNode):
     """Tuple literal node {key: value, ...}"""
-    elements: List[tuple]  # List of (key, value) pairs where key is string and value is ASTNode
+    elements: List[tuple]  # List of (key, value) pairs where key is string or ASTNode and value is ASTNode

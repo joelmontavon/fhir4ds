@@ -35,5 +35,9 @@ SQL_OPERATORS = {
     '+': '+',
     '-': '-',
     '*': '*',
-    '/': '/'
+    '/': '/',
+    'div': 'DIV',      # Integer division operator
+    'mod': 'MOD',      # Modulo/remainder operator
+    'xor': 'XOR',      # Exclusive OR operator (Phase 6 Week 15)
+    'implies': 'IMPLIES'  # Logical implication operator (Phase 6 Week 15)
 }

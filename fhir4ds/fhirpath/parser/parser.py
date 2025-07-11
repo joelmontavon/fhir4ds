@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from .ast_nodes import (
-    ASTNode, ThisNode, LiteralNode, IdentifierNode, FunctionCallNode,
+    ASTNode, ThisNode, VariableNode, LiteralNode, IdentifierNode, FunctionCallNode,
     BinaryOpNode, UnaryOpNode, PathNode, IndexerNode, TupleNode
 )
 
@@ -46,6 +46,8 @@ class TokenType(Enum):
     GREATER_EQUAL = "GREATER_EQUAL"
     PLUS = "PLUS"
     DOLLAR_THIS = "DOLLAR_THIS"
+    DOLLAR_INDEX = "DOLLAR_INDEX"
+    DOLLAR_TOTAL = "DOLLAR_TOTAL"
     MINUS = "MINUS"
     MULTIPLY = "MULTIPLY"
     DIVIDE = "DIVIDE"
@@ -121,13 +123,36 @@ class FHIRPathLexer:
         
         while self.current_char:
             self.skip_whitespace()
-            # Check for $this keyword first
-            if self.expression[self.position:].startswith('$this'):
-                # Ensure it's not part of a larger identifier like $thisValue
-                if self.position + 5 == len(self.expression) or not self.expression[self.position + 5].isalnum():
-                    tokens.append(Token(TokenType.DOLLAR_THIS, '$this', self.position))
-                    for _ in range(5): self.advance()
-                    continue
+            # Check for context variables starting with $
+            if self.current_char == '$':
+                # Check for $this keyword
+                if self.expression[self.position:].startswith('$this'):
+                    # Ensure it's not part of a larger identifier like $thisValue
+                    if self.position + 5 == len(self.expression) or not self.expression[self.position + 5].isalnum():
+                        tokens.append(Token(TokenType.DOLLAR_THIS, '$this', self.position))
+                        for _ in range(5): self.advance()
+                        continue
+                # Check for $index keyword
+                elif self.expression[self.position:].startswith('$index'):
+                    # Ensure it's not part of a larger identifier like $indexValue
+                    if self.position + 6 == len(self.expression) or not self.expression[self.position + 6].isalnum():
+                        tokens.append(Token(TokenType.DOLLAR_INDEX, '$index', self.position))
+                        for _ in range(6): self.advance()
+                        continue
+                # Check for $total keyword
+                elif self.expression[self.position:].startswith('$total'):
+                    # Ensure it's not part of a larger identifier like $totalValue
+                    if self.position + 6 == len(self.expression) or not self.expression[self.position + 6].isalnum():
+                        tokens.append(Token(TokenType.DOLLAR_TOTAL, '$total', self.position))
+                        for _ in range(6): self.advance()
+                        continue
+                # If we get here, it's an unrecognized $ variable
+                else:
+                    raise ValueError(
+                        f"Unrecognized context variable at position {self.position} "
+                        f"in FHIRPath expression '{self.expression}'. "
+                        f"Supported context variables are: $this, $index, $total"
+                    )
             if not self.current_char:
                 break
             
@@ -419,15 +444,39 @@ class FHIRPathParser:
         
         # Parse key-value pairs
         while True:
-            # Parse key (must be string or identifier)
-            if self.current_token.type == TokenType.STRING:
-                key = self.current_token.value
-                self.advance()
-            elif self.current_token.type == TokenType.IDENTIFIER:
-                key = self.current_token.value
-                self.advance()
-            else:
-                raise ValueError(f"Expected string or identifier for tuple key, found {self.current_token}")
+            # Parse key - try to parse as expression first, then fall back to simple cases
+            saved_pos = self.position
+            saved_token = self.current_token
+            
+            try:
+                # Try parsing as an expression (handles all computed key cases)
+                key_expr = self.parse_additive_expression()
+                
+                # Check if the next token is a colon (confirming this is a valid key)
+                if self.current_token.type == TokenType.COLON:
+                    # This is a computed key expression
+                    key = key_expr
+                else:
+                    # Not a valid key expression, restore position and handle as simple case
+                    self.position = saved_pos
+                    self.current_token = saved_token
+                    raise ValueError("Not an expression key")
+                    
+            except:
+                # Restore position and handle simple cases
+                self.position = saved_pos
+                self.current_token = saved_token
+                
+                if self.current_token.type == TokenType.STRING:
+                    # Simple string literal key
+                    key = self.current_token.value
+                    self.advance()
+                elif self.current_token.type == TokenType.IDENTIFIER:
+                    # Simple identifier key
+                    key = self.current_token.value
+                    self.advance()
+                else:
+                    raise ValueError(f"Expected string, identifier, or expression for tuple key, found {self.current_token}")
             
             # Expect colon
             if self.current_token.type != TokenType.COLON:
@@ -501,6 +550,12 @@ class FHIRPathParser:
         elif self.current_token.type == TokenType.DOLLAR_THIS:
             self.advance()
             node = ThisNode()
+        elif self.current_token.type == TokenType.DOLLAR_INDEX:
+            self.advance()
+            node = VariableNode('index')
+        elif self.current_token.type == TokenType.DOLLAR_TOTAL:
+            self.advance()
+            node = VariableNode('total')
         elif self.current_token.type == TokenType.LBRACE:
             node = self.parse_tuple_literal()
         else:

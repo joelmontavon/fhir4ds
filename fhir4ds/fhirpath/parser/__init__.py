@@ -5,13 +5,13 @@ Contains the lexer, parser, and AST node definitions for FHIRPath expressions.
 """
 
 from .ast_nodes import (
-    ASTNode, ThisNode, LiteralNode, IdentifierNode, FunctionCallNode,
-    BinaryOpNode, UnaryOpNode, PathNode, IndexerNode
+    ASTNode, ThisNode, VariableNode, LiteralNode, IdentifierNode, FunctionCallNode,
+    BinaryOpNode, UnaryOpNode, PathNode, IndexerNode, TupleNode
 )
 from .parser import FHIRPathParser, FHIRPathLexer
 
 __all__ = [
-    "ASTNode", "ThisNode", "LiteralNode", "IdentifierNode", "FunctionCallNode",
-    "BinaryOpNode", "UnaryOpNode", "PathNode", "IndexerNode",
+    "ASTNode", "ThisNode", "VariableNode", "LiteralNode", "IdentifierNode", "FunctionCallNode",
+    "BinaryOpNode", "UnaryOpNode", "PathNode", "IndexerNode", "TupleNode",
     "FHIRPathParser", "FHIRPathLexer"
 ]

@@ -73,11 +73,12 @@ class SQLGenerator:
         # Initialize dependencies via injection or default imports
         if ast_nodes_module is None:
             from ..parser.ast_nodes import (
-                ASTNode, ThisNode, LiteralNode, IdentifierNode, FunctionCallNode,
+                ASTNode, ThisNode, VariableNode, LiteralNode, IdentifierNode, FunctionCallNode,
                 BinaryOpNode, UnaryOpNode, PathNode, IndexerNode, TupleNode
             )
             self.ASTNode = ASTNode
             self.ThisNode = ThisNode
+            self.VariableNode = VariableNode
             self.LiteralNode = LiteralNode
             self.IdentifierNode = IdentifierNode
             self.FunctionCallNode = FunctionCallNode
@@ -88,7 +89,7 @@ class SQLGenerator:
             self.TupleNode = TupleNode
         else:
             # Use injected AST nodes
-            (self.ASTNode, self.ThisNode, self.LiteralNode, self.IdentifierNode, 
+            (self.ASTNode, self.ThisNode, self.VariableNode, self.LiteralNode, self.IdentifierNode, 
              self.FunctionCallNode, self.BinaryOpNode, self.UnaryOpNode, 
              self.PathNode, self.IndexerNode, self.TupleNode) = ast_nodes_module
             
@@ -171,6 +172,63 @@ class SQLGenerator:
             # Advanced FHIR functions
             'conformsto': CTEConfig(200, 1, 2, 100),         # High complexity (profile conformance checking)
             'memberof': CTEConfig(180, 1, 2, 90),            # High complexity (ValueSet membership)
+            
+            # Phase 1: Critical Collection Functions
+            'single': CTEConfig(80, 0, 1, 50),               # Medium complexity (single element with error handling)
+            'tail': CTEConfig(90, 0, 1, 60),                 # Medium complexity (all but first element)
+            'skip': CTEConfig(100, 0, 1, 70),                # Medium complexity (skip N elements with argument)
+            'take': CTEConfig(110, 0, 1, 80),                # Medium complexity (take N elements with argument)
+            'intersect': CTEConfig(120, 1, 2, 90),           # High complexity (set intersection with comparison)
+            'exclude': CTEConfig(130, 1, 2, 100),            # High complexity (set exclusion with comparison)
+            
+            # Phase 2: Boolean Logic & Conditional Operations
+            'alltrue': CTEConfig(75, 0, 1, 40),              # Medium complexity (boolean aggregation)
+            'allfalse': CTEConfig(76, 0, 1, 41),             # Medium complexity (boolean aggregation)
+            'anytrue': CTEConfig(77, 0, 1, 42),              # Medium complexity (boolean aggregation)
+            'anyfalse': CTEConfig(78, 0, 1, 43),             # Medium complexity (boolean aggregation)
+            'iif': CTEConfig(150, 1, 3, 80),                 # High complexity (conditional with 3 arguments)
+            'subsetof': CTEConfig(200, 1, 2, 120),           # High complexity (set comparison operation)
+            'supersetof': CTEConfig(210, 1, 2, 125),         # High complexity (set comparison operation)
+            'isdistinct': CTEConfig(180, 1, 2, 100),         # High complexity (distinctness check)
+            'as': CTEConfig(120, 1, 1, 80),              # Medium complexity (type casting)
+            'is': CTEConfig(110, 1, 1, 75),              # Medium complexity (type checking)
+            'toboolean': CTEConfig(90, 0, 1, 60),        # Medium complexity (boolean conversion)
+            'convertstoboolean': CTEConfig(85, 0, 1, 55), # Medium complexity (boolean conversion test)
+            'todecimal': CTEConfig(95, 0, 1, 65),        # Medium complexity (decimal conversion)
+            'convertstodecimal': CTEConfig(90, 0, 1, 60), # Medium complexity (decimal conversion test)
+            'convertstointeger': CTEConfig(85, 0, 1, 55), # Medium complexity (integer conversion test)
+            
+            # Phase 3 Week 9: Date/Time Conversion Functions
+            'todate': CTEConfig(100, 0, 1, 70),        # Medium complexity (date conversion)
+            'convertstodate': CTEConfig(95, 0, 1, 65), # Medium complexity (date conversion test)
+            'todatetime': CTEConfig(110, 0, 1, 75),    # Medium complexity (datetime conversion)
+            'convertstodatetime': CTEConfig(105, 0, 1, 70), # Medium complexity (datetime conversion test)
+            'totime': CTEConfig(100, 0, 1, 70),        # Medium complexity (time conversion)
+            'convertstotime': CTEConfig(95, 0, 1, 65), # Medium complexity (time conversion test)
+            
+            # Phase 4 Week 10: Advanced Mathematical Functions
+            'exp': CTEConfig(80, 0, 1, 50),           # Medium complexity (exponential function)
+            'ln': CTEConfig(85, 0, 1, 55),            # Medium complexity (natural logarithm)
+            'log': CTEConfig(85, 0, 1, 55),           # Medium complexity (base-10 logarithm)
+            
+            # Phase 4 Week 11: Advanced Operations
+            'power': CTEConfig(90, 0, 1, 60),         # Medium complexity (power function with argument)
+            
+            # Phase 5 Week 12: String Functions
+            'tochars': CTEConfig(120, 0, 1, 80),      # Medium complexity (string to character array conversion)
+            'matches': CTEConfig(110, 0, 1, 75),      # Medium complexity (regex matching)
+            'replacematches': CTEConfig(130, 0, 1, 85), # Medium-high complexity (regex replacement)
+            
+            # Phase 5 Week 13: Navigation Functions
+            'children': CTEConfig(140, 0, 1, 90),     # Medium-high complexity (direct child navigation)
+            'descendants': CTEConfig(160, 0, 1, 100), # High complexity (recursive descendant navigation)
+            
+            # Phase 6 Week 14: Collection Combining Functions
+            'union': CTEConfig(150, 0, 1, 95),        # High complexity (set union with deduplication)
+            'combine': CTEConfig(120, 0, 1, 80),      # Medium complexity (collection combination)
+            
+            # Phase 6 Week 15: Advanced Operations
+            'repeat': CTEConfig(200, 0, 1, 120),      # Very high complexity (iterative projection with recursion)
         }
         
         # Default configuration for unlisted functions
@@ -772,6 +830,2335 @@ class SQLGenerator:
         """, "last_result")
         
         return f"(SELECT last_value FROM {last_cte_name})"
+
+    def _generate_single_with_cte(self, base_expr: str) -> str:
+        """Generate single() function using CTE approach"""
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "single_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for single element extraction with error handling
+        single_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if the expression is null (empty collection)
+                    WHEN {base_ref} IS NULL THEN NULL
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Array is empty - return empty collection (NULL)
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN NULL
+                            -- Array has exactly one element - return that element
+                            WHEN {self.get_json_array_length(base_ref)} = 1 THEN
+                                {self.extract_json_object(base_ref, '$[0]')}
+                            -- Array has more than one element - return empty collection (NULL) per FHIRPath error semantics
+                            ELSE NULL
+                        END
+                    -- For non-arrays (single objects), return the object itself
+                    ELSE {base_ref}
+                END as single_value
+            FROM {from_clause}
+        """, "single_result")
+        
+        return f"(SELECT single_value FROM {single_cte_name})"
+
+    def _generate_tail_with_cte(self, base_expr: str) -> str:
+        """Generate tail() function using CTE approach"""
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "tail_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for tail element extraction (all but first element)
+        tail_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if the expression is null (empty collection)
+                    WHEN {base_ref} IS NULL THEN NULL
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Array is empty or has only one element - return empty collection (NULL)
+                            WHEN {self.get_json_array_length(base_ref)} <= 1 THEN NULL
+                            -- Array has multiple elements - return slice from index 1 to end
+                            ELSE (
+                                SELECT {self.dialect.json_array_function}(
+                                    value::VARCHAR
+                                )
+                                FROM (
+                                    SELECT 
+                                        {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
+                                    FROM {self.dialect.json_each_function}({base_ref})
+                                    WHERE ROW_NUMBER() OVER () > 1
+                                ) AS tail_elements
+                            )
+                        END
+                    -- For non-arrays (single objects), return empty collection (NULL)
+                    ELSE NULL
+                END as tail_value
+            FROM {from_clause}
+        """, "tail_result")
+        
+        return f"(SELECT tail_value FROM {tail_cte_name})"
+
+    def _generate_skip_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate skip() function using CTE approach"""
+        
+        # Get the skip count argument
+        if len(func_node.args) != 1:
+            raise ValueError("skip() function requires exactly one argument")
+        
+        skip_count_arg = func_node.args[0]
+        if hasattr(skip_count_arg, 'value'):
+            skip_count = skip_count_arg.value
+        else:
+            # Handle complex expressions - visit the argument
+            skip_count_sql = self.visit(skip_count_arg)
+            skip_count = f"({skip_count_sql})"
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "skip_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for skip element extraction
+        skip_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if the expression is null (empty collection)
+                    WHEN {base_ref} IS NULL THEN NULL
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- If skip count is null or negative, return original array
+                            WHEN {skip_count} IS NULL OR {skip_count} < 0 THEN {base_ref}
+                            -- Array length is less than or equal to skip count - return empty collection (NULL)
+                            WHEN {self.get_json_array_length(base_ref)} <= {skip_count} THEN NULL
+                            -- Array has more elements than skip count - return elements after skip
+                            ELSE (
+                                SELECT {self.dialect.json_array_function}(
+                                    value::VARCHAR
+                                )
+                                FROM (
+                                    SELECT 
+                                        {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
+                                    FROM {self.dialect.json_each_function}({base_ref})
+                                    WHERE ROW_NUMBER() OVER () > {skip_count}
+                                ) AS skip_elements
+                            )
+                        END
+                    -- For non-arrays (single objects), skip behavior
+                    ELSE 
+                        CASE 
+                            WHEN {skip_count} IS NULL OR {skip_count} <= 0 THEN {base_ref}
+                            ELSE NULL
+                        END
+                END as skip_value
+            FROM {from_clause}
+        """, "skip_result")
+        
+        return f"(SELECT skip_value FROM {skip_cte_name})"
+
+    def _generate_take_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate take() function using CTE approach"""
+        
+        # Get the take count argument
+        if len(func_node.args) != 1:
+            raise ValueError("take() function requires exactly one argument")
+        
+        take_count_arg = func_node.args[0]
+        if hasattr(take_count_arg, 'value'):
+            take_count = take_count_arg.value
+        else:
+            # Handle complex expressions - visit the argument
+            take_count_sql = self.visit(take_count_arg)
+            take_count = f"({take_count_sql})"
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "take_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for take element extraction
+        take_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if the expression is null (empty collection)
+                    WHEN {base_ref} IS NULL THEN NULL
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- If take count is null or zero or negative, return empty collection (NULL)
+                            WHEN {take_count} IS NULL OR {take_count} <= 0 THEN NULL
+                            -- Array is empty - return empty collection (NULL)
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN NULL
+                            -- Take count is greater than or equal to array length - return entire array
+                            WHEN {take_count} >= {self.get_json_array_length(base_ref)} THEN {base_ref}
+                            -- Take count is less than array length - return first take_count elements
+                            ELSE (
+                                SELECT {self.dialect.json_array_function}(
+                                    value::VARCHAR
+                                )
+                                FROM (
+                                    SELECT 
+                                        {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
+                                    FROM {self.dialect.json_each_function}({base_ref})
+                                    WHERE ROW_NUMBER() OVER () <= {take_count}
+                                ) AS take_elements
+                            )
+                        END
+                    -- For non-arrays (single objects), take behavior
+                    ELSE 
+                        CASE 
+                            WHEN {take_count} IS NULL OR {take_count} <= 0 THEN NULL
+                            ELSE {base_ref}
+                        END
+                END as take_value
+            FROM {from_clause}
+        """, "take_result")
+        
+        return f"(SELECT take_value FROM {take_cte_name})"
+
+    def _generate_intersect_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate intersect() function using CTE approach"""
+        
+        # Get the other collection argument
+        if len(func_node.args) != 1:
+            raise ValueError("intersect() function requires exactly one argument")
+        
+        other_collection_arg = func_node.args[0]
+        # Visit the argument to get the SQL for the other collection
+        other_collection_sql = self.visit(other_collection_arg)
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "intersect_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for other collection if it's complex
+        if other_collection_sql.startswith("(SELECT") and "FROM " in other_collection_sql:
+            other_cte_name = self._create_cte(
+                f"SELECT {other_collection_sql} as other_value FROM {self.table_name}",
+                "intersect_other"
+            )
+            other_ref = "other_value"
+            other_from_clause = other_cte_name
+        else:
+            other_ref = other_collection_sql
+            other_from_clause = self.table_name
+        
+        # Create CTE for intersect operation
+        intersect_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if either expression is null (empty collection)
+                    WHEN {base_ref} IS NULL OR ({other_ref}) IS NULL THEN NULL
+                    -- Check if both are arrays
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' AND {self.get_json_type(other_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Either array is empty - return empty collection (NULL)
+                            WHEN {self.get_json_array_length(base_ref)} = 0 OR {self.get_json_array_length(other_ref)} = 0 THEN NULL
+                            -- Both arrays have elements - find intersection
+                            ELSE (
+                                SELECT CASE 
+                                    WHEN COUNT(*) = 0 THEN NULL
+                                    ELSE {self.dialect.json_array_function}(
+                                        DISTINCT value::VARCHAR
+                                    )
+                                END
+                                FROM (
+                                    SELECT 
+                                        {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
+                                    FROM {self.dialect.json_each_function}({base_ref})
+                                ) AS left_elements
+                                WHERE EXISTS (
+                                    SELECT 1 
+                                    FROM (
+                                        SELECT 
+                                            {self.dialect.json_extract_function}({other_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as other_value
+                                        FROM {self.dialect.json_each_function}({other_ref})
+                                    ) AS right_elements
+                                    WHERE left_elements.value = right_elements.other_value
+                                )
+                            )
+                        END
+                    -- Handle mixed array/non-array cases
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' AND {self.get_json_type(other_ref)} != 'ARRAY' THEN
+                        -- Base is array, other is single - check if single value exists in array
+                        CASE 
+                            WHEN EXISTS (
+                                SELECT 1 
+                                FROM (
+                                    SELECT 
+                                        {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
+                                    FROM {self.dialect.json_each_function}({base_ref})
+                                ) AS array_elements
+                                WHERE array_elements.value = {other_ref}
+                            ) THEN {self.dialect.json_array_function}({other_ref}::VARCHAR)
+                            ELSE NULL
+                        END
+                    WHEN {self.get_json_type(base_ref)} != 'ARRAY' AND {self.get_json_type(other_ref)} = 'ARRAY' THEN
+                        -- Base is single, other is array - check if single value exists in array
+                        CASE 
+                            WHEN EXISTS (
+                                SELECT 1 
+                                FROM (
+                                    SELECT 
+                                        {self.dialect.json_extract_function}({other_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
+                                    FROM {self.dialect.json_each_function}({other_ref})
+                                ) AS array_elements
+                                WHERE array_elements.value = {base_ref}
+                            ) THEN {self.dialect.json_array_function}({base_ref}::VARCHAR)
+                            ELSE NULL
+                        END
+                    -- Both are single values - check equality
+                    ELSE 
+                        CASE 
+                            WHEN {base_ref} = {other_ref} THEN {self.dialect.json_array_function}({base_ref}::VARCHAR)
+                            ELSE NULL
+                        END
+                END as intersect_value
+            FROM {from_clause if from_clause == other_from_clause else f"{from_clause}, {other_from_clause}"}
+        """, "intersect_result")
+        
+        return f"(SELECT intersect_value FROM {intersect_cte_name})"
+
+    def _generate_exclude_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate exclude() function using CTE approach"""
+        
+        # Get the other collection argument
+        if len(func_node.args) != 1:
+            raise ValueError("exclude() function requires exactly one argument")
+        
+        other_collection_arg = func_node.args[0]
+        # Visit the argument to get the SQL for the other collection
+        other_collection_sql = self.visit(other_collection_arg)
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "exclude_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for other collection if it's complex
+        if other_collection_sql.startswith("(SELECT") and "FROM " in other_collection_sql:
+            other_cte_name = self._create_cte(
+                f"SELECT {other_collection_sql} as other_value FROM {self.table_name}",
+                "exclude_other"
+            )
+            other_ref = "other_value"
+            other_from_clause = other_cte_name
+        else:
+            other_ref = other_collection_sql
+            other_from_clause = self.table_name
+        
+        # Create CTE for exclude operation
+        exclude_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if the base expression is null (empty collection)
+                    WHEN {base_ref} IS NULL THEN NULL
+                    -- If other collection is null, return the base collection (nothing to exclude)
+                    WHEN ({other_ref}) IS NULL THEN {base_ref}
+                    -- Check if base is an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Base array is empty - return empty collection (NULL)
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN NULL
+                            -- Other is also an array - exclude elements that exist in other
+                            WHEN {self.get_json_type(other_ref)} = 'ARRAY' THEN (
+                                SELECT CASE 
+                                    WHEN COUNT(*) = 0 THEN NULL
+                                    ELSE {self.dialect.json_array_function}(
+                                        DISTINCT value::VARCHAR
+                                    )
+                                END
+                                FROM (
+                                    SELECT 
+                                        {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
+                                    FROM {self.dialect.json_each_function}({base_ref})
+                                ) AS left_elements
+                                WHERE NOT EXISTS (
+                                    SELECT 1 
+                                    FROM (
+                                        SELECT 
+                                            {self.dialect.json_extract_function}({other_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as other_value
+                                        FROM {self.dialect.json_each_function}({other_ref})
+                                    ) AS right_elements
+                                    WHERE left_elements.value = right_elements.other_value
+                                )
+                            )
+                            -- Other is single value - exclude if it matches any array element
+                            ELSE (
+                                SELECT CASE 
+                                    WHEN COUNT(*) = 0 THEN NULL
+                                    ELSE {self.dialect.json_array_function}(
+                                        DISTINCT value::VARCHAR
+                                    )
+                                END
+                                FROM (
+                                    SELECT 
+                                        {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
+                                    FROM {self.dialect.json_each_function}({base_ref})
+                                ) AS array_elements
+                                WHERE array_elements.value != {other_ref}
+                            )
+                        END
+                    -- Base is single value
+                    ELSE 
+                        CASE 
+                            -- Other is array - check if base value exists in array, if so exclude it
+                            WHEN {self.get_json_type(other_ref)} = 'ARRAY' THEN
+                                CASE 
+                                    WHEN EXISTS (
+                                        SELECT 1 
+                                        FROM (
+                                            SELECT 
+                                                {self.dialect.json_extract_function}({other_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
+                                            FROM {self.dialect.json_each_function}({other_ref})
+                                        ) AS array_elements
+                                        WHERE array_elements.value = {base_ref}
+                                    ) THEN NULL
+                                    ELSE {self.dialect.json_array_function}({base_ref}::VARCHAR)
+                                END
+                            -- Both are single values - exclude if they match
+                            ELSE 
+                                CASE 
+                                    WHEN {base_ref} = {other_ref} THEN NULL
+                                    ELSE {self.dialect.json_array_function}({base_ref}::VARCHAR)
+                                END
+                        END
+                END as exclude_value
+            FROM {from_clause if from_clause == other_from_clause else f"{from_clause}, {other_from_clause}"}
+        """, "exclude_result")
+        
+        return f"(SELECT exclude_value FROM {exclude_cte_name})"
+
+    def _generate_alltrue_with_cte(self, base_expr: str) -> str:
+        """Generate allTrue() function using CTE approach"""
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "alltrue_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for allTrue operation
+        alltrue_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if the expression is null (empty collection)
+                    WHEN {base_ref} IS NULL THEN NULL
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Array is empty - return empty (NULL) per FHIRPath spec
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN NULL
+                            -- Array has elements - check if all are true
+                            ELSE (
+                                SELECT CASE 
+                                    -- If any element is false, return false
+                                    WHEN COUNT(CASE WHEN 
+                                        (CASE 
+                                            WHEN {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'false' THEN false
+                                            WHEN {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'true' THEN true
+                                            ELSE NULL
+                                        END) = false 
+                                        THEN 1 END) > 0 THEN false
+                                    -- If any element is null/non-boolean, return false (strict evaluation)
+                                    WHEN COUNT(CASE WHEN 
+                                        (CASE 
+                                            WHEN {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'false' THEN false
+                                            WHEN {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'true' THEN true
+                                            ELSE NULL
+                                        END) IS NULL 
+                                        THEN 1 END) > 0 THEN false
+                                    -- If all elements are true, return true
+                                    ELSE true
+                                END
+                                FROM {self.dialect.json_each_function}({base_ref})
+                            )
+                        END
+                    -- For non-arrays (single values), check if the value is true
+                    ELSE 
+                        CASE 
+                            WHEN {base_ref}::VARCHAR = 'true' THEN true
+                            WHEN {base_ref}::VARCHAR = 'false' THEN false
+                            ELSE false  -- Non-boolean single values are treated as false
+                        END
+                END as alltrue_value
+            FROM {from_clause}
+        """, "alltrue_result")
+        
+        return f"(SELECT alltrue_value FROM {alltrue_cte_name})"
+
+    def _generate_allfalse_with_cte(self, base_expr: str) -> str:
+        """Generate allFalse() function using CTE approach"""
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "allfalse_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for allFalse operation
+        allfalse_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if the expression is null (empty collection)
+                    WHEN {base_ref} IS NULL THEN NULL
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Array is empty - return empty (NULL) per FHIRPath spec
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN NULL
+                            -- Array has elements - check if all are false
+                            ELSE (
+                                SELECT CASE 
+                                    -- If any element is true, return false
+                                    WHEN COUNT(CASE WHEN 
+                                        (CASE 
+                                            WHEN {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'false' THEN false
+                                            WHEN {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'true' THEN true
+                                            ELSE NULL
+                                        END) = true 
+                                        THEN 1 END) > 0 THEN false
+                                    -- If any element is null/non-boolean, return false (strict evaluation)
+                                    WHEN COUNT(CASE WHEN 
+                                        (CASE 
+                                            WHEN {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'false' THEN false
+                                            WHEN {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'true' THEN true
+                                            ELSE NULL
+                                        END) IS NULL 
+                                        THEN 1 END) > 0 THEN false
+                                    -- If all elements are false, return true
+                                    ELSE true
+                                END
+                                FROM {self.dialect.json_each_function}({base_ref})
+                            )
+                        END
+                    -- For non-arrays (single values), check if the value is false
+                    ELSE 
+                        CASE 
+                            WHEN {base_ref}::VARCHAR = 'false' THEN true
+                            WHEN {base_ref}::VARCHAR = 'true' THEN false
+                            ELSE false  -- Non-boolean single values are treated as not-false (so false for allFalse)
+                        END
+                END as allfalse_value
+            FROM {from_clause}
+        """, "allfalse_result")
+        
+        return f"(SELECT allfalse_value FROM {allfalse_cte_name})"
+
+    def _generate_anytrue_with_cte(self, base_expr: str) -> str:
+        """Generate anyTrue() function using CTE approach"""
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "anytrue_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for anyTrue operation
+        anytrue_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if the expression is null (empty collection)
+                    WHEN {base_ref} IS NULL THEN NULL
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Array is empty - return empty (NULL) per FHIRPath spec
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN NULL
+                            -- Array has elements - check if any are true
+                            ELSE (
+                                SELECT CASE 
+                                    -- If any element is true, return true
+                                    WHEN COUNT(CASE WHEN 
+                                        (CASE 
+                                            WHEN {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'false' THEN false
+                                            WHEN {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'true' THEN true
+                                            ELSE NULL
+                                        END) = true 
+                                        THEN 1 END) > 0 THEN true
+                                    -- If any element is null/non-boolean, return false (strict evaluation)
+                                    WHEN COUNT(CASE WHEN 
+                                        (CASE 
+                                            WHEN {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'false' THEN false
+                                            WHEN {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'true' THEN true
+                                            ELSE NULL
+                                        END) IS NULL 
+                                        THEN 1 END) > 0 THEN false
+                                    -- If all elements are false, return false
+                                    ELSE false
+                                END
+                                FROM {self.dialect.json_each_function}({base_ref})
+                            )
+                        END
+                    -- For non-arrays (single values), check if the value is true
+                    ELSE 
+                        CASE 
+                            WHEN {base_ref}::VARCHAR = 'true' THEN true
+                            WHEN {base_ref}::VARCHAR = 'false' THEN false
+                            ELSE false  -- Non-boolean single values are treated as not-true (so false for anyTrue)
+                        END
+                END as anytrue_value
+            FROM {from_clause}
+        """, "anytrue_result")
+        
+        return f"(SELECT anytrue_value FROM {anytrue_cte_name})"
+
+    def _generate_anyfalse_with_cte(self, base_expr: str) -> str:
+        """Generate anyFalse() function using CTE approach"""
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "anyfalse_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for anyFalse operation
+        anyfalse_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if the expression is null (empty collection)
+                    WHEN {base_ref} IS NULL THEN NULL
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Array is empty - return empty (NULL) per FHIRPath spec
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN NULL
+                            -- Array has elements - check if any are false
+                            ELSE (
+                                SELECT CASE 
+                                    -- If any element is false, return true
+                                    WHEN COUNT(CASE WHEN 
+                                        (CASE 
+                                            WHEN {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'false' THEN false
+                                            WHEN {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'true' THEN true
+                                            ELSE NULL
+                                        END) = false 
+                                        THEN 1 END) > 0 THEN true
+                                    -- If any element is null/non-boolean, return false (strict evaluation)
+                                    WHEN COUNT(CASE WHEN 
+                                        (CASE 
+                                            WHEN {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'false' THEN false
+                                            WHEN {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'true' THEN true
+                                            ELSE NULL
+                                        END) IS NULL 
+                                        THEN 1 END) > 0 THEN false
+                                    -- If all elements are true, return false
+                                    ELSE false
+                                END
+                                FROM {self.dialect.json_each_function}({base_ref})
+                            )
+                        END
+                    -- For non-arrays (single values), check if the value is false
+                    ELSE 
+                        CASE 
+                            WHEN {base_ref}::VARCHAR = 'false' THEN true
+                            WHEN {base_ref}::VARCHAR = 'true' THEN false
+                            ELSE false  -- Non-boolean single values are treated as not-false (so false for anyFalse)
+                        END
+                END as anyfalse_value
+            FROM {from_clause}
+        """, "anyfalse_result")
+        
+        return f"(SELECT anyfalse_value FROM {anyfalse_cte_name})"
+
+    def _generate_iif_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate iif() function using CTE approach"""
+        
+        # Extract the three arguments
+        if len(func_node.args) != 3:
+            raise ValueError(f"iif() requires exactly 3 arguments, got {len(func_node.args)}")
+        
+        condition_arg = func_node.args[0]
+        true_result_arg = func_node.args[1]
+        false_result_arg = func_node.args[2]
+        
+        # Generate SQL for each argument
+        condition_sql = self.visit(condition_arg)
+        true_result_sql = self.visit(true_result_arg)
+        false_result_sql = self.visit(false_result_arg)
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "iif_base"
+            )
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            from_clause = self.table_name
+        
+        # Create CTE for iif operation
+        iif_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Evaluate condition and return appropriate result
+                    WHEN ({condition_sql})::VARCHAR = 'true' THEN {true_result_sql}
+                    WHEN ({condition_sql})::VARCHAR = 'false' THEN {false_result_sql}
+                    -- If condition is null or non-boolean, return empty (null)
+                    ELSE NULL
+                END as iif_value
+            FROM {from_clause}
+        """, "iif_result")
+        
+        return f"(SELECT iif_value FROM {iif_cte_name})"
+
+    def _generate_subsetof_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate subsetOf() function using CTE approach"""
+        
+        # Extract the argument (the collection to compare against)
+        if len(func_node.args) != 1:
+            raise ValueError(f"subsetOf() requires exactly 1 argument, got {len(func_node.args)}")
+        
+        other_collection_arg = func_node.args[0]
+        other_collection_sql = self.visit(other_collection_arg)
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "subsetof_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for subsetOf operation
+        subsetof_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if base collection is null or empty
+                    WHEN {base_ref} IS NULL THEN true
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' AND {self.get_json_array_length(base_ref)} = 0 THEN true
+                    -- Check if other collection is null
+                    WHEN ({other_collection_sql}) IS NULL THEN false
+                    -- Both are arrays - check if all elements of base are in other
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' AND {self.get_json_type(other_collection_sql)} = 'ARRAY' THEN (
+                        SELECT CASE 
+                            WHEN COUNT(*) = 0 THEN true  -- Empty base collection is subset of any collection
+                            WHEN COUNT(CASE WHEN other_elem.value IS NULL THEN 1 END) > 0 THEN false  -- Any element not found in other collection
+                            ELSE true  -- All elements found
+                        END
+                        FROM {self.dialect.json_each_function}({base_ref}) base_elem
+                        LEFT JOIN {self.dialect.json_each_function}({other_collection_sql}) other_elem 
+                            ON base_elem.value = other_elem.value
+                    )
+                    -- Handle single element cases
+                    WHEN {self.get_json_type(base_ref)} != 'ARRAY' AND {self.get_json_type(other_collection_sql)} = 'ARRAY' THEN (
+                        SELECT CASE 
+                            WHEN COUNT(*) > 0 THEN true
+                            ELSE false
+                        END
+                        FROM {self.dialect.json_each_function}({other_collection_sql})
+                        WHERE value = {base_ref}
+                    )
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' AND {self.get_json_type(other_collection_sql)} != 'ARRAY' THEN (
+                        SELECT CASE 
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN true
+                            WHEN {self.get_json_array_length(base_ref)} = 1 AND {self.dialect.json_extract_function}({base_ref}, '$[0]') = ({other_collection_sql}) THEN true
+                            ELSE false
+                        END
+                    )
+                    -- Both single elements
+                    ELSE CASE WHEN {base_ref} = ({other_collection_sql}) THEN true ELSE false END
+                END as subsetof_value
+            FROM {from_clause}
+        """, "subsetof_result")
+        
+        return f"(SELECT subsetof_value FROM {subsetof_cte_name})"
+
+    def _generate_supersetof_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate supersetOf() function using CTE approach"""
+        
+        # Extract the argument (the collection to check if it's a subset of current)
+        if len(func_node.args) != 1:
+            raise ValueError(f"supersetOf() requires exactly 1 argument, got {len(func_node.args)}")
+        
+        other_collection_arg = func_node.args[0]
+        other_collection_sql = self.visit(other_collection_arg)
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "supersetof_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for supersetOf operation
+        supersetof_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if other collection is null or empty - base collection is superset of empty collection
+                    WHEN ({other_collection_sql}) IS NULL THEN true
+                    WHEN {self.get_json_type(other_collection_sql)} = 'ARRAY' AND {self.get_json_array_length(other_collection_sql)} = 0 THEN true
+                    -- Check if base collection is null
+                    WHEN {base_ref} IS NULL THEN false
+                    -- Both are arrays - check if all elements of other are in base
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' AND {self.get_json_type(other_collection_sql)} = 'ARRAY' THEN (
+                        SELECT CASE 
+                            WHEN COUNT(*) = 0 THEN true  -- Empty other collection is subset of any collection
+                            WHEN COUNT(CASE WHEN base_elem.value IS NULL THEN 1 END) > 0 THEN false  -- Any element of other not found in base collection
+                            ELSE true  -- All elements found
+                        END
+                        FROM {self.dialect.json_each_function}({other_collection_sql}) other_elem
+                        LEFT JOIN {self.dialect.json_each_function}({base_ref}) base_elem 
+                            ON other_elem.value = base_elem.value
+                    )
+                    -- Handle single element cases
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' AND {self.get_json_type(other_collection_sql)} != 'ARRAY' THEN (
+                        SELECT CASE 
+                            WHEN COUNT(*) > 0 THEN true
+                            ELSE false
+                        END
+                        FROM {self.dialect.json_each_function}({base_ref})
+                        WHERE value = ({other_collection_sql})
+                    )
+                    WHEN {self.get_json_type(base_ref)} != 'ARRAY' AND {self.get_json_type(other_collection_sql)} = 'ARRAY' THEN (
+                        SELECT CASE 
+                            WHEN {self.get_json_array_length(other_collection_sql)} = 0 THEN true
+                            WHEN {self.get_json_array_length(other_collection_sql)} = 1 AND {self.dialect.json_extract_function}({other_collection_sql}, '$[0]') = {base_ref} THEN true
+                            ELSE false
+                        END
+                    )
+                    -- Both single elements
+                    ELSE CASE WHEN {base_ref} = ({other_collection_sql}) THEN true ELSE false END
+                END as supersetof_value
+            FROM {from_clause}
+        """, "supersetof_result")
+        
+        return f"(SELECT supersetof_value FROM {supersetof_cte_name})"
+
+    def _generate_isdistinct_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate isDistinct() function using CTE approach"""
+        
+        # isDistinct() takes no arguments
+        if len(func_node.args) != 0:
+            raise ValueError(f"isDistinct() requires no arguments, got {len(func_node.args)}")
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "isdistinct_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for isDistinct operation
+        isdistinct_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if collection is null or empty - empty collection is distinct by definition
+                    WHEN {base_ref} IS NULL THEN true
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Empty array is distinct
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN true
+                            -- Array with one element is distinct
+                            WHEN {self.get_json_array_length(base_ref)} = 1 THEN true
+                            -- Array with multiple elements - check for duplicates
+                            ELSE (
+                                SELECT CASE 
+                                    WHEN COUNT(*) = COUNT(DISTINCT value) THEN true
+                                    ELSE false
+                                END
+                                FROM {self.dialect.json_each_function}({base_ref})
+                            )
+                        END
+                    -- Single element is distinct by definition
+                    ELSE true
+                END as isdistinct_value
+            FROM {from_clause}
+        """, "isdistinct_result")
+        
+        return f"(SELECT isdistinct_value FROM {isdistinct_cte_name})"
+
+    def _generate_as_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate as() function using CTE approach"""
+        
+        # Extract the type argument
+        if len(func_node.args) != 1:
+            raise ValueError(f"as() requires exactly 1 argument, got {len(func_node.args)}")
+        
+        if not isinstance(func_node.args[0], self.IdentifierNode):
+            raise ValueError("as() function requires a type identifier argument")
+        
+        type_name = func_node.args[0].name
+        type_name_lower = type_name.lower()
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "as_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Build type condition
+        fhir_primitive_types_as_string = self.FHIR_PRIMITIVE_TYPES_AS_STRING
+        
+        if type_name_lower in [t.lower() for t in fhir_primitive_types_as_string]:
+            type_condition = f"{self.get_json_type('value')} = 'VARCHAR'"
+        elif type_name_lower == "boolean":
+            type_condition = f"({self.get_json_type('value')} = 'BOOLEAN' OR ({self.get_json_type('value')} = 'VARCHAR' AND LOWER(CAST(value AS VARCHAR)) IN ('true', 'false')))"
+        elif type_name_lower == "integer":
+            type_condition = f"({self.get_json_type('value')} = 'INTEGER' OR ({self.get_json_type('value')} IN ('NUMBER', 'DOUBLE') AND (CAST(value AS DOUBLE) = floor(CAST(value AS DOUBLE)))))"
+        elif type_name_lower == "decimal":
+            type_condition = f"{self.get_json_type('value')} IN ('NUMBER', 'INTEGER', 'DOUBLE')"
+        elif type_name == "Quantity":
+            type_condition = f"{self.get_json_type('value')} = 'OBJECT' AND {self.extract_json_object('value', '$.value')} IS NOT NULL"
+        else:
+            type_condition = f"({self.get_json_type('value')} = 'OBJECT' AND {self.extract_json_field('value', '$.resourceType')} = '{type_name}')"
+        
+        # Create CTE for as operation
+        as_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if base expression is null
+                    WHEN {base_ref} IS NULL THEN NULL
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN (
+                        SELECT CASE 
+                            WHEN COUNT(*) = 0 THEN NULL
+                            ELSE {self.dialect.json_array_function}(DISTINCT value::VARCHAR)
+                        END
+                        FROM {self.dialect.json_each_function}({base_ref})
+                        WHERE {type_condition}
+                    )
+                    -- Single element - check if it matches the type
+                    ELSE 
+                        CASE 
+                            WHEN ({type_condition.replace('value', base_ref)}) THEN {self.dialect.json_array_function}({base_ref}::VARCHAR)
+                            ELSE NULL
+                        END
+                END as as_value
+            FROM {from_clause}
+        """, "as_result")
+        
+        return f"(SELECT as_value FROM {as_cte_name})"
+
+    def _generate_is_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate is() function using CTE approach"""
+        
+        # Extract the type argument
+        if len(func_node.args) != 1:
+            raise ValueError(f"is() requires exactly 1 argument, got {len(func_node.args)}")
+        
+        if not isinstance(func_node.args[0], self.IdentifierNode):
+            raise ValueError("is() function requires a type identifier argument")
+        
+        type_name = func_node.args[0].name
+        type_name_lower = type_name.lower()
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "is_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Build type condition
+        fhir_primitive_types_as_string = self.FHIR_PRIMITIVE_TYPES_AS_STRING
+        
+        if type_name_lower in [t.lower() for t in fhir_primitive_types_as_string]:
+            type_condition = f"{self.get_json_type('value')} = 'VARCHAR'"
+        elif type_name_lower == "boolean":
+            type_condition = f"({self.get_json_type('value')} = 'BOOLEAN' OR ({self.get_json_type('value')} = 'VARCHAR' AND LOWER(CAST(value AS VARCHAR)) IN ('true', 'false')))"
+        elif type_name_lower == "integer":
+            type_condition = f"({self.get_json_type('value')} = 'INTEGER' OR ({self.get_json_type('value')} IN ('NUMBER', 'DOUBLE') AND (CAST(value AS DOUBLE) = floor(CAST(value AS DOUBLE)))))"
+        elif type_name_lower == "decimal":
+            type_condition = f"{self.get_json_type('value')} IN ('NUMBER', 'INTEGER', 'DOUBLE')"
+        elif type_name == "Quantity":
+            type_condition = f"{self.get_json_type('value')} = 'OBJECT' AND {self.extract_json_object('value', '$.value')} IS NOT NULL"
+        else:
+            type_condition = f"({self.get_json_type('value')} = 'OBJECT' AND {self.extract_json_field('value', '$.resourceType')} = '{type_name}')"
+        
+        # Create CTE for is operation
+        is_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if base expression is null (empty collection)
+                    WHEN {base_ref} IS NULL THEN false
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Empty array returns false
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN false
+                            -- Check if all elements match the type
+                            ELSE (
+                                SELECT CASE 
+                                    WHEN COUNT(*) = COUNT(CASE WHEN {type_condition} THEN 1 END) THEN true
+                                    ELSE false
+                                END
+                                FROM {self.dialect.json_each_function}({base_ref})
+                            )
+                        END
+                    -- Single element - check if it matches the type
+                    ELSE 
+                        CASE 
+                            WHEN ({type_condition.replace('value', base_ref)}) THEN true
+                            ELSE false
+                        END
+                END as is_value
+            FROM {from_clause}
+        """, "is_result")
+        
+        return f"(SELECT is_value FROM {is_cte_name})"
+
+    def _generate_toboolean_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate toBoolean() function using CTE approach"""
+        
+        # toBoolean() takes no arguments
+        if len(func_node.args) != 0:
+            raise ValueError(f"toBoolean() requires no arguments, got {len(func_node.args)}")
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "toboolean_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for toBoolean operation
+        toboolean_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if collection is null or empty
+                    WHEN {base_ref} IS NULL THEN NULL
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Empty array returns NULL
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN NULL
+                            -- Convert each element to boolean
+                            ELSE (
+                                SELECT {self.dialect.json_array_function}(
+                                    CASE 
+                                        WHEN {self.get_json_type('value')} = 'BOOLEAN' THEN value
+                                        WHEN {self.get_json_type('value')} = 'VARCHAR' AND LOWER(CAST(value AS VARCHAR)) = 'true' THEN true
+                                        WHEN {self.get_json_type('value')} = 'VARCHAR' AND LOWER(CAST(value AS VARCHAR)) = 'false' THEN false
+                                        WHEN {self.get_json_type('value')} IN ('INTEGER', 'NUMBER', 'DOUBLE') AND CAST(value AS DOUBLE) != 0 THEN true
+                                        WHEN {self.get_json_type('value')} IN ('INTEGER', 'NUMBER', 'DOUBLE') AND CAST(value AS DOUBLE) = 0 THEN false
+                                        ELSE NULL
+                                    END::VARCHAR
+                                )
+                                FROM {self.dialect.json_each_function}({base_ref})
+                                WHERE CASE 
+                                    WHEN {self.get_json_type('value')} = 'BOOLEAN' THEN true
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND LOWER(CAST(value AS VARCHAR)) IN ('true', 'false') THEN true
+                                    WHEN {self.get_json_type('value')} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN true
+                                    ELSE false
+                                END
+                            )
+                        END
+                    -- Single element - convert to boolean
+                    ELSE 
+                        CASE 
+                            WHEN {self.get_json_type(base_ref)} = 'BOOLEAN' THEN {self.dialect.json_array_function}({base_ref}::VARCHAR)
+                            WHEN {self.get_json_type(base_ref)} = 'VARCHAR' AND LOWER(CAST({base_ref} AS VARCHAR)) = 'true' THEN {self.dialect.json_array_function}('true')
+                            WHEN {self.get_json_type(base_ref)} = 'VARCHAR' AND LOWER(CAST({base_ref} AS VARCHAR)) = 'false' THEN {self.dialect.json_array_function}('false')
+                            WHEN {self.get_json_type(base_ref)} IN ('INTEGER', 'NUMBER', 'DOUBLE') AND CAST({base_ref} AS DOUBLE) != 0 THEN {self.dialect.json_array_function}('true')
+                            WHEN {self.get_json_type(base_ref)} IN ('INTEGER', 'NUMBER', 'DOUBLE') AND CAST({base_ref} AS DOUBLE) = 0 THEN {self.dialect.json_array_function}('false')
+                            ELSE NULL
+                        END
+                END as toboolean_value
+            FROM {from_clause}
+        """, "toboolean_result")
+        
+        return f"(SELECT toboolean_value FROM {toboolean_cte_name})"
+
+    def _generate_convertstoboolean_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate convertsToBoolean() function using CTE approach"""
+        
+        # convertsToBoolean() takes no arguments
+        if len(func_node.args) != 0:
+            raise ValueError(f"convertsToBoolean() requires no arguments, got {len(func_node.args)}")
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "convertstoboolean_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for convertsToBoolean operation
+        convertstoboolean_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if collection is null or empty
+                    WHEN {base_ref} IS NULL THEN false
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Empty array returns false
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN false
+                            -- Check if all elements can be converted to boolean
+                            ELSE (
+                                SELECT CASE 
+                                    WHEN COUNT(*) = COUNT(CASE 
+                                        WHEN {self.get_json_type('value')} = 'BOOLEAN' THEN 1
+                                        WHEN {self.get_json_type('value')} = 'VARCHAR' AND LOWER(CAST(value AS VARCHAR)) IN ('true', 'false') THEN 1
+                                        WHEN {self.get_json_type('value')} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN 1
+                                        ELSE NULL
+                                    END) THEN true
+                                    ELSE false
+                                END
+                                FROM {self.dialect.json_each_function}({base_ref})
+                            )
+                        END
+                    -- Single element - check if it can be converted to boolean
+                    ELSE 
+                        CASE 
+                            WHEN {self.get_json_type(base_ref)} = 'BOOLEAN' THEN true
+                            WHEN {self.get_json_type(base_ref)} = 'VARCHAR' AND LOWER(CAST({base_ref} AS VARCHAR)) IN ('true', 'false') THEN true
+                            WHEN {self.get_json_type(base_ref)} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN true
+                            ELSE false
+                        END
+                END as convertstoboolean_value
+            FROM {from_clause}
+        """, "convertstoboolean_result")
+        
+        return f"(SELECT convertstoboolean_value FROM {convertstoboolean_cte_name})"
+
+    def _generate_todecimal_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate toDecimal() function using CTE approach"""
+        
+        # toDecimal() takes no arguments
+        if len(func_node.args) != 0:
+            raise ValueError(f"toDecimal() requires no arguments, got {len(func_node.args)}")
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "todecimal_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for toDecimal operation
+        todecimal_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if collection is null or empty
+                    WHEN {base_ref} IS NULL THEN NULL
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Empty array returns NULL
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN NULL
+                            -- Convert each element to decimal
+                            ELSE (
+                                SELECT {self.dialect.json_array_function}(
+                                    CAST(value AS DOUBLE)::VARCHAR
+                                )
+                                FROM {self.dialect.json_each_function}({base_ref})
+                                WHERE CASE 
+                                    WHEN {self.get_json_type('value')} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN true
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS DOUBLE) IS NOT NULL THEN true
+                                    ELSE false
+                                END
+                            )
+                        END
+                    -- Single element - convert to decimal
+                    ELSE 
+                        CASE 
+                            WHEN {self.get_json_type(base_ref)} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN {self.dialect.json_array_function}(CAST({base_ref} AS DOUBLE)::VARCHAR)
+                            WHEN {self.get_json_type(base_ref)} = 'VARCHAR' AND TRY_CAST({base_ref} AS DOUBLE) IS NOT NULL THEN {self.dialect.json_array_function}(CAST({base_ref} AS DOUBLE)::VARCHAR)
+                            ELSE NULL
+                        END
+                END as todecimal_value
+            FROM {from_clause}
+        """, "todecimal_result")
+        
+        return f"(SELECT todecimal_value FROM {todecimal_cte_name})"
+
+    def _generate_convertstodecimal_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate convertsToDecimal() function using CTE approach"""
+        
+        # convertsToDecimal() takes no arguments
+        if len(func_node.args) != 0:
+            raise ValueError(f"convertsToDecimal() requires no arguments, got {len(func_node.args)}")
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "convertstodecimal_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for convertsToDecimal operation
+        convertstodecimal_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if collection is null or empty
+                    WHEN {base_ref} IS NULL THEN false
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Empty array returns false
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN false
+                            -- Check if all elements can be converted to decimal
+                            ELSE (
+                                SELECT CASE 
+                                    WHEN COUNT(*) = COUNT(CASE 
+                                        WHEN {self.get_json_type('value')} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN 1
+                                        WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS DOUBLE) IS NOT NULL THEN 1
+                                        ELSE NULL
+                                    END) THEN true
+                                    ELSE false
+                                END
+                                FROM {self.dialect.json_each_function}({base_ref})
+                            )
+                        END
+                    -- Single element - check if it can be converted to decimal
+                    ELSE 
+                        CASE 
+                            WHEN {self.get_json_type(base_ref)} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN true
+                            WHEN {self.get_json_type(base_ref)} = 'VARCHAR' AND TRY_CAST({base_ref} AS DOUBLE) IS NOT NULL THEN true
+                            ELSE false
+                        END
+                END as convertstodecimal_value
+            FROM {from_clause}
+        """, "convertstodecimal_result")
+        
+        return f"(SELECT convertstodecimal_value FROM {convertstodecimal_cte_name})"
+
+    def _generate_convertstointeger_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate convertsToInteger() function using CTE approach"""
+        
+        # convertsToInteger() takes no arguments
+        if len(func_node.args) != 0:
+            raise ValueError(f"convertsToInteger() requires no arguments, got {len(func_node.args)}")
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "convertstointeger_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for convertsToInteger operation
+        convertstointeger_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if collection is null or empty
+                    WHEN {base_ref} IS NULL THEN false
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Empty array returns false
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN false
+                            -- Check if all elements can be converted to integer
+                            ELSE (
+                                SELECT CASE 
+                                    WHEN COUNT(*) = COUNT(CASE 
+                                        WHEN {self.get_json_type('value')} = 'INTEGER' THEN 1
+                                        WHEN {self.get_json_type('value')} IN ('NUMBER', 'DOUBLE') AND CAST(value AS DOUBLE) = floor(CAST(value AS DOUBLE)) THEN 1
+                                        WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS INTEGER) IS NOT NULL THEN 1
+                                        ELSE NULL
+                                    END) THEN true
+                                    ELSE false
+                                END
+                                FROM {self.dialect.json_each_function}({base_ref})
+                            )
+                        END
+                    -- Single element - check if it can be converted to integer
+                    ELSE 
+                        CASE 
+                            WHEN {self.get_json_type(base_ref)} = 'INTEGER' THEN true
+                            WHEN {self.get_json_type(base_ref)} IN ('NUMBER', 'DOUBLE') AND CAST({base_ref} AS DOUBLE) = floor(CAST({base_ref} AS DOUBLE)) THEN true
+                            WHEN {self.get_json_type(base_ref)} = 'VARCHAR' AND TRY_CAST({base_ref} AS INTEGER) IS NOT NULL THEN true
+                            ELSE false
+                        END
+                END as convertstointeger_value
+            FROM {from_clause}
+        """, "convertstointeger_result")
+        
+        return f"(SELECT convertstointeger_value FROM {convertstointeger_cte_name})"
+
+    def _generate_todate_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate toDate() function using CTE approach"""
+        
+        # toDate() takes no arguments
+        if len(func_node.args) != 0:
+            raise ValueError(f"toDate() requires no arguments, got {len(func_node.args)}")
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "todate_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for toDate operation
+        todate_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    WHEN {base_ref} IS NULL THEN NULL
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN NULL
+                            ELSE (
+                                SELECT json_group_array(
+                                    CASE 
+                                        WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS DATE) IS NOT NULL THEN TRY_CAST(value AS DATE)
+                                        WHEN {self.get_json_type('value')} = 'DATE' THEN CAST(value AS DATE)
+                                        ELSE NULL
+                                    END
+                                )
+                                FROM {self.dialect.json_each_function}({base_ref})
+                                WHERE CASE 
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS DATE) IS NOT NULL THEN true
+                                    WHEN {self.get_json_type('value')} = 'DATE' THEN true
+                                    ELSE false
+                                END
+                            )
+                        END
+                    ELSE 
+                        CASE 
+                            WHEN {self.get_json_type(base_ref)} = 'VARCHAR' AND TRY_CAST({base_ref} AS DATE) IS NOT NULL THEN TRY_CAST({base_ref} AS DATE)
+                            WHEN {self.get_json_type(base_ref)} = 'DATE' THEN CAST({base_ref} AS DATE)
+                            ELSE NULL
+                        END
+                END as todate_value
+            FROM {from_clause}
+        """, "todate_result")
+        
+        return f"(SELECT todate_value FROM {todate_cte_name})"
+
+    def _generate_convertstodate_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate convertsToDate() function using CTE approach"""
+        
+        # convertsToDate() takes no arguments
+        if len(func_node.args) != 0:
+            raise ValueError(f"convertsToDate() requires no arguments, got {len(func_node.args)}")
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "convertstodate_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for convertsToDate operation
+        convertstodate_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if collection is null or empty
+                    WHEN {base_ref} IS NULL THEN false
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Empty array returns false
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN false
+                            -- Check if all elements can be converted to date
+                            ELSE (
+                                SELECT CASE 
+                                    WHEN COUNT(*) = COUNT(CASE 
+                                        WHEN {self.get_json_type('value')} = 'DATE' THEN 1
+                                        WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS DATE) IS NOT NULL THEN 1
+                                        ELSE NULL
+                                    END) THEN true
+                                    ELSE false
+                                END
+                                FROM {self.dialect.json_each_function}({base_ref})
+                            )
+                        END
+                    -- Single element - check if it can be converted to date
+                    ELSE 
+                        CASE 
+                            WHEN {self.get_json_type(base_ref)} = 'DATE' THEN true
+                            WHEN {self.get_json_type(base_ref)} = 'VARCHAR' AND TRY_CAST({base_ref} AS DATE) IS NOT NULL THEN true
+                            ELSE false
+                        END
+                END as convertstodate_value
+            FROM {from_clause}
+        """, "convertstodate_result")
+        
+        return f"(SELECT convertstodate_value FROM {convertstodate_cte_name})"
+
+    def _generate_todatetime_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate toDateTime() function using CTE approach"""
+        
+        # toDateTime() takes no arguments
+        if len(func_node.args) != 0:
+            raise ValueError(f"toDateTime() requires no arguments, got {len(func_node.args)}")
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "todatetime_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for toDateTime operation
+        todatetime_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    WHEN {base_ref} IS NULL THEN NULL
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN NULL
+                            ELSE (
+                                SELECT json_group_array(
+                                    CASE 
+                                        WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIMESTAMP) IS NOT NULL THEN TRY_CAST(value AS TIMESTAMP)
+                                        WHEN {self.get_json_type('value')} = 'TIMESTAMP' THEN CAST(value AS TIMESTAMP)
+                                        WHEN {self.get_json_type('value')} = 'DATE' THEN CAST(value AS TIMESTAMP)
+                                        ELSE NULL
+                                    END
+                                )
+                                FROM {self.dialect.json_each_function}({base_ref})
+                                WHERE CASE 
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIMESTAMP) IS NOT NULL THEN true
+                                    WHEN {self.get_json_type('value')} IN ('TIMESTAMP', 'DATE') THEN true
+                                    ELSE false
+                                END
+                            )
+                        END
+                    ELSE 
+                        CASE 
+                            WHEN {self.get_json_type(base_ref)} = 'VARCHAR' AND TRY_CAST({base_ref} AS TIMESTAMP) IS NOT NULL THEN TRY_CAST({base_ref} AS TIMESTAMP)
+                            WHEN {self.get_json_type(base_ref)} = 'TIMESTAMP' THEN CAST({base_ref} AS TIMESTAMP)
+                            WHEN {self.get_json_type(base_ref)} = 'DATE' THEN CAST({base_ref} AS TIMESTAMP)
+                            ELSE NULL
+                        END
+                END as todatetime_value
+            FROM {from_clause}
+        """, "todatetime_result")
+        
+        return f"(SELECT todatetime_value FROM {todatetime_cte_name})"
+
+    def _generate_convertstodatetime_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate convertsToDateTime() function using CTE approach"""
+        
+        # convertsToDateTime() takes no arguments
+        if len(func_node.args) != 0:
+            raise ValueError(f"convertsToDateTime() requires no arguments, got {len(func_node.args)}")
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "convertstodatetime_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for convertsToDateTime operation
+        convertstodatetime_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if collection is null or empty
+                    WHEN {base_ref} IS NULL THEN false
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Empty array returns false
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN false
+                            -- Check if all elements can be converted to datetime
+                            ELSE (
+                                SELECT CASE 
+                                    WHEN COUNT(*) = COUNT(CASE 
+                                        WHEN {self.get_json_type('value')} IN ('TIMESTAMP', 'DATE') THEN 1
+                                        WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIMESTAMP) IS NOT NULL THEN 1
+                                        ELSE NULL
+                                    END) THEN true
+                                    ELSE false
+                                END
+                                FROM {self.dialect.json_each_function}({base_ref})
+                            )
+                        END
+                    -- Single element - check if it can be converted to datetime
+                    ELSE 
+                        CASE 
+                            WHEN {self.get_json_type(base_ref)} IN ('TIMESTAMP', 'DATE') THEN true
+                            WHEN {self.get_json_type(base_ref)} = 'VARCHAR' AND TRY_CAST({base_ref} AS TIMESTAMP) IS NOT NULL THEN true
+                            ELSE false
+                        END
+                END as convertstodatetime_value
+            FROM {from_clause}
+        """, "convertstodatetime_result")
+        
+        return f"(SELECT convertstodatetime_value FROM {convertstodatetime_cte_name})"
+
+    def _generate_totime_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate toTime() function using CTE approach"""
+        
+        # toTime() takes no arguments
+        if len(func_node.args) != 0:
+            raise ValueError(f"toTime() requires no arguments, got {len(func_node.args)}")
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "totime_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for toTime operation
+        totime_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    WHEN {base_ref} IS NULL THEN NULL
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN NULL
+                            ELSE (
+                                SELECT json_group_array(
+                                    CASE 
+                                        WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIME) IS NOT NULL THEN TRY_CAST(value AS TIME)
+                                        WHEN {self.get_json_type('value')} = 'TIME' THEN CAST(value AS TIME)
+                                        WHEN {self.get_json_type('value')} = 'TIMESTAMP' THEN CAST(value AS TIME)
+                                        ELSE NULL
+                                    END
+                                )
+                                FROM {self.dialect.json_each_function}({base_ref})
+                                WHERE CASE 
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIME) IS NOT NULL THEN true
+                                    WHEN {self.get_json_type('value')} IN ('TIME', 'TIMESTAMP') THEN true
+                                    ELSE false
+                                END
+                            )
+                        END
+                    ELSE 
+                        CASE 
+                            WHEN {self.get_json_type(base_ref)} = 'VARCHAR' AND TRY_CAST({base_ref} AS TIME) IS NOT NULL THEN TRY_CAST({base_ref} AS TIME)
+                            WHEN {self.get_json_type(base_ref)} = 'TIME' THEN CAST({base_ref} AS TIME)
+                            WHEN {self.get_json_type(base_ref)} = 'TIMESTAMP' THEN CAST({base_ref} AS TIME)
+                            ELSE NULL
+                        END
+                END as totime_value
+            FROM {from_clause}
+        """, "totime_result")
+        
+        return f"(SELECT totime_value FROM {totime_cte_name})"
+
+    def _generate_convertstotime_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate convertsToTime() function using CTE approach"""
+        
+        # convertsToTime() takes no arguments
+        if len(func_node.args) != 0:
+            raise ValueError(f"convertsToTime() requires no arguments, got {len(func_node.args)}")
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "convertstotime_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for convertsToTime operation
+        convertstotime_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if collection is null or empty
+                    WHEN {base_ref} IS NULL THEN false
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Empty array returns false
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN false
+                            -- Check if all elements can be converted to time
+                            ELSE (
+                                SELECT CASE 
+                                    WHEN COUNT(*) = COUNT(CASE 
+                                        WHEN {self.get_json_type('value')} IN ('TIME', 'TIMESTAMP') THEN 1
+                                        WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIME) IS NOT NULL THEN 1
+                                        ELSE NULL
+                                    END) THEN true
+                                    ELSE false
+                                END
+                                FROM {self.dialect.json_each_function}({base_ref})
+                            )
+                        END
+                    -- Single element - check if it can be converted to time
+                    ELSE 
+                        CASE 
+                            WHEN {self.get_json_type(base_ref)} IN ('TIME', 'TIMESTAMP') THEN true
+                            WHEN {self.get_json_type(base_ref)} = 'VARCHAR' AND TRY_CAST({base_ref} AS TIME) IS NOT NULL THEN true
+                            ELSE false
+                        END
+                END as convertstotime_value
+            FROM {from_clause}
+        """, "convertstotime_result")
+        
+        return f"(SELECT convertstotime_value FROM {convertstotime_cte_name})"
+
+    def _generate_tochars_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate toChars() function using CTE approach"""
+        
+        # toChars() takes no arguments
+        if len(func_node.args) != 0:
+            raise ValueError(f"toChars() requires no arguments, got {len(func_node.args)}")
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "tochars_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for toChars operation
+        tochars_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if collection is null or empty
+                    WHEN {base_ref} IS NULL THEN NULL
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Empty array returns empty array
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN {self.dialect.json_array_function}()
+                            -- Convert each string element to character array
+                            ELSE (
+                                SELECT {self.dialect.json_array_function}(
+                                    CASE 
+                                        WHEN {self.get_json_type('value')} = 'VARCHAR' THEN (
+                                            SELECT {self.dialect.json_array_function}(substr_char)
+                                            FROM (
+                                                SELECT SUBSTRING(CAST(value AS VARCHAR), seq, 1) as substr_char
+                                                FROM RANGE(1, LENGTH(CAST(value AS VARCHAR)) + 1) as seq_table(seq)
+                                            )
+                                        )
+                                        ELSE NULL
+                                    END
+                                )
+                                FROM {self.dialect.json_each_function}({base_ref})
+                                WHERE {self.get_json_type('value')} = 'VARCHAR'
+                            )
+                        END
+                    -- Single element - check if it's a string and convert to character array
+                    ELSE 
+                        CASE 
+                            WHEN {self.get_json_type(base_ref)} = 'VARCHAR' THEN (
+                                SELECT {self.dialect.json_array_function}(substr_char)
+                                FROM (
+                                    SELECT SUBSTRING(CAST({base_ref} AS VARCHAR), seq, 1) as substr_char
+                                    FROM RANGE(1, LENGTH(CAST({base_ref} AS VARCHAR)) + 1) as seq_table(seq)
+                                )
+                            )
+                            ELSE NULL
+                        END
+                END as tochars_value
+            FROM {from_clause}
+        """, "tochars_result")
+        
+        return f"(SELECT tochars_value FROM {tochars_cte_name})"
+
+    def _generate_matches_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate matches() function using CTE approach"""
+        
+        # matches() takes exactly 1 argument (the regex pattern)
+        if len(func_node.args) != 1:
+            raise ValueError(f"matches() requires exactly 1 argument (regex pattern), got {len(func_node.args)}")
+        
+        # Get the regex pattern expression
+        pattern_expr = self.visit(func_node.args[0])
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "matches_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for matches operation
+        matches_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if collection is null or empty
+                    WHEN {base_ref} IS NULL THEN false
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Empty array returns false
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN false
+                            -- Check if all string elements match the regex pattern
+                            ELSE (
+                                SELECT CASE 
+                                    WHEN COUNT(*) = COUNT(CASE 
+                                        WHEN {self.get_json_type('value')} = 'VARCHAR' AND regexp_full_match(CAST(value AS VARCHAR), CAST({pattern_expr} AS VARCHAR)) THEN 1
+                                        ELSE NULL
+                                    END) THEN true
+                                    ELSE false
+                                END
+                                FROM {self.dialect.json_each_function}({base_ref})
+                                WHERE {self.get_json_type('value')} = 'VARCHAR'
+                            )
+                        END
+                    -- Single element - check if it's a string and matches the regex
+                    ELSE 
+                        CASE 
+                            WHEN {self.get_json_type(base_ref)} = 'VARCHAR' THEN
+                                CASE 
+                                    WHEN regexp_full_match(CAST({base_ref} AS VARCHAR), CAST({pattern_expr} AS VARCHAR)) THEN true
+                                    ELSE false
+                                END
+                            ELSE false
+                        END
+                END as matches_value
+            FROM {from_clause}
+        """, "matches_result")
+        
+        return f"(SELECT matches_value FROM {matches_cte_name})"
+
+    def _generate_replacematches_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate replaceMatches() function using CTE approach"""
+        
+        # replaceMatches() takes exactly 2 arguments (regex pattern, replacement)
+        if len(func_node.args) != 2:
+            raise ValueError(f"replaceMatches() requires exactly 2 arguments (pattern, replacement), got {len(func_node.args)}")
+        
+        # Get the regex pattern and replacement expressions
+        pattern_expr = self.visit(func_node.args[0])
+        replacement_expr = self.visit(func_node.args[1])
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "replacematches_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for replaceMatches operation
+        replacematches_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if collection is null or empty
+                    WHEN {base_ref} IS NULL THEN NULL
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Empty array returns empty array
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN {self.dialect.json_array_function}()
+                            -- Replace regex matches in all string elements
+                            ELSE (
+                                SELECT {self.dialect.json_array_function}(
+                                    CASE 
+                                        WHEN {self.get_json_type('value')} = 'VARCHAR' THEN 
+                                            regexp_replace(CAST(value AS VARCHAR), CAST({pattern_expr} AS VARCHAR), CAST({replacement_expr} AS VARCHAR), 'g')
+                                        ELSE value
+                                    END
+                                )
+                                FROM {self.dialect.json_each_function}({base_ref})
+                            )
+                        END
+                    -- Single element - replace regex matches if it's a string
+                    ELSE 
+                        CASE 
+                            WHEN {self.get_json_type(base_ref)} = 'VARCHAR' THEN
+                                regexp_replace(CAST({base_ref} AS VARCHAR), CAST({pattern_expr} AS VARCHAR), CAST({replacement_expr} AS VARCHAR), 'g')
+                            ELSE {base_ref}
+                        END
+                END as replacematches_value
+            FROM {from_clause}
+        """, "replacematches_result")
+        
+        return f"(SELECT replacematches_value FROM {replacematches_cte_name})"
+
+    def _generate_children_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate children() function using CTE approach"""
+        
+        # children() takes no arguments
+        if len(func_node.args) != 0:
+            raise ValueError(f"children() requires no arguments, got {len(func_node.args)}")
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "children_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for children operation
+        children_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    -- Check if collection is null or empty
+                    WHEN {base_ref} IS NULL THEN NULL
+                    -- Check if it's an array
+                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN
+                        CASE 
+                            -- Empty array returns empty array
+                            WHEN {self.get_json_array_length(base_ref)} = 0 THEN {self.dialect.json_array_function}()
+                            -- Extract all children from each element in the array
+                            ELSE (
+                                SELECT {self.dialect.json_array_function}(
+                                    CASE 
+                                        WHEN {self.get_json_type('value')} = 'OBJECT' THEN (
+                                            SELECT {self.dialect.json_array_function}(child_value)
+                                            FROM {self.dialect.json_each_function}(value) as child_table(child_key, child_value)
+                                        )
+                                        WHEN {self.get_json_type('value')} = 'ARRAY' THEN (
+                                            SELECT {self.dialect.json_array_function}(array_element)
+                                            FROM {self.dialect.json_each_function}(value) as array_table(array_key, array_element)
+                                        )
+                                        ELSE NULL
+                                    END
+                                )
+                                FROM {self.dialect.json_each_function}({base_ref})
+                                WHERE {self.get_json_type('value')} IN ('OBJECT', 'ARRAY')
+                            )
+                        END
+                    -- Single element - extract its direct children
+                    ELSE 
+                        CASE 
+                            WHEN {self.get_json_type(base_ref)} = 'OBJECT' THEN (
+                                SELECT {self.dialect.json_array_function}(child_value)
+                                FROM {self.dialect.json_each_function}({base_ref}) as child_table(child_key, child_value)
+                            )
+                            WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN (
+                                SELECT {self.dialect.json_array_function}(array_element)
+                                FROM {self.dialect.json_each_function}({base_ref}) as array_table(array_key, array_element)
+                            )
+                            ELSE {self.dialect.json_array_function}()
+                        END
+                END as children_value
+            FROM {from_clause}
+        """, "children_result")
+        
+        return f"(SELECT children_value FROM {children_cte_name})"
+
+    def _generate_descendants_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate descendants() function using CTE approach"""
+        
+        # descendants() takes no arguments
+        if len(func_node.args) != 0:
+            raise ValueError(f"descendants() requires no arguments, got {len(func_node.args)}")
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "descendants_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for descendants operation using recursive approach
+        descendants_cte_name = self._create_cte(f"""
+            WITH RECURSIVE descendants_recursive(value, level) AS (
+                -- Base case: start with the input collection(s)
+                SELECT 
+                    CASE 
+                        WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN (
+                            SELECT child_value
+                            FROM {self.dialect.json_each_function}({base_ref}) as root_table(root_key, root_value),
+                                 {self.dialect.json_each_function}(root_value) as child_table(child_key, child_value)
+                            WHERE {self.get_json_type('root_value')} IN ('OBJECT', 'ARRAY')
+                        )
+                        WHEN {self.get_json_type(base_ref)} IN ('OBJECT', 'ARRAY') THEN (
+                            SELECT child_value
+                            FROM {self.dialect.json_each_function}({base_ref}) as child_table(child_key, child_value)
+                        )
+                        ELSE NULL
+                    END as value,
+                    1 as level
+                FROM {from_clause}
+                WHERE {base_ref} IS NOT NULL
+                  AND {self.get_json_type(base_ref)} IN ('OBJECT', 'ARRAY')
+                
+                UNION ALL
+                
+                -- Recursive case: find children of current descendants
+                SELECT nested_child_value as value, d.level + 1 as level
+                FROM descendants_recursive d,
+                     {self.dialect.json_each_function}(d.value) as nested_table(nested_key, nested_child_value)
+                WHERE {self.get_json_type('d.value')} IN ('OBJECT', 'ARRAY')
+                  AND d.level < 10  -- Limit recursion depth to prevent infinite loops
+                  AND d.value IS NOT NULL
+            )
+            SELECT 
+                CASE 
+                    WHEN {base_ref} IS NULL THEN NULL
+                    WHEN COUNT(*) = 0 THEN {self.dialect.json_array_function}()
+                    ELSE {self.dialect.json_array_function}(value)
+                END as descendants_value
+            FROM descendants_recursive
+        """, "descendants_result")
+        
+        return f"(SELECT descendants_value FROM {descendants_cte_name})"
+
+    def _generate_union_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate union() function using CTE approach"""
+        
+        # union() takes exactly 1 argument
+        if len(func_node.args) != 1:
+            raise ValueError(f"union() requires exactly 1 argument (collection to union with), got {len(func_node.args)}")
+        
+        # Get the argument collection expression
+        other_collection_expr = self.visit(func_node.args[0])
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "union_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for other collection if it's complex
+        if other_collection_expr.startswith("(SELECT") and "FROM " in other_collection_expr:
+            other_cte_name = self._create_cte(
+                f"SELECT {other_collection_expr} as other_value FROM {self.table_name}",
+                "union_other"
+            )
+            other_ref = "other_value"
+            other_from_clause = other_cte_name
+        else:
+            other_ref = other_collection_expr
+            other_from_clause = self.table_name
+        
+        # Create CTE for union operation with deduplication
+        union_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    WHEN {base_ref} IS NULL AND {other_ref} IS NULL THEN NULL
+                    WHEN {base_ref} IS NULL THEN 
+                        CASE 
+                            WHEN {self.get_json_type(other_ref)} = 'ARRAY' THEN (
+                                SELECT {self.dialect.json_array_function}(DISTINCT value)
+                                FROM {self.dialect.json_each_function}({other_ref})
+                            )
+                            ELSE {self.dialect.json_array_function}({other_ref})
+                        END
+                    WHEN {other_ref} IS NULL THEN 
+                        CASE 
+                            WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN (
+                                SELECT {self.dialect.json_array_function}(DISTINCT value)
+                                FROM {self.dialect.json_each_function}({base_ref})
+                            )
+                            ELSE {self.dialect.json_array_function}({base_ref})
+                        END
+                    ELSE (
+                        -- Both collections are non-null, perform union with deduplication
+                        SELECT {self.dialect.json_array_function}(DISTINCT combined_value)
+                        FROM (
+                            -- Values from the base collection
+                            SELECT value as combined_value
+                            FROM {self.dialect.json_each_function}(
+                                CASE 
+                                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN {base_ref}
+                                    ELSE {self.dialect.json_array_function}({base_ref})
+                                END
+                            )
+                            
+                            UNION ALL
+                            
+                            -- Values from the argument collection
+                            SELECT value as combined_value
+                            FROM {self.dialect.json_each_function}(
+                                CASE 
+                                    WHEN {self.get_json_type(other_ref)} = 'ARRAY' THEN {other_ref}
+                                    ELSE {self.dialect.json_array_function}({other_ref})
+                                END
+                            )
+                        ) AS union_source
+                    )
+                END as union_value
+            FROM {from_clause}, {other_from_clause}
+        """, "union_result")
+        
+        return f"(SELECT union_value FROM {union_cte_name})"
+
+    def _generate_combine_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate combine() function using CTE approach"""
+        
+        # combine() takes exactly 1 argument
+        if len(func_node.args) != 1:
+            raise ValueError(f"combine() requires exactly 1 argument (collection to combine with), got {len(func_node.args)}")
+        
+        # Get the argument collection expression
+        other_collection_expr = self.visit(func_node.args[0])
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "combine_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for other collection if it's complex
+        if other_collection_expr.startswith("(SELECT") and "FROM " in other_collection_expr:
+            other_cte_name = self._create_cte(
+                f"SELECT {other_collection_expr} as other_value FROM {self.table_name}",
+                "combine_other"
+            )
+            other_ref = "other_value"
+            other_from_clause = other_cte_name
+        else:
+            other_ref = other_collection_expr
+            other_from_clause = self.table_name
+        
+        # Create CTE for combine operation without deduplication
+        combine_cte_name = self._create_cte(f"""
+            SELECT 
+                CASE 
+                    WHEN {base_ref} IS NULL AND {other_ref} IS NULL THEN NULL
+                    WHEN {base_ref} IS NULL THEN 
+                        CASE 
+                            WHEN {self.get_json_type(other_ref)} = 'ARRAY' THEN {other_ref}
+                            ELSE {self.dialect.json_array_function}({other_ref})
+                        END
+                    WHEN {other_ref} IS NULL THEN 
+                        CASE 
+                            WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN {base_ref}
+                            ELSE {self.dialect.json_array_function}({base_ref})
+                        END
+                    ELSE (
+                        -- Both collections are non-null, perform combination without deduplication
+                        SELECT {self.dialect.json_array_function}(combined_value)
+                        FROM (
+                            -- Values from the base collection
+                            SELECT value as combined_value
+                            FROM {self.dialect.json_each_function}(
+                                CASE 
+                                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN {base_ref}
+                                    ELSE {self.dialect.json_array_function}({base_ref})
+                                END
+                            )
+                            
+                            UNION ALL
+                            
+                            -- Values from the argument collection
+                            SELECT value as combined_value
+                            FROM {self.dialect.json_each_function}(
+                                CASE 
+                                    WHEN {self.get_json_type(other_ref)} = 'ARRAY' THEN {other_ref}
+                                    ELSE {self.dialect.json_array_function}({other_ref})
+                                END
+                            )
+                        ) AS combine_source
+                    )
+                END as combine_value
+            FROM {from_clause}, {other_from_clause}
+        """, "combine_result")
+        
+        return f"(SELECT combine_value FROM {combine_cte_name})"
+
+    def _generate_repeat_with_cte(self, base_expr: str, func_node) -> str:
+        """Generate repeat() function using CTE approach"""
+        
+        # repeat() takes exactly 1 argument
+        if len(func_node.args) != 1:
+            raise ValueError(f"repeat() requires exactly 1 argument (expression to apply iteratively), got {len(func_node.args)}")
+        
+        # Get the expression to apply repeatedly
+        repeat_expr = self.visit(func_node.args[0])
+        
+        # Check if base_expr is already a CTE reference
+        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
+            # Base expression is already complex, create CTE for it
+            base_cte_name = self._create_cte(
+                f"SELECT {base_expr} as base_value FROM {self.table_name}",
+                "repeat_base"
+            )
+            base_ref = "base_value"
+            from_clause = base_cte_name
+        else:
+            # Simple base expression, reference directly
+            base_ref = base_expr
+            from_clause = self.table_name
+        
+        # Create CTE for repeat operation using recursive approach
+        repeat_cte_name = self._create_cte(f"""
+            WITH RECURSIVE repeat_recursive(current_value, iteration, value_hash) AS (
+                -- Base case: start with the initial collection
+                SELECT 
+                    CASE 
+                        WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN {base_ref}
+                        ELSE {self.dialect.json_array_function}({base_ref})
+                    END as current_value,
+                    0 as iteration,
+                    md5(CAST(
+                        CASE 
+                            WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN {base_ref}
+                            ELSE {self.dialect.json_array_function}({base_ref})
+                        END
+                    AS VARCHAR)) as value_hash
+                FROM {from_clause}
+                WHERE {base_ref} IS NOT NULL
+                
+                UNION ALL
+                
+                -- Recursive case: apply the expression to current result  
+                SELECT 
+                    (
+                        -- Apply the repeat expression to the current value
+                        -- Note: This is a simplified version - real implementation would need
+                        -- proper expression substitution and evaluation
+                        SELECT {self.dialect.json_array_function}(
+                            -- For now, just return the current value as we need proper expression evaluation
+                            value
+                        )
+                        FROM {self.dialect.json_each_function}(r.current_value) as eval_table(eval_key, value)
+                    ) as current_value,
+                    r.iteration + 1 as iteration,
+                    md5(CAST(r.current_value AS VARCHAR)) as value_hash
+                FROM repeat_recursive r
+                WHERE r.iteration < 10  -- Limit recursion depth to prevent infinite loops
+                  AND r.iteration < 2   -- For now, limit to 2 iterations for testing
+            )
+            SELECT 
+                CASE 
+                    WHEN {base_ref} IS NULL THEN NULL
+                    WHEN COUNT(*) = 0 THEN {self.dialect.json_array_function}()
+                    ELSE (
+                        SELECT current_value 
+                        FROM repeat_recursive 
+                        WHERE iteration = (SELECT MAX(iteration) FROM repeat_recursive)
+                        LIMIT 1
+                    )
+                END as repeat_value
+            FROM repeat_recursive
+        """, "repeat_result")
+        
+        return f"(SELECT repeat_value FROM {repeat_cte_name})"
 
     def _generate_array_extraction_with_cte(self, base_sql: str, identifier_name: str) -> str:
         """Generate array-aware path extraction using CTE approach"""
@@ -1632,6 +4019,8 @@ class SQLGenerator:
         """Visit an AST node and generate SQL"""
         if isinstance(node, self.ThisNode): # Handle $this if AST rewrite produces it
             return self.json_column
+        elif isinstance(node, self.VariableNode): # Handle context variables like $index, $total
+            return self.visit_variable(node)
         elif isinstance(node, self.LiteralNode):
             return self.visit_literal(node)
         elif isinstance(node, self.IdentifierNode):
@@ -1661,6 +4050,25 @@ class SQLGenerator:
             return str(node.value).lower()
         else:
             return str(node.value)
+    
+    def visit_variable(self, node) -> str:
+        """Visit a variable node ($index, $total, etc.)"""
+        # Phase 7 Week 16: Context Variables Implementation
+        
+        if node.name == 'index':
+            # $index variable: represents the 0-based index in collection iteration
+            # For now, return a placeholder that can be filled in by collection operations
+            # In a real implementation, this would need context from the containing iteration
+            return "ROW_NUMBER() OVER () - 1"  # 0-based index
+            
+        elif node.name == 'total':
+            # $total variable: represents the total count in collection iteration
+            # For now, return a placeholder that can be filled in by collection operations
+            # In a real implementation, this would need context from the containing iteration
+            return "COUNT(*) OVER ()"  # Total count
+            
+        else:
+            raise ValueError(f"Unknown context variable: ${node.name}")
     
     def visit_identifier(self, node) -> str:
         """Visit an identifier node"""
@@ -2937,6 +5345,566 @@ class SQLGenerator:
             # For positive numbers: TRUNCATE(3.7) = 3, for negative: TRUNCATE(-3.7) = -3
             return f"TRUNC(CAST({base_expr} AS DOUBLE))"
             
+        elif func_name == 'exp':
+            # exp() function - exponential function (e^x)
+            if len(func_node.args) != 0:
+                raise ValueError("exp() function takes no arguments")
+            
+            # Direct implementation - exponential function
+            # Note: Need to handle overflow cases (exp of very large numbers)
+            return f"CASE WHEN CAST({base_expr} AS DOUBLE) > 700 THEN NULL ELSE EXP(CAST({base_expr} AS DOUBLE)) END"
+            
+        elif func_name == 'ln':
+            # ln() function - natural logarithm (log base e)
+            if len(func_node.args) != 0:
+                raise ValueError("ln() function takes no arguments")
+            
+            # Direct implementation - natural logarithm
+            # Note: Need to handle domain restrictions (ln of non-positive numbers is undefined)
+            return f"CASE WHEN CAST({base_expr} AS DOUBLE) > 0 THEN LN(CAST({base_expr} AS DOUBLE)) ELSE NULL END"
+            
+        elif func_name == 'log':
+            # log() function - base-10 logarithm
+            if len(func_node.args) != 0:
+                raise ValueError("log() function takes no arguments")
+            
+            # Direct implementation - base-10 logarithm
+            # Note: Need to handle domain restrictions (log of non-positive numbers is undefined)
+            return f"CASE WHEN CAST({base_expr} AS DOUBLE) > 0 THEN LOG10(CAST({base_expr} AS DOUBLE)) ELSE NULL END"
+            
+        elif func_name == 'power':
+            # power(exponent) function - raises base (current collection) to the power of exponent
+            if len(func_node.args) != 1:
+                raise ValueError("power() function requires exactly 1 argument (exponent)")
+            
+            # Get the exponent expression
+            exponent_expr = self.visit(func_node.args[0])
+            
+            # Direct implementation - power function
+            # Note: Need to handle special cases (0^0, negative bases with fractional exponents)
+            return f"""CASE 
+                WHEN CAST({base_expr} AS DOUBLE) = 0 AND CAST({exponent_expr} AS DOUBLE) = 0 THEN 1
+                WHEN CAST({base_expr} AS DOUBLE) < 0 AND CAST({exponent_expr} AS DOUBLE) != floor(CAST({exponent_expr} AS DOUBLE)) THEN NULL
+                WHEN CAST({base_expr} AS DOUBLE) = 0 AND CAST({exponent_expr} AS DOUBLE) < 0 THEN NULL
+                ELSE POWER(CAST({base_expr} AS DOUBLE), CAST({exponent_expr} AS DOUBLE))
+            END"""
+            
+        elif func_name == 'tochars':
+            # Phase 5 Week 12: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'tochars'):
+                try:
+                    return self._generate_tochars_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for toChars(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # toChars() - converts a string to an array of single-character strings
+            # FHIRPath specification: toChars() - string to character array conversion
+            
+            # toChars() takes no arguments
+            if len(func_node.args) != 0:
+                raise ValueError(f"toChars() requires no arguments, got {len(func_node.args)}")
+            
+            # Reference for base_expr to avoid repetition 
+            base_ref = base_expr
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN NULL
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN {self.dialect.json_array_function}()
+                        ELSE (
+                            SELECT {self.dialect.json_array_function}(
+                                CASE 
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' THEN (
+                                        SELECT {self.dialect.json_array_function}(substr_char)
+                                        FROM (
+                                            SELECT SUBSTRING(CAST(value AS VARCHAR), seq, 1) as substr_char
+                                            FROM RANGE(1, LENGTH(CAST(value AS VARCHAR)) + 1) as seq_table(seq)
+                                        )
+                                    )
+                                    ELSE NULL
+                                END
+                            )
+                            FROM {self.dialect.json_each_function}({base_ref})
+                            WHERE {self.get_json_type('value')} = 'VARCHAR'
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_ref)} = 'VARCHAR' THEN (
+                            SELECT {self.dialect.json_array_function}(substr_char)
+                            FROM (
+                                SELECT SUBSTRING(CAST({base_ref} AS VARCHAR), seq, 1) as substr_char
+                                FROM RANGE(1, LENGTH(CAST({base_ref} AS VARCHAR)) + 1) as seq_table(seq)
+                            )
+                        )
+                        ELSE NULL
+                    END
+            END
+            """
+            
+        elif func_name == 'matches':
+            # Phase 5 Week 12: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'matches'):
+                try:
+                    return self._generate_matches_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for matches(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # matches(pattern) - tests if the input string matches the given regular expression
+            # FHIRPath specification: matches() - regular expression matching
+            
+            # matches() takes exactly 1 argument (the regex pattern)
+            if len(func_node.args) != 1:
+                raise ValueError(f"matches() requires exactly 1 argument (regex pattern), got {len(func_node.args)}")
+            
+            # Get the regex pattern expression
+            pattern_expr = self.visit(func_node.args[0])
+            
+            # Reference for base_expr to avoid repetition 
+            base_ref = base_expr
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN false
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN false
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(*) = COUNT(CASE 
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND regexp_full_match(CAST(value AS VARCHAR), CAST({pattern_expr} AS VARCHAR)) THEN 1
+                                    ELSE NULL
+                                END) THEN true
+                                ELSE false
+                            END
+                            FROM {self.dialect.json_each_function}({base_ref})
+                            WHERE {self.get_json_type('value')} = 'VARCHAR'
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_ref)} = 'VARCHAR' THEN
+                            CASE 
+                                WHEN regexp_full_match(CAST({base_ref} AS VARCHAR), CAST({pattern_expr} AS VARCHAR)) THEN true
+                                ELSE false
+                            END
+                        ELSE false
+                    END
+            END
+            """
+            
+        elif func_name == 'replacematches':
+            # Phase 5 Week 12: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'replacematches'):
+                try:
+                    return self._generate_replacematches_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for replaceMatches(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # replaceMatches(pattern, replacement) - replaces all matches of the regex pattern with the replacement string
+            # FHIRPath specification: replaceMatches() - regex replacement
+            
+            # replaceMatches() takes exactly 2 arguments (regex pattern, replacement)
+            if len(func_node.args) != 2:
+                raise ValueError(f"replaceMatches() requires exactly 2 arguments (pattern, replacement), got {len(func_node.args)}")
+            
+            # Get the regex pattern and replacement expressions
+            pattern_expr = self.visit(func_node.args[0])
+            replacement_expr = self.visit(func_node.args[1])
+            
+            # Reference for base_expr to avoid repetition 
+            base_ref = base_expr
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN NULL
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN {self.dialect.json_array_function}()
+                        ELSE (
+                            SELECT {self.dialect.json_array_function}(
+                                CASE 
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' THEN 
+                                        regexp_replace(CAST(value AS VARCHAR), CAST({pattern_expr} AS VARCHAR), CAST({replacement_expr} AS VARCHAR), 'g')
+                                    ELSE value
+                                END
+                            )
+                            FROM {self.dialect.json_each_function}({base_ref})
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_ref)} = 'VARCHAR' THEN
+                            regexp_replace(CAST({base_ref} AS VARCHAR), CAST({pattern_expr} AS VARCHAR), CAST({replacement_expr} AS VARCHAR), 'g')
+                        ELSE {base_ref}
+                    END
+            END
+            """
+            
+        elif func_name == 'children':
+            # Phase 5 Week 13: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'children'):
+                try:
+                    return self._generate_children_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for children(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # children() - returns all immediate child elements of the current collection
+            # FHIRPath specification: children() - direct child navigation
+            
+            # children() takes no arguments
+            if len(func_node.args) != 0:
+                raise ValueError(f"children() requires no arguments, got {len(func_node.args)}")
+            
+            # Reference for base_expr to avoid repetition 
+            base_ref = base_expr
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN NULL
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN {self.dialect.json_array_function}()
+                        ELSE (
+                            SELECT {self.dialect.json_array_function}(
+                                CASE 
+                                    WHEN {self.get_json_type('value')} = 'OBJECT' THEN (
+                                        SELECT {self.dialect.json_array_function}(child_value)
+                                        FROM {self.dialect.json_each_function}(value) as child_table(child_key, child_value)
+                                    )
+                                    WHEN {self.get_json_type('value')} = 'ARRAY' THEN (
+                                        SELECT {self.dialect.json_array_function}(array_element)
+                                        FROM {self.dialect.json_each_function}(value) as array_table(array_key, array_element)
+                                    )
+                                    ELSE NULL
+                                END
+                            )
+                            FROM {self.dialect.json_each_function}({base_ref})
+                            WHERE {self.get_json_type('value')} IN ('OBJECT', 'ARRAY')
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_ref)} = 'OBJECT' THEN (
+                            SELECT {self.dialect.json_array_function}(child_value)
+                            FROM {self.dialect.json_each_function}({base_ref}) as child_table(child_key, child_value)
+                        )
+                        WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN (
+                            SELECT {self.dialect.json_array_function}(array_element)
+                            FROM {self.dialect.json_each_function}({base_ref}) as array_table(array_key, array_element)
+                        )
+                        ELSE {self.dialect.json_array_function}()
+                    END
+            END
+            """
+            
+        elif func_name == 'descendants':
+            # Phase 5 Week 13: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'descendants'):
+                try:
+                    return self._generate_descendants_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for descendants(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # descendants() - returns all descendant elements recursively from the current collection
+            # FHIRPath specification: descendants() - recursive descendant navigation
+            
+            # descendants() takes no arguments
+            if len(func_node.args) != 0:
+                raise ValueError(f"descendants() requires no arguments, got {len(func_node.args)}")
+            
+            # Reference for base_expr to avoid repetition 
+            base_ref = base_expr
+            
+            # Note: For descendants(), we need to implement recursive traversal
+            # Since SQL doesn't support true recursion easily, we'll use a WITH RECURSIVE CTE
+            # or simulate it with multiple levels of nested queries for a practical depth
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN NULL
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN {self.dialect.json_array_function}()
+                        ELSE (
+                            WITH RECURSIVE descendants_cte(value, level) AS (
+                                -- Base case: direct children
+                                SELECT child_value as value, 1 as level
+                                FROM {self.dialect.json_each_function}({base_ref}) as parent_table(parent_key, parent_value),
+                                     {self.dialect.json_each_function}(parent_value) as child_table(child_key, child_value)
+                                WHERE {self.get_json_type('parent_value')} IN ('OBJECT', 'ARRAY')
+                                
+                                UNION ALL
+                                
+                                -- Recursive case: children of children
+                                SELECT child_value as value, d.level + 1 as level
+                                FROM descendants_cte d,
+                                     {self.dialect.json_each_function}(d.value) as child_table(child_key, child_value)
+                                WHERE {self.get_json_type('d.value')} IN ('OBJECT', 'ARRAY')
+                                  AND d.level < 10  -- Limit recursion depth to prevent infinite loops
+                            )
+                            SELECT {self.dialect.json_array_function}(value)
+                            FROM descendants_cte
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_ref)} IN ('OBJECT', 'ARRAY') THEN (
+                            WITH RECURSIVE descendants_cte(value, level) AS (
+                                -- Base case: direct children
+                                SELECT child_value as value, 1 as level
+                                FROM {self.dialect.json_each_function}({base_ref}) as child_table(child_key, child_value)
+                                
+                                UNION ALL
+                                
+                                -- Recursive case: children of children
+                                SELECT nested_child_value as value, d.level + 1 as level
+                                FROM descendants_cte d,
+                                     {self.dialect.json_each_function}(d.value) as nested_table(nested_key, nested_child_value)
+                                WHERE {self.get_json_type('d.value')} IN ('OBJECT', 'ARRAY')
+                                  AND d.level < 10  -- Limit recursion depth to prevent infinite loops
+                            )
+                            SELECT {self.dialect.json_array_function}(value)
+                            FROM descendants_cte
+                        )
+                        ELSE {self.dialect.json_array_function}()
+                    END
+            END
+            """
+            
+        elif func_name == 'union':
+            # Phase 6 Week 14: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'union'):
+                try:
+                    return self._generate_union_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for union(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # union(collection) - returns the union of the current collection and the argument collection
+            # FHIRPath specification: union(collection) - set union with deduplication
+            
+            # union() takes exactly 1 argument (the collection to union with)
+            if len(func_node.args) != 1:
+                raise ValueError(f"union() requires exactly 1 argument (collection to union with), got {len(func_node.args)}")
+            
+            # Get the argument collection expression
+            other_collection_expr = self.visit(func_node.args[0])
+            
+            # Reference for base_expr to avoid repetition 
+            base_ref = base_expr
+            
+            # Note: union() performs set union with deduplication (distinct values only)
+            # This is different from the | operator which concatenates without deduplication
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL AND {other_collection_expr} IS NULL THEN NULL
+                WHEN {base_expr} IS NULL THEN 
+                    CASE 
+                        WHEN {self.get_json_type(other_collection_expr)} = 'ARRAY' THEN (
+                            SELECT {self.dialect.json_array_function}(DISTINCT value)
+                            FROM {self.dialect.json_each_function}({other_collection_expr})
+                        )
+                        ELSE {self.dialect.json_array_function}({other_collection_expr})
+                    END
+                WHEN {other_collection_expr} IS NULL THEN 
+                    CASE 
+                        WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN (
+                            SELECT {self.dialect.json_array_function}(DISTINCT value)
+                            FROM {self.dialect.json_each_function}({base_ref})
+                        )
+                        ELSE {self.dialect.json_array_function}({base_ref})
+                    END
+                ELSE (
+                    -- Both collections are non-null, perform union with deduplication
+                    SELECT {self.dialect.json_array_function}(DISTINCT combined_value)
+                    FROM (
+                        -- Values from the base collection
+                        SELECT value as combined_value
+                        FROM {self.dialect.json_each_function}(
+                            CASE 
+                                WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN {base_ref}
+                                ELSE {self.dialect.json_array_function}({base_ref})
+                            END
+                        )
+                        
+                        UNION ALL
+                        
+                        -- Values from the argument collection
+                        SELECT value as combined_value
+                        FROM {self.dialect.json_each_function}(
+                            CASE 
+                                WHEN {self.get_json_type(other_collection_expr)} = 'ARRAY' THEN {other_collection_expr}
+                                ELSE {self.dialect.json_array_function}({other_collection_expr})
+                            END
+                        )
+                    ) AS union_source
+                )
+            END
+            """
+            
+        elif func_name == 'combine':
+            # Phase 6 Week 14: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'combine'):
+                try:
+                    return self._generate_combine_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for combine(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # combine(collection) - returns the combination of the current collection and the argument collection
+            # FHIRPath specification: combine(collection) - collection combination without deduplication
+            
+            # combine() takes exactly 1 argument (the collection to combine with)
+            if len(func_node.args) != 1:
+                raise ValueError(f"combine() requires exactly 1 argument (collection to combine with), got {len(func_node.args)}")
+            
+            # Get the argument collection expression
+            other_collection_expr = self.visit(func_node.args[0])
+            
+            # Reference for base_expr to avoid repetition 
+            base_ref = base_expr
+            
+            # Note: combine() performs collection combination without deduplication
+            # All elements from both collections are included, preserving duplicates
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL AND {other_collection_expr} IS NULL THEN NULL
+                WHEN {base_expr} IS NULL THEN 
+                    CASE 
+                        WHEN {self.get_json_type(other_collection_expr)} = 'ARRAY' THEN {other_collection_expr}
+                        ELSE {self.dialect.json_array_function}({other_collection_expr})
+                    END
+                WHEN {other_collection_expr} IS NULL THEN 
+                    CASE 
+                        WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN {base_ref}
+                        ELSE {self.dialect.json_array_function}({base_ref})
+                    END
+                ELSE (
+                    -- Both collections are non-null, perform combination without deduplication
+                    SELECT {self.dialect.json_array_function}(combined_value)
+                    FROM (
+                        -- Values from the base collection
+                        SELECT value as combined_value
+                        FROM {self.dialect.json_each_function}(
+                            CASE 
+                                WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN {base_ref}
+                                ELSE {self.dialect.json_array_function}({base_ref})
+                            END
+                        )
+                        
+                        UNION ALL
+                        
+                        -- Values from the argument collection
+                        SELECT value as combined_value
+                        FROM {self.dialect.json_each_function}(
+                            CASE 
+                                WHEN {self.get_json_type(other_collection_expr)} = 'ARRAY' THEN {other_collection_expr}
+                                ELSE {self.dialect.json_array_function}({other_collection_expr})
+                            END
+                        )
+                    ) AS combine_source
+                )
+            END
+            """
+            
+        elif func_name == 'repeat':
+            # Phase 6 Week 15: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'repeat'):
+                try:
+                    return self._generate_repeat_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for repeat(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # repeat(expression) - iteratively applies the expression until a stable result is reached
+            # FHIRPath specification: repeat(expression) - iterative projection with recursion termination
+            
+            # repeat() takes exactly 1 argument (the expression to apply iteratively)
+            if len(func_node.args) != 1:
+                raise ValueError(f"repeat() requires exactly 1 argument (expression to apply iteratively), got {len(func_node.args)}")
+            
+            # Get the expression to apply repeatedly
+            repeat_expr = self.visit(func_node.args[0])
+            
+            # Reference for base_expr to avoid repetition 
+            base_ref = base_expr
+            
+            # Note: repeat() applies the expression iteratively until the result stabilizes
+            # We need to use WITH RECURSIVE to implement this safely with a depth limit
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN NULL
+                ELSE (
+                    WITH RECURSIVE repeat_cte(current_value, iteration, previous_hash) AS (
+                        -- Base case: start with the initial collection
+                        SELECT 
+                            CASE 
+                                WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN {base_ref}
+                                ELSE {self.dialect.json_array_function}({base_ref})
+                            END as current_value,
+                            0 as iteration,
+                            '' as previous_hash
+                        
+                        UNION ALL
+                        
+                        -- Recursive case: apply the expression to current result
+                        SELECT 
+                            (
+                                -- Apply the repeat expression to each element in current_value
+                                SELECT {self.dialect.json_array_function}(
+                                    CASE 
+                                        WHEN {self.get_json_type('value')} = 'ARRAY' THEN (
+                                            SELECT {self.dialect.json_array_function}(result_value)
+                                            FROM {self.dialect.json_each_function}(
+                                                -- Apply expression: substitute $this with current value
+                                                {repeat_expr.replace('$this', 'value')}
+                                            ) as result_table(result_key, result_value)
+                                        )
+                                        ELSE {repeat_expr.replace('$this', 'value')}
+                                    END
+                                )
+                                FROM {self.dialect.json_each_function}(r.current_value) as iter_table(iter_key, value)
+                            ) as current_value,
+                            r.iteration + 1 as iteration,
+                            -- Create hash of current value for convergence detection
+                            md5(CAST(r.current_value AS VARCHAR)) as previous_hash
+                        FROM repeat_cte r
+                        WHERE r.iteration < 10  -- Limit recursion depth to prevent infinite loops
+                          AND (
+                              r.iteration = 0 OR  -- Always do at least one iteration
+                              md5(CAST(r.current_value AS VARCHAR)) != r.previous_hash  -- Continue if result is changing
+                          )
+                    )
+                    SELECT 
+                        CASE 
+                            WHEN COUNT(*) = 0 THEN {self.dialect.json_array_function}()
+                            ELSE current_value
+                        END
+                    FROM repeat_cte
+                    WHERE iteration = (SELECT MAX(iteration) FROM repeat_cte)  -- Get final result
+                )
+            END
+            """
+            
         elif func_name == 'now':
             # now() function - returns current datetime
             if len(func_node.args) != 0:
@@ -3259,102 +6227,38 @@ class SQLGenerator:
             """
 
         elif func_name == 'encode':
-            # encode() function - URL/percent encoding of strings
+            # encode() function - URL/percent encoding of strings using database-specific functions
             if len(func_node.args) != 0:
                 raise ValueError("encode() function takes no arguments")
             
-            # URL encode the string value
-            # In SQL, we need to implement URL encoding manually since there's no standard function
+            # Use database-specific URL encoding function for better performance and accuracy
             return f"""
             CASE 
                 -- Only encode string values
                 WHEN {base_expr} IS NOT NULL AND 
                      {self.dialect.json_type_function}({base_expr}) IN ('VARCHAR', 'STRING', 'TEXT')
                 THEN
-                    -- Basic URL encoding implementation
-                    -- This is a simplified implementation - production systems might use stored procedures
-                    REPLACE(
-                        REPLACE(
-                            REPLACE(
-                                REPLACE(
-                                    REPLACE(
-                                        REPLACE(
-                                            REPLACE(
-                                                REPLACE(
-                                                    REPLACE(
-                                                        REPLACE(
-                                                            {self.dialect.json_extract_string_function}({base_expr}, '$'),
-                                                            '%', '%25'
-                                                        ),
-                                                        ' ', '%20'
-                                                    ),
-                                                    '!', '%21'
-                                                ),
-                                                '#', '%23'
-                                            ),
-                                            '$', '%24'
-                                        ),
-                                        '&', '%26'
-                                    ),
-                                    '''', '%27'
-                                ),
-                                '(', '%28'
-                            ),
-                            ')', '%29'
-                        ),
-                        '+', '%2B'
-                    )
+                    -- Use database-specific URL encoding function
+                    {self.dialect.url_encode(f'{self.dialect.json_extract_string_function}({base_expr}, "$")')}
                 -- Non-string values return null
                 ELSE NULL
             END
             """
 
         elif func_name == 'decode':
-            # decode() function - URL/percent decoding of strings
+            # decode() function - URL/percent decoding of strings using database-specific functions
             if len(func_node.args) != 0:
                 raise ValueError("decode() function takes no arguments")
             
-            # URL decode the string value
-            # In SQL, we need to implement URL decoding manually since there's no standard function
+            # Use database-specific URL decoding function for better performance and accuracy
             return f"""
             CASE 
                 -- Only decode string values
                 WHEN {base_expr} IS NOT NULL AND 
                      {self.dialect.json_type_function}({base_expr}) IN ('VARCHAR', 'STRING', 'TEXT')
                 THEN
-                    -- Basic URL decoding implementation (reverse of encode)
-                    -- This is a simplified implementation - production systems might use stored procedures
-                    REPLACE(
-                        REPLACE(
-                            REPLACE(
-                                REPLACE(
-                                    REPLACE(
-                                        REPLACE(
-                                            REPLACE(
-                                                REPLACE(
-                                                    REPLACE(
-                                                        REPLACE(
-                                                            {self.dialect.json_extract_string_function}({base_expr}, '$'),
-                                                            '%2B', '+'
-                                                        ),
-                                                        '%29', ')'
-                                                    ),
-                                                    '%28', '('
-                                                ),
-                                                '%27', ''''
-                                            ),
-                                            '%26', '&'
-                                        ),
-                                        '%24', '$'
-                                    ),
-                                    '%23', '#'
-                                ),
-                                '%21', '!'
-                            ),
-                            '%20', ' '
-                        ),
-                        '%25', '%'
-                    )
+                    -- Use database-specific URL decoding function
+                    {self.dialect.url_decode(f'{self.dialect.json_extract_string_function}({base_expr}, "$")')}
                 -- Non-string values return null
                 ELSE NULL
             END
@@ -3487,6 +6391,1486 @@ class SQLGenerator:
                 ELSE FALSE
             END
             """
+        elif func_name == 'single':
+            # Phase 1: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'single'):
+                try:
+                    return self._generate_single_with_cte(base_expr)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for single(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # single() returns the single element of a collection, or empty collection for error conditions
+            # FHIRPath specification: single() - returns the single element in a collection. Empty collection if empty or multiple elements
+            # Note: In FHIRPath, "errors" typically result in empty collections rather than exceptions
+            return f"""
+            CASE 
+                -- Check if the expression is null (empty collection)
+                WHEN {base_expr} IS NULL THEN NULL
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Array is empty - return empty collection (NULL)
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        -- Array has exactly one element - return that element
+                        WHEN {self.get_json_array_length(base_expr)} = 1 THEN
+                            {self.extract_json_object(base_expr, '$[0]')}
+                        -- Array has more than one element - return empty collection (NULL) per FHIRPath error semantics
+                        ELSE NULL
+                    END
+                -- For non-arrays (single objects), return the object itself
+                ELSE {base_expr}
+            END
+            """
+        elif func_name == 'tail':
+            # Phase 1: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'tail'):
+                try:
+                    return self._generate_tail_with_cte(base_expr)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for tail(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # tail() returns all elements except the first one in a collection
+            # FHIRPath specification: tail() - returns all but the first element in a collection
+            # Note: For simplicity, we'll return a computed JSON array slice
+            return f"""
+            CASE 
+                -- Check if the expression is null (empty collection)
+                WHEN {base_expr} IS NULL THEN NULL
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Array is empty or has only one element - return empty collection (NULL)
+                        WHEN {self.get_json_array_length(base_expr)} <= 1 THEN NULL
+                        -- Array has multiple elements - return slice from index 1 to end
+                        ELSE (
+                            SELECT {self.dialect.json_array_function}(
+                                value::VARCHAR
+                            )
+                            FROM (
+                                SELECT 
+                                    {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
+                                FROM {self.dialect.json_each_function}({base_expr})
+                                WHERE ROW_NUMBER() OVER () > 1
+                            ) AS tail_elements
+                        )
+                    END
+                -- For non-arrays (single objects), return empty collection (NULL)
+                ELSE NULL
+            END
+            """
+        elif func_name == 'skip':
+            # Phase 1: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'skip'):
+                try:
+                    return self._generate_skip_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for skip(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # skip(num) returns all elements after skipping the first num elements
+            # FHIRPath specification: skip(num) - returns all but the first num elements
+            
+            # Get the skip count argument
+            if len(func_node.args) != 1:
+                raise ValueError("skip() function requires exactly one argument")
+            
+            skip_count_arg = func_node.args[0]
+            if hasattr(skip_count_arg, 'value'):
+                skip_count = skip_count_arg.value
+            else:
+                # Handle complex expressions - visit the argument
+                skip_count_sql = self.visit(skip_count_arg)
+                skip_count = f"({skip_count_sql})"
+            
+            return f"""
+            CASE 
+                -- Check if the expression is null (empty collection)
+                WHEN {base_expr} IS NULL THEN NULL
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- If skip count is null or negative, return original array
+                        WHEN {skip_count} IS NULL OR {skip_count} < 0 THEN {base_expr}
+                        -- Array length is less than or equal to skip count - return empty collection (NULL)
+                        WHEN {self.get_json_array_length(base_expr)} <= {skip_count} THEN NULL
+                        -- Array has more elements than skip count - return elements after skip
+                        ELSE (
+                            SELECT {self.dialect.json_array_function}(
+                                value::VARCHAR
+                            )
+                            FROM (
+                                SELECT 
+                                    {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
+                                FROM {self.dialect.json_each_function}({base_expr})
+                                WHERE ROW_NUMBER() OVER () > {skip_count}
+                            ) AS skip_elements
+                        )
+                    END
+                -- For non-arrays (single objects), skip behavior
+                ELSE 
+                    CASE 
+                        WHEN {skip_count} IS NULL OR {skip_count} <= 0 THEN {base_expr}
+                        ELSE NULL
+                    END
+            END
+            """
+        elif func_name == 'take':
+            # Phase 1: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'take'):
+                try:
+                    return self._generate_take_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for take(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # take(num) returns the first num elements of a collection
+            # FHIRPath specification: take(num) - returns the first num elements
+            
+            # Get the take count argument
+            if len(func_node.args) != 1:
+                raise ValueError("take() function requires exactly one argument")
+            
+            take_count_arg = func_node.args[0]
+            if hasattr(take_count_arg, 'value'):
+                take_count = take_count_arg.value
+            else:
+                # Handle complex expressions - visit the argument
+                take_count_sql = self.visit(take_count_arg)
+                take_count = f"({take_count_sql})"
+            
+            return f"""
+            CASE 
+                -- Check if the expression is null (empty collection)
+                WHEN {base_expr} IS NULL THEN NULL
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- If take count is null or zero or negative, return empty collection (NULL)
+                        WHEN {take_count} IS NULL OR {take_count} <= 0 THEN NULL
+                        -- Array is empty - return empty collection (NULL)
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        -- Take count is greater than or equal to array length - return entire array
+                        WHEN {take_count} >= {self.get_json_array_length(base_expr)} THEN {base_expr}
+                        -- Take count is less than array length - return first take_count elements
+                        ELSE (
+                            SELECT {self.dialect.json_array_function}(
+                                value::VARCHAR
+                            )
+                            FROM (
+                                SELECT 
+                                    {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
+                                FROM {self.dialect.json_each_function}({base_expr})
+                                WHERE ROW_NUMBER() OVER () <= {take_count}
+                            ) AS take_elements
+                        )
+                    END
+                -- For non-arrays (single objects), take behavior
+                ELSE 
+                    CASE 
+                        WHEN {take_count} IS NULL OR {take_count} <= 0 THEN NULL
+                        ELSE {base_expr}
+                    END
+            END
+            """
+        elif func_name == 'intersect':
+            # Phase 1: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'intersect'):
+                try:
+                    return self._generate_intersect_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for intersect(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # intersect(other) returns the intersection of the current collection with another collection
+            # FHIRPath specification: intersect(other) - returns the set intersection
+            
+            # Get the other collection argument
+            if len(func_node.args) != 1:
+                raise ValueError("intersect() function requires exactly one argument")
+            
+            other_collection_arg = func_node.args[0]
+            # Visit the argument to get the SQL for the other collection
+            other_collection_sql = self.visit(other_collection_arg)
+            
+            return f"""
+            CASE 
+                -- Check if either expression is null (empty collection)
+                WHEN {base_expr} IS NULL OR ({other_collection_sql}) IS NULL THEN NULL
+                -- Check if both are arrays
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' AND {self.get_json_type(other_collection_sql)} = 'ARRAY' THEN
+                    CASE 
+                        -- Either array is empty - return empty collection (NULL)
+                        WHEN {self.get_json_array_length(base_expr)} = 0 OR {self.get_json_array_length(other_collection_sql)} = 0 THEN NULL
+                        -- Both arrays have elements - find intersection
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(*) = 0 THEN NULL
+                                ELSE {self.dialect.json_array_function}(
+                                    DISTINCT value::VARCHAR
+                                )
+                            END
+                            FROM (
+                                SELECT 
+                                    {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
+                                FROM {self.dialect.json_each_function}({base_expr})
+                            ) AS left_elements
+                            WHERE EXISTS (
+                                SELECT 1 
+                                FROM (
+                                    SELECT 
+                                        {self.dialect.json_extract_function}({other_collection_sql}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as other_value
+                                    FROM {self.dialect.json_each_function}({other_collection_sql})
+                                ) AS right_elements
+                                WHERE left_elements.value = right_elements.other_value
+                            )
+                        )
+                    END
+                -- Handle mixed array/non-array cases
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' AND {self.get_json_type(other_collection_sql)} != 'ARRAY' THEN
+                    -- Base is array, other is single - check if single value exists in array
+                    CASE 
+                        WHEN EXISTS (
+                            SELECT 1 
+                            FROM (
+                                SELECT 
+                                    {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
+                                FROM {self.dialect.json_each_function}({base_expr})
+                            ) AS array_elements
+                            WHERE array_elements.value = {other_collection_sql}
+                        ) THEN {self.dialect.json_array_function}({other_collection_sql}::VARCHAR)
+                        ELSE NULL
+                    END
+                WHEN {self.get_json_type(base_expr)} != 'ARRAY' AND {self.get_json_type(other_collection_sql)} = 'ARRAY' THEN
+                    -- Base is single, other is array - check if single value exists in array
+                    CASE 
+                        WHEN EXISTS (
+                            SELECT 1 
+                            FROM (
+                                SELECT 
+                                    {self.dialect.json_extract_function}({other_collection_sql}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
+                                FROM {self.dialect.json_each_function}({other_collection_sql})
+                            ) AS array_elements
+                            WHERE array_elements.value = {base_expr}
+                        ) THEN {self.dialect.json_array_function}({base_expr}::VARCHAR)
+                        ELSE NULL
+                    END
+                -- Both are single values - check equality
+                ELSE 
+                    CASE 
+                        WHEN {base_expr} = {other_collection_sql} THEN {self.dialect.json_array_function}({base_expr}::VARCHAR)
+                        ELSE NULL
+                    END
+            END
+            """
+        elif func_name == 'exclude':
+            # Phase 1: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'exclude'):
+                try:
+                    return self._generate_exclude_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for exclude(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # exclude(other) returns elements from the current collection that are NOT in the other collection
+            # FHIRPath specification: exclude(other) - returns the set difference (current - other)
+            
+            # Get the other collection argument
+            if len(func_node.args) != 1:
+                raise ValueError("exclude() function requires exactly one argument")
+            
+            other_collection_arg = func_node.args[0]
+            # Visit the argument to get the SQL for the other collection
+            other_collection_sql = self.visit(other_collection_arg)
+            
+            return f"""
+            CASE 
+                -- Check if the base expression is null (empty collection)
+                WHEN {base_expr} IS NULL THEN NULL
+                -- If other collection is null, return the base collection (nothing to exclude)
+                WHEN ({other_collection_sql}) IS NULL THEN {base_expr}
+                -- Check if base is an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Base array is empty - return empty collection (NULL)
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        -- Other is also an array - exclude elements that exist in other
+                        WHEN {self.get_json_type(other_collection_sql)} = 'ARRAY' THEN (
+                            SELECT CASE 
+                                WHEN COUNT(*) = 0 THEN NULL
+                                ELSE {self.dialect.json_array_function}(
+                                    DISTINCT value::VARCHAR
+                                )
+                            END
+                            FROM (
+                                SELECT 
+                                    {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
+                                FROM {self.dialect.json_each_function}({base_expr})
+                            ) AS left_elements
+                            WHERE NOT EXISTS (
+                                SELECT 1 
+                                FROM (
+                                    SELECT 
+                                        {self.dialect.json_extract_function}({other_collection_sql}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as other_value
+                                    FROM {self.dialect.json_each_function}({other_collection_sql})
+                                ) AS right_elements
+                                WHERE left_elements.value = right_elements.other_value
+                            )
+                        )
+                        -- Other is single value - exclude if it matches any array element
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(*) = 0 THEN NULL
+                                ELSE {self.dialect.json_array_function}(
+                                    DISTINCT value::VARCHAR
+                                )
+                            END
+                            FROM (
+                                SELECT 
+                                    {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
+                                FROM {self.dialect.json_each_function}({base_expr})
+                            ) AS array_elements
+                            WHERE array_elements.value != {other_collection_sql}
+                        )
+                    END
+                -- Base is single value
+                ELSE 
+                    CASE 
+                        -- Other is array - check if base value exists in array, if so exclude it
+                        WHEN {self.get_json_type(other_collection_sql)} = 'ARRAY' THEN
+                            CASE 
+                                WHEN EXISTS (
+                                    SELECT 1 
+                                    FROM (
+                                        SELECT 
+                                            {self.dialect.json_extract_function}({other_collection_sql}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
+                                        FROM {self.dialect.json_each_function}({other_collection_sql})
+                                    ) AS array_elements
+                                    WHERE array_elements.value = {base_expr}
+                                ) THEN NULL
+                                ELSE {self.dialect.json_array_function}({base_expr}::VARCHAR)
+                            END
+                        -- Both are single values - exclude if they match
+                        ELSE 
+                            CASE 
+                                WHEN {base_expr} = {other_collection_sql} THEN NULL
+                                ELSE {self.dialect.json_array_function}({base_expr}::VARCHAR)
+                            END
+                    END
+            END
+            """
+        elif func_name == 'alltrue':
+            # Phase 2: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'alltrue'):
+                try:
+                    return self._generate_alltrue_with_cte(base_expr)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for allTrue(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # allTrue() returns true if all elements in a collection are true, false if any element is false
+            # FHIRPath specification: allTrue() - returns true if all elements are true, false otherwise
+            # Returns empty if collection is empty
+            
+            return f"""
+            CASE 
+                -- Check if the expression is null (empty collection)
+                WHEN {base_expr} IS NULL THEN NULL
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Array is empty - return empty (NULL) per FHIRPath spec
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        -- Array has elements - check if all are true
+                        ELSE (
+                            SELECT CASE 
+                                -- If any element is false, return false
+                                WHEN COUNT(CASE WHEN 
+                                    (CASE 
+                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'false' THEN false
+                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'true' THEN true
+                                        ELSE NULL
+                                    END) = false 
+                                    THEN 1 END) > 0 THEN false
+                                -- If any element is null/non-boolean, return false (strict evaluation)
+                                WHEN COUNT(CASE WHEN 
+                                    (CASE 
+                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'false' THEN false
+                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'true' THEN true
+                                        ELSE NULL
+                                    END) IS NULL 
+                                    THEN 1 END) > 0 THEN false
+                                -- If all elements are true, return true
+                                ELSE true
+                            END
+                            FROM {self.dialect.json_each_function}({base_expr})
+                        )
+                    END
+                -- For non-arrays (single values), check if the value is true
+                ELSE 
+                    CASE 
+                        WHEN {base_expr}::VARCHAR = 'true' THEN true
+                        WHEN {base_expr}::VARCHAR = 'false' THEN false
+                        ELSE false  -- Non-boolean single values are treated as false
+                    END
+            END
+            """
+        elif func_name == 'allfalse':
+            # Phase 2: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'allfalse'):
+                try:
+                    return self._generate_allfalse_with_cte(base_expr)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for allFalse(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # allFalse() returns true if all elements in a collection are false, false if any element is true
+            # FHIRPath specification: allFalse() - returns true if all elements are false, false otherwise
+            # Returns empty if collection is empty
+            
+            return f"""
+            CASE 
+                -- Check if the expression is null (empty collection)
+                WHEN {base_expr} IS NULL THEN NULL
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Array is empty - return empty (NULL) per FHIRPath spec
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        -- Array has elements - check if all are false
+                        ELSE (
+                            SELECT CASE 
+                                -- If any element is true, return false
+                                WHEN COUNT(CASE WHEN 
+                                    (CASE 
+                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'false' THEN false
+                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'true' THEN true
+                                        ELSE NULL
+                                    END) = true 
+                                    THEN 1 END) > 0 THEN false
+                                -- If any element is null/non-boolean, return false (strict evaluation)
+                                WHEN COUNT(CASE WHEN 
+                                    (CASE 
+                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'false' THEN false
+                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'true' THEN true
+                                        ELSE NULL
+                                    END) IS NULL 
+                                    THEN 1 END) > 0 THEN false
+                                -- If all elements are false, return true
+                                ELSE true
+                            END
+                            FROM {self.dialect.json_each_function}({base_expr})
+                        )
+                    END
+                -- For non-arrays (single values), check if the value is false
+                ELSE 
+                    CASE 
+                        WHEN {base_expr}::VARCHAR = 'false' THEN true
+                        WHEN {base_expr}::VARCHAR = 'true' THEN false
+                        ELSE false  -- Non-boolean single values are treated as not-false (so false for allFalse)
+                    END
+            END
+            """
+
+        elif func_name == 'anytrue':
+            # Phase 2: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'anytrue'):
+                try:
+                    return self._generate_anytrue_with_cte(base_expr)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for anyTrue(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # anyTrue() returns true if any element in a collection is true, false if all elements are false
+            # FHIRPath specification: anyTrue() - returns true if any element is true, false otherwise
+            # Returns empty if collection is empty
+            
+            return f"""
+            CASE 
+                -- Check if the expression is null (empty collection)
+                WHEN {base_expr} IS NULL THEN NULL
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Array is empty - return empty (NULL) per FHIRPath spec
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        -- Array has elements - check if any are true
+                        ELSE (
+                            SELECT CASE 
+                                -- If any element is true, return true
+                                WHEN COUNT(CASE WHEN 
+                                    (CASE 
+                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'false' THEN false
+                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'true' THEN true
+                                        ELSE NULL
+                                    END) = true 
+                                    THEN 1 END) > 0 THEN true
+                                -- If any element is null/non-boolean, return false (strict evaluation)
+                                WHEN COUNT(CASE WHEN 
+                                    (CASE 
+                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'false' THEN false
+                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'true' THEN true
+                                        ELSE NULL
+                                    END) IS NULL 
+                                    THEN 1 END) > 0 THEN false
+                                -- If all elements are false, return false
+                                ELSE false
+                            END
+                            FROM {self.dialect.json_each_function}({base_expr})
+                        )
+                    END
+                -- For non-arrays (single values), check if the value is true
+                ELSE 
+                    CASE 
+                        WHEN {base_expr}::VARCHAR = 'true' THEN true
+                        WHEN {base_expr}::VARCHAR = 'false' THEN false
+                        ELSE false  -- Non-boolean single values are treated as not-true (so false for anyTrue)
+                    END
+            END
+            """
+
+        elif func_name == 'anyfalse':
+            # Phase 2: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'anyfalse'):
+                try:
+                    return self._generate_anyfalse_with_cte(base_expr)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for anyFalse(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # anyFalse() returns true if any element in a collection is false, false if all elements are true
+            # FHIRPath specification: anyFalse() - returns true if any element is false, false otherwise
+            # Returns empty if collection is empty
+            
+            return f"""
+            CASE 
+                -- Check if the expression is null (empty collection)
+                WHEN {base_expr} IS NULL THEN NULL
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Array is empty - return empty (NULL) per FHIRPath spec
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        -- Array has elements - check if any are false
+                        ELSE (
+                            SELECT CASE 
+                                -- If any element is false, return true
+                                WHEN COUNT(CASE WHEN 
+                                    (CASE 
+                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'false' THEN false
+                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'true' THEN true
+                                        ELSE NULL
+                                    END) = false 
+                                    THEN 1 END) > 0 THEN true
+                                -- If any element is null/non-boolean, return false (strict evaluation)
+                                WHEN COUNT(CASE WHEN 
+                                    (CASE 
+                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'false' THEN false
+                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'true' THEN true
+                                        ELSE NULL
+                                    END) IS NULL 
+                                    THEN 1 END) > 0 THEN false
+                                -- If all elements are true, return false
+                                ELSE false
+                            END
+                            FROM {self.dialect.json_each_function}({base_expr})
+                        )
+                    END
+                -- For non-arrays (single values), check if the value is false
+                ELSE 
+                    CASE 
+                        WHEN {base_expr}::VARCHAR = 'false' THEN true
+                        WHEN {base_expr}::VARCHAR = 'true' THEN false
+                        ELSE false  -- Non-boolean single values are treated as not-false (so false for anyFalse)
+                    END
+            END
+            """
+
+        elif func_name == 'iif':
+            # Phase 2: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'iif'):
+                try:
+                    return self._generate_iif_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for iif(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # iif(condition, true-result, false-result) - conditional expression
+            # FHIRPath specification: iif() - evaluates condition and returns true-result or false-result
+            # Lazy evaluation: only evaluate the branch that will be returned
+            
+            # Extract the three arguments
+            if len(func_node.args) != 3:
+                raise ValueError(f"iif() requires exactly 3 arguments, got {len(func_node.args)}")
+            
+            condition_arg = func_node.args[0]
+            true_result_arg = func_node.args[1]
+            false_result_arg = func_node.args[2]
+            
+            # Generate SQL for each argument
+            condition_sql = self.visit(condition_arg)
+            true_result_sql = self.visit(true_result_arg)
+            false_result_sql = self.visit(false_result_arg)
+            
+            return f"""
+            CASE 
+                -- Evaluate condition and return appropriate result
+                WHEN ({condition_sql})::VARCHAR = 'true' THEN {true_result_sql}
+                WHEN ({condition_sql})::VARCHAR = 'false' THEN {false_result_sql}
+                -- If condition is null or non-boolean, return empty (null)
+                ELSE NULL
+            END
+            """
+
+        elif func_name == 'subsetof':
+            # Phase 2: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'subsetof'):
+                try:
+                    return self._generate_subsetof_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for subsetOf(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # subsetOf(collection) - returns true if all elements in the current collection are contained in the argument collection
+            # FHIRPath specification: subsetOf() - test if the current collection is a subset of the argument collection
+            
+            # Extract the argument (the collection to compare against)
+            if len(func_node.args) != 1:
+                raise ValueError(f"subsetOf() requires exactly 1 argument, got {len(func_node.args)}")
+            
+            other_collection_arg = func_node.args[0]
+            other_collection_sql = self.visit(other_collection_arg)
+            
+            return f"""
+            CASE 
+                -- Check if base collection is null or empty
+                WHEN {base_expr} IS NULL THEN true
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' AND {self.get_json_array_length(base_expr)} = 0 THEN true
+                -- Check if other collection is null
+                WHEN {other_collection_sql} IS NULL THEN false
+                -- Both are arrays - check if all elements of base are in other
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' AND {self.get_json_type(other_collection_sql)} = 'ARRAY' THEN (
+                    SELECT CASE 
+                        WHEN COUNT(*) = 0 THEN true  -- Empty base collection is subset of any collection
+                        WHEN COUNT(CASE WHEN other_elem.value IS NULL THEN 1 END) > 0 THEN false  -- Any element not found in other collection
+                        ELSE true  -- All elements found
+                    END
+                    FROM {self.dialect.json_each_function}({base_expr}) base_elem
+                    LEFT JOIN {self.dialect.json_each_function}({other_collection_sql}) other_elem 
+                        ON base_elem.value = other_elem.value
+                )
+                -- Handle single element cases
+                WHEN {self.get_json_type(base_expr)} != 'ARRAY' AND {self.get_json_type(other_collection_sql)} = 'ARRAY' THEN (
+                    SELECT CASE 
+                        WHEN COUNT(*) > 0 THEN true
+                        ELSE false
+                    END
+                    FROM {self.dialect.json_each_function}({other_collection_sql})
+                    WHERE value = {base_expr}
+                )
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' AND {self.get_json_type(other_collection_sql)} != 'ARRAY' THEN (
+                    SELECT CASE 
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN true
+                        WHEN {self.get_json_array_length(base_expr)} = 1 AND {self.dialect.json_extract_function}({base_expr}, '$[0]') = {other_collection_sql} THEN true
+                        ELSE false
+                    END
+                )
+                -- Both single elements
+                ELSE CASE WHEN {base_expr} = {other_collection_sql} THEN true ELSE false END
+            END
+            """
+
+        elif func_name == 'supersetof':
+            # Phase 2: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'supersetof'):
+                try:
+                    return self._generate_supersetof_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for supersetOf(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # supersetOf(collection) - returns true if all elements in the argument collection are contained in the current collection
+            # FHIRPath specification: supersetOf() - test if the current collection is a superset of the argument collection
+            # This is essentially the reverse of subsetOf() - check if other collection is subset of base collection
+            
+            # Extract the argument (the collection to check if it's a subset of current)
+            if len(func_node.args) != 1:
+                raise ValueError(f"supersetOf() requires exactly 1 argument, got {len(func_node.args)}")
+            
+            other_collection_arg = func_node.args[0]
+            other_collection_sql = self.visit(other_collection_arg)
+            
+            return f"""
+            CASE 
+                -- Check if other collection is null or empty - base collection is superset of empty collection
+                WHEN {other_collection_sql} IS NULL THEN true
+                WHEN {self.get_json_type(other_collection_sql)} = 'ARRAY' AND {self.get_json_array_length(other_collection_sql)} = 0 THEN true
+                -- Check if base collection is null
+                WHEN {base_expr} IS NULL THEN false
+                -- Both are arrays - check if all elements of other are in base
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' AND {self.get_json_type(other_collection_sql)} = 'ARRAY' THEN (
+                    SELECT CASE 
+                        WHEN COUNT(*) = 0 THEN true  -- Empty other collection is subset of any collection
+                        WHEN COUNT(CASE WHEN base_elem.value IS NULL THEN 1 END) > 0 THEN false  -- Any element of other not found in base collection
+                        ELSE true  -- All elements found
+                    END
+                    FROM {self.dialect.json_each_function}({other_collection_sql}) other_elem
+                    LEFT JOIN {self.dialect.json_each_function}({base_expr}) base_elem 
+                        ON other_elem.value = base_elem.value
+                )
+                -- Handle single element cases
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' AND {self.get_json_type(other_collection_sql)} != 'ARRAY' THEN (
+                    SELECT CASE 
+                        WHEN COUNT(*) > 0 THEN true
+                        ELSE false
+                    END
+                    FROM {self.dialect.json_each_function}({base_expr})
+                    WHERE value = {other_collection_sql}
+                )
+                WHEN {self.get_json_type(base_expr)} != 'ARRAY' AND {self.get_json_type(other_collection_sql)} = 'ARRAY' THEN (
+                    SELECT CASE 
+                        WHEN {self.get_json_array_length(other_collection_sql)} = 0 THEN true
+                        WHEN {self.get_json_array_length(other_collection_sql)} = 1 AND {self.dialect.json_extract_function}({other_collection_sql}, '$[0]') = {base_expr} THEN true
+                        ELSE false
+                    END
+                )
+                -- Both single elements
+                ELSE CASE WHEN {base_expr} = {other_collection_sql} THEN true ELSE false END
+            END
+            """
+
+        elif func_name == 'isdistinct':
+            # Phase 2: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'isdistinct'):
+                try:
+                    return self._generate_isdistinct_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for isDistinct(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # isDistinct() - returns true if all elements in the collection are distinct/unique
+            # FHIRPath specification: isDistinct() - test if the current collection contains only distinct elements
+            # This means there are no duplicate values in the collection
+            
+            # isDistinct() takes no arguments
+            if len(func_node.args) != 0:
+                raise ValueError(f"isDistinct() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                -- Check if collection is null or empty - empty collection is distinct by definition
+                WHEN {base_expr} IS NULL THEN true
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Empty array is distinct
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN true
+                        -- Array with one element is distinct
+                        WHEN {self.get_json_array_length(base_expr)} = 1 THEN true
+                        -- Array with multiple elements - check for duplicates
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(*) = COUNT(DISTINCT value) THEN true
+                                ELSE false
+                            END
+                            FROM {self.dialect.json_each_function}({base_expr})
+                        )
+                    END
+                -- Single element is distinct by definition
+                ELSE true
+            END
+            """
+
+        elif func_name == 'as':
+            # Phase 3: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'as'):
+                try:
+                    return self._generate_as_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for as(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # as(type) - returns elements from the collection that are of the specified type
+            # FHIRPath specification: as() - type casting operation that filters elements by type
+            
+            # Extract the type argument
+            if len(func_node.args) != 1:
+                raise ValueError(f"as() requires exactly 1 argument, got {len(func_node.args)}")
+            
+            if not isinstance(func_node.args[0], self.IdentifierNode):
+                raise ValueError("as() function requires a type identifier argument")
+            
+            type_name = func_node.args[0].name
+            type_name_lower = type_name.lower()
+            
+            # Build type condition - reuse logic from ofType() but for casting
+            fhir_primitive_types_as_string = self.FHIR_PRIMITIVE_TYPES_AS_STRING
+            
+            if type_name_lower in [t.lower() for t in fhir_primitive_types_as_string]:
+                # Primitive string types
+                type_condition = f"{self.get_json_type('value')} = 'VARCHAR'"
+            elif type_name_lower == "boolean":
+                # Boolean type (can be boolean JSON or string 'true'/'false')
+                type_condition = f"({self.get_json_type('value')} = 'BOOLEAN' OR ({self.get_json_type('value')} = 'VARCHAR' AND LOWER(CAST(value AS VARCHAR)) IN ('true', 'false')))"
+            elif type_name_lower == "integer":
+                # Integer type (must be whole number)
+                type_condition = f"({self.get_json_type('value')} = 'INTEGER' OR ({self.get_json_type('value')} IN ('NUMBER', 'DOUBLE') AND (CAST(value AS DOUBLE) = floor(CAST(value AS DOUBLE)))))"
+            elif type_name_lower == "decimal":
+                # Decimal type (any numeric)
+                type_condition = f"{self.get_json_type('value')} IN ('NUMBER', 'INTEGER', 'DOUBLE')"
+            elif type_name == "Quantity":
+                # FHIR Quantity type
+                type_condition = f"{self.get_json_type('value')} = 'OBJECT' AND {self.extract_json_object('value', '$.value')} IS NOT NULL"
+            else:
+                # FHIR resource types
+                type_condition = f"({self.get_json_type('value')} = 'OBJECT' AND {self.extract_json_field('value', '$.resourceType')} = '{type_name}')"
+            
+            return f"""
+            CASE 
+                -- Check if base expression is null
+                WHEN {base_expr} IS NULL THEN NULL
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN (
+                    SELECT CASE 
+                        WHEN COUNT(*) = 0 THEN NULL
+                        ELSE {self.dialect.json_array_function}(DISTINCT value::VARCHAR)
+                    END
+                    FROM {self.dialect.json_each_function}({base_expr})
+                    WHERE {type_condition}
+                )
+                -- Single element - check if it matches the type
+                ELSE 
+                    CASE 
+                        WHEN ({type_condition.replace('value', base_expr)}) THEN {self.dialect.json_array_function}({base_expr}::VARCHAR)
+                        ELSE NULL
+                    END
+            END
+            """
+
+        elif func_name == 'is':
+            # Phase 3: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'is'):
+                try:
+                    return self._generate_is_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for is(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # is(type) - returns true if all elements in the collection are of the specified type
+            # FHIRPath specification: is() - type checking operation
+            
+            # Extract the type argument
+            if len(func_node.args) != 1:
+                raise ValueError(f"is() requires exactly 1 argument, got {len(func_node.args)}")
+            
+            if not isinstance(func_node.args[0], self.IdentifierNode):
+                raise ValueError("is() function requires a type identifier argument")
+            
+            type_name = func_node.args[0].name
+            type_name_lower = type_name.lower()
+            
+            # Build type condition - reuse logic from ofType()
+            fhir_primitive_types_as_string = self.FHIR_PRIMITIVE_TYPES_AS_STRING
+            
+            if type_name_lower in [t.lower() for t in fhir_primitive_types_as_string]:
+                # Primitive string types
+                type_condition = f"{self.get_json_type('value')} = 'VARCHAR'"
+            elif type_name_lower == "boolean":
+                # Boolean type
+                type_condition = f"({self.get_json_type('value')} = 'BOOLEAN' OR ({self.get_json_type('value')} = 'VARCHAR' AND LOWER(CAST(value AS VARCHAR)) IN ('true', 'false')))"
+            elif type_name_lower == "integer":
+                # Integer type
+                type_condition = f"({self.get_json_type('value')} = 'INTEGER' OR ({self.get_json_type('value')} IN ('NUMBER', 'DOUBLE') AND (CAST(value AS DOUBLE) = floor(CAST(value AS DOUBLE)))))"
+            elif type_name_lower == "decimal":
+                # Decimal type
+                type_condition = f"{self.get_json_type('value')} IN ('NUMBER', 'INTEGER', 'DOUBLE')"
+            elif type_name == "Quantity":
+                # FHIR Quantity type
+                type_condition = f"{self.get_json_type('value')} = 'OBJECT' AND {self.extract_json_object('value', '$.value')} IS NOT NULL"
+            else:
+                # FHIR resource types
+                type_condition = f"({self.get_json_type('value')} = 'OBJECT' AND {self.extract_json_field('value', '$.resourceType')} = '{type_name}')"
+            
+            return f"""
+            CASE 
+                -- Check if base expression is null (empty collection)
+                WHEN {base_expr} IS NULL THEN false
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Empty array returns false
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN false
+                        -- Check if all elements match the type
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(*) = COUNT(CASE WHEN {type_condition} THEN 1 END) THEN true
+                                ELSE false
+                            END
+                            FROM {self.dialect.json_each_function}({base_expr})
+                        )
+                    END
+                -- Single element - check if it matches the type
+                ELSE 
+                    CASE 
+                        WHEN ({type_condition.replace('value', base_expr)}) THEN true
+                        ELSE false
+                    END
+            END
+            """
+
+        elif func_name == 'toboolean':
+            # Phase 3 Week 8: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'toboolean'):
+                try:
+                    return self._generate_toboolean_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for toBoolean(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # toBoolean() - converts the input collection to boolean values
+            # FHIRPath specification: toBoolean() - converts strings, numbers to boolean
+            
+            # toBoolean() takes no arguments
+            if len(func_node.args) != 0:
+                raise ValueError(f"toBoolean() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                -- Check if collection is null or empty
+                WHEN {base_expr} IS NULL THEN NULL
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Empty array returns NULL
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        -- Convert each element to boolean
+                        ELSE (
+                            SELECT {self.dialect.json_array_function}(
+                                CASE 
+                                    WHEN {self.get_json_type('value')} = 'BOOLEAN' THEN value
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND LOWER(CAST(value AS VARCHAR)) = 'true' THEN true
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND LOWER(CAST(value AS VARCHAR)) = 'false' THEN false
+                                    WHEN {self.get_json_type('value')} IN ('INTEGER', 'NUMBER', 'DOUBLE') AND CAST(value AS DOUBLE) != 0 THEN true
+                                    WHEN {self.get_json_type('value')} IN ('INTEGER', 'NUMBER', 'DOUBLE') AND CAST(value AS DOUBLE) = 0 THEN false
+                                    ELSE NULL
+                                END::VARCHAR
+                            )
+                            FROM {self.dialect.json_each_function}({base_expr})
+                            WHERE CASE 
+                                WHEN {self.get_json_type('value')} = 'BOOLEAN' THEN true
+                                WHEN {self.get_json_type('value')} = 'VARCHAR' AND LOWER(CAST(value AS VARCHAR)) IN ('true', 'false') THEN true
+                                WHEN {self.get_json_type('value')} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN true
+                                ELSE false
+                            END
+                        )
+                    END
+                -- Single element - convert to boolean
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} = 'BOOLEAN' THEN {self.dialect.json_array_function}({base_expr}::VARCHAR)
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND LOWER(CAST({base_expr} AS VARCHAR)) = 'true' THEN {self.dialect.json_array_function}('true')
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND LOWER(CAST({base_expr} AS VARCHAR)) = 'false' THEN {self.dialect.json_array_function}('false')
+                        WHEN {self.get_json_type(base_expr)} IN ('INTEGER', 'NUMBER', 'DOUBLE') AND CAST({base_expr} AS DOUBLE) != 0 THEN {self.dialect.json_array_function}('true')
+                        WHEN {self.get_json_type(base_expr)} IN ('INTEGER', 'NUMBER', 'DOUBLE') AND CAST({base_expr} AS DOUBLE) = 0 THEN {self.dialect.json_array_function}('false')
+                        ELSE NULL
+                    END
+            END
+            """
+
+        elif func_name == 'convertstoboolean':
+            # Phase 3 Week 8: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'convertstoboolean'):
+                try:
+                    return self._generate_convertstoboolean_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for convertsToBoolean(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # convertsToBoolean() - tests if the input collection can be converted to boolean
+            # FHIRPath specification: convertsToBoolean() - returns true if conversion is possible
+            
+            # convertsToBoolean() takes no arguments
+            if len(func_node.args) != 0:
+                raise ValueError(f"convertsToBoolean() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                -- Check if collection is null or empty
+                WHEN {base_expr} IS NULL THEN false
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Empty array returns false
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN false
+                        -- Check if all elements can be converted to boolean
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(*) = COUNT(CASE 
+                                    WHEN {self.get_json_type('value')} = 'BOOLEAN' THEN 1
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND LOWER(CAST(value AS VARCHAR)) IN ('true', 'false') THEN 1
+                                    WHEN {self.get_json_type('value')} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN 1
+                                    ELSE NULL
+                                END) THEN true
+                                ELSE false
+                            END
+                            FROM {self.dialect.json_each_function}({base_expr})
+                        )
+                    END
+                -- Single element - check if it can be converted to boolean
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} = 'BOOLEAN' THEN true
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND LOWER(CAST({base_expr} AS VARCHAR)) IN ('true', 'false') THEN true
+                        WHEN {self.get_json_type(base_expr)} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN true
+                        ELSE false
+                    END
+            END
+            """
+
+        elif func_name == 'todecimal':
+            # Phase 3 Week 8: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'todecimal'):
+                try:
+                    return self._generate_todecimal_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for toDecimal(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # toDecimal() - converts the input collection to decimal values
+            # FHIRPath specification: toDecimal() - converts strings, numbers to decimal
+            
+            # toDecimal() takes no arguments
+            if len(func_node.args) != 0:
+                raise ValueError(f"toDecimal() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                -- Check if collection is null or empty
+                WHEN {base_expr} IS NULL THEN NULL
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Empty array returns NULL
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        -- Convert each element to decimal
+                        ELSE (
+                            SELECT {self.dialect.json_array_function}(
+                                CAST(value AS DOUBLE)::VARCHAR
+                            )
+                            FROM {self.dialect.json_each_function}({base_expr})
+                            WHERE CASE 
+                                WHEN {self.get_json_type('value')} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN true
+                                WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS DOUBLE) IS NOT NULL THEN true
+                                ELSE false
+                            END
+                        )
+                    END
+                -- Single element - convert to decimal
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN {self.dialect.json_array_function}(CAST({base_expr} AS DOUBLE)::VARCHAR)
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND TRY_CAST({base_expr} AS DOUBLE) IS NOT NULL THEN {self.dialect.json_array_function}(CAST({base_expr} AS DOUBLE)::VARCHAR)
+                        ELSE NULL
+                    END
+            END
+            """
+
+        elif func_name == 'convertstodecimal':
+            # Phase 3 Week 8: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'convertstodecimal'):
+                try:
+                    return self._generate_convertstodecimal_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for convertsToDecimal(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # convertsToDecimal() - tests if the input collection can be converted to decimal
+            # FHIRPath specification: convertsToDecimal() - returns true if conversion is possible
+            
+            # convertsToDecimal() takes no arguments
+            if len(func_node.args) != 0:
+                raise ValueError(f"convertsToDecimal() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                -- Check if collection is null or empty
+                WHEN {base_expr} IS NULL THEN false
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Empty array returns false
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN false
+                        -- Check if all elements can be converted to decimal
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(*) = COUNT(CASE 
+                                    WHEN {self.get_json_type('value')} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN 1
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS DOUBLE) IS NOT NULL THEN 1
+                                    ELSE NULL
+                                END) THEN true
+                                ELSE false
+                            END
+                            FROM {self.dialect.json_each_function}({base_expr})
+                        )
+                    END
+                -- Single element - check if it can be converted to decimal
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN true
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND TRY_CAST({base_expr} AS DOUBLE) IS NOT NULL THEN true
+                        ELSE false
+                    END
+            END
+            """
+
+        elif func_name == 'convertstointeger':
+            # Phase 3 Week 8: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'convertstointeger'):
+                try:
+                    return self._generate_convertstointeger_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for convertsToInteger(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # convertsToInteger() - tests if the input collection can be converted to integer
+            # FHIRPath specification: convertsToInteger() - returns true if conversion is possible
+            
+            # convertsToInteger() takes no arguments
+            if len(func_node.args) != 0:
+                raise ValueError(f"convertsToInteger() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                -- Check if collection is null or empty
+                WHEN {base_expr} IS NULL THEN false
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Empty array returns false
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN false
+                        -- Check if all elements can be converted to integer
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(*) = COUNT(CASE 
+                                    WHEN {self.get_json_type('value')} = 'INTEGER' THEN 1
+                                    WHEN {self.get_json_type('value')} IN ('NUMBER', 'DOUBLE') AND CAST(value AS DOUBLE) = floor(CAST(value AS DOUBLE)) THEN 1
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS INTEGER) IS NOT NULL THEN 1
+                                    ELSE NULL
+                                END) THEN true
+                                ELSE false
+                            END
+                            FROM {self.dialect.json_each_function}({base_expr})
+                        )
+                    END
+                -- Single element - check if it can be converted to integer
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} = 'INTEGER' THEN true
+                        WHEN {self.get_json_type(base_expr)} IN ('NUMBER', 'DOUBLE') AND CAST({base_expr} AS DOUBLE) = floor(CAST({base_expr} AS DOUBLE)) THEN true
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND TRY_CAST({base_expr} AS INTEGER) IS NOT NULL THEN true
+                        ELSE false
+                    END
+            END
+            """
+
+        elif func_name == 'todate':
+            # Phase 3 Week 9: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'todate'):
+                try:
+                    return self._generate_todate_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for toDate(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # toDate() - converts the input collection to date values
+            if len(func_node.args) != 0:
+                raise ValueError(f"toDate() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN NULL
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        ELSE (
+                            SELECT json_group_array(
+                                CASE 
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS DATE) IS NOT NULL THEN TRY_CAST(value AS DATE)
+                                    WHEN {self.get_json_type('value')} = 'DATE' THEN CAST(value AS DATE)
+                                    ELSE NULL
+                                END
+                            )
+                            FROM {self.dialect.json_each_function}({base_expr})
+                            WHERE CASE 
+                                WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS DATE) IS NOT NULL THEN true
+                                WHEN {self.get_json_type('value')} = 'DATE' THEN true
+                                ELSE false
+                            END
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND TRY_CAST({base_expr} AS DATE) IS NOT NULL THEN TRY_CAST({base_expr} AS DATE)
+                        WHEN {self.get_json_type(base_expr)} = 'DATE' THEN CAST({base_expr} AS DATE)
+                        ELSE NULL
+                    END
+            END
+            """
+
+        elif func_name == 'convertstodate':
+            # Phase 3 Week 9: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'convertstodate'):
+                try:
+                    return self._generate_convertstodate_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for convertsToDate(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # convertsToDate() - tests if the input collection can be converted to date values
+            if len(func_node.args) != 0:
+                raise ValueError(f"convertsToDate() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                -- Check if collection is null or empty
+                WHEN {base_expr} IS NULL THEN false
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Empty array returns false
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN false
+                        -- Check if all elements can be converted to date
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(*) = COUNT(CASE 
+                                    WHEN {self.get_json_type('value')} = 'DATE' THEN 1
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS DATE) IS NOT NULL THEN 1
+                                    ELSE NULL
+                                END) THEN true
+                                ELSE false
+                            END
+                            FROM {self.dialect.json_each_function}({base_expr})
+                        )
+                    END
+                -- Single element - check if it can be converted to date
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} = 'DATE' THEN true
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND TRY_CAST({base_expr} AS DATE) IS NOT NULL THEN true
+                        ELSE false
+                    END
+            END
+            """
+
+        elif func_name == 'todatetime':
+            # Phase 3 Week 9: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'todatetime'):
+                try:
+                    return self._generate_todatetime_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for toDateTime(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # toDateTime() - converts the input collection to datetime values
+            if len(func_node.args) != 0:
+                raise ValueError(f"toDateTime() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN NULL
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        ELSE (
+                            SELECT json_group_array(
+                                CASE 
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIMESTAMP) IS NOT NULL THEN TRY_CAST(value AS TIMESTAMP)
+                                    WHEN {self.get_json_type('value')} = 'TIMESTAMP' THEN CAST(value AS TIMESTAMP)
+                                    WHEN {self.get_json_type('value')} = 'DATE' THEN CAST(value AS TIMESTAMP)
+                                    ELSE NULL
+                                END
+                            )
+                            FROM {self.dialect.json_each_function}({base_expr})
+                            WHERE CASE 
+                                WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIMESTAMP) IS NOT NULL THEN true
+                                WHEN {self.get_json_type('value')} IN ('TIMESTAMP', 'DATE') THEN true
+                                ELSE false
+                            END
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND TRY_CAST({base_expr} AS TIMESTAMP) IS NOT NULL THEN TRY_CAST({base_expr} AS TIMESTAMP)
+                        WHEN {self.get_json_type(base_expr)} = 'TIMESTAMP' THEN CAST({base_expr} AS TIMESTAMP)
+                        WHEN {self.get_json_type(base_expr)} = 'DATE' THEN CAST({base_expr} AS TIMESTAMP)
+                        ELSE NULL
+                    END
+            END
+            """
+
+        elif func_name == 'convertstodatetime':
+            # Phase 3 Week 9: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'convertstodatetime'):
+                try:
+                    return self._generate_convertstodatetime_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for convertsToDateTime(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # convertsToDateTime() - tests if the input collection can be converted to datetime values
+            if len(func_node.args) != 0:
+                raise ValueError(f"convertsToDateTime() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                -- Check if collection is null or empty
+                WHEN {base_expr} IS NULL THEN false
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Empty array returns false
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN false
+                        -- Check if all elements can be converted to datetime
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(*) = COUNT(CASE 
+                                    WHEN {self.get_json_type('value')} IN ('TIMESTAMP', 'DATE') THEN 1
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIMESTAMP) IS NOT NULL THEN 1
+                                    ELSE NULL
+                                END) THEN true
+                                ELSE false
+                            END
+                            FROM {self.dialect.json_each_function}({base_expr})
+                        )
+                    END
+                -- Single element - check if it can be converted to datetime
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} IN ('TIMESTAMP', 'DATE') THEN true
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND TRY_CAST({base_expr} AS TIMESTAMP) IS NOT NULL THEN true
+                        ELSE false
+                    END
+            END
+            """
+
+        elif func_name == 'totime':
+            # Phase 3 Week 9: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'totime'):
+                try:
+                    return self._generate_totime_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for toTime(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # toTime() - converts the input collection to time values
+            if len(func_node.args) != 0:
+                raise ValueError(f"toTime() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN NULL
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        ELSE (
+                            SELECT json_group_array(
+                                CASE 
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIME) IS NOT NULL THEN TRY_CAST(value AS TIME)
+                                    WHEN {self.get_json_type('value')} = 'TIME' THEN CAST(value AS TIME)
+                                    WHEN {self.get_json_type('value')} = 'TIMESTAMP' THEN CAST(value AS TIME)
+                                    ELSE NULL
+                                END
+                            )
+                            FROM {self.dialect.json_each_function}({base_expr})
+                            WHERE CASE 
+                                WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIME) IS NOT NULL THEN true
+                                WHEN {self.get_json_type('value')} IN ('TIME', 'TIMESTAMP') THEN true
+                                ELSE false
+                            END
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND TRY_CAST({base_expr} AS TIME) IS NOT NULL THEN TRY_CAST({base_expr} AS TIME)
+                        WHEN {self.get_json_type(base_expr)} = 'TIME' THEN CAST({base_expr} AS TIME)
+                        WHEN {self.get_json_type(base_expr)} = 'TIMESTAMP' THEN CAST({base_expr} AS TIME)
+                        ELSE NULL
+                    END
+            END
+            """
+
+        elif func_name == 'convertstotime':
+            # Phase 3 Week 9: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'convertstotime'):
+                try:
+                    return self._generate_convertstotime_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for convertsToTime(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # convertsToTime() - tests if the input collection can be converted to time values
+            if len(func_node.args) != 0:
+                raise ValueError(f"convertsToTime() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                -- Check if collection is null or empty
+                WHEN {base_expr} IS NULL THEN false
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Empty array returns false
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN false
+                        -- Check if all elements can be converted to time
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(*) = COUNT(CASE 
+                                    WHEN {self.get_json_type('value')} IN ('TIME', 'TIMESTAMP') THEN 1
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIME) IS NOT NULL THEN 1
+                                    ELSE NULL
+                                END) THEN true
+                                ELSE false
+                            END
+                            FROM {self.dialect.json_each_function}({base_expr})
+                        )
+                    END
+                -- Single element - check if it can be converted to time
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} IN ('TIME', 'TIMESTAMP') THEN true
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND TRY_CAST({base_expr} AS TIME) IS NOT NULL THEN true
+                        ELSE false
+                    END
+            END
+            """
 
         else:
             raise ValueError(f"Unknown function: {func_name}")
@@ -3532,7 +7916,7 @@ class SQLGenerator:
         # should be handled by apply_function_to_expression with self.json_column as base_expr.
         if func_name in ['exists', 'empty', 'first', 'last', 'count', 'where', 'join', 'length', 'contains', 'select',
                          'substring', 'startswith', 'endswith', 'indexof', 'replace', 'toupper', 'tolower', 'upper', 'lower', 'trim', 'split', 'all', 'distinct', 'tostring', 'getresourcekey', 'getreferencekey',
-                         'abs', 'ceiling', 'floor', 'round', 'sqrt', 'truncate', 'now', 'today', 'timeofday', 'trace', 'aggregate', 'flatten', 'convertstoquantity', 'hasvalue', 'hascodedvalue', 'htmlchecks', 'hastemplateidof', 'encode', 'decode', 'conformsto', 'memberof']:
+                         'abs', 'ceiling', 'floor', 'round', 'sqrt', 'truncate', 'exp', 'ln', 'log', 'power', 'now', 'today', 'timeofday', 'trace', 'aggregate', 'flatten', 'convertstoquantity', 'hasvalue', 'hascodedvalue', 'htmlchecks', 'hastemplateidof', 'encode', 'decode', 'conformsto', 'memberof', 'single', 'tail', 'skip', 'take', 'intersect', 'exclude', 'alltrue', 'allfalse', 'anytrue', 'anyfalse', 'iif', 'subsetof', 'supersetof', 'isdistinct', 'as', 'is', 'toboolean', 'convertstoboolean', 'todecimal', 'convertstodecimal', 'convertstointeger', 'todate', 'convertstodate', 'todatetime', 'convertstodatetime', 'totime', 'convertstotime', 'tochars', 'matches', 'replacematches', 'children', 'descendants', 'union', 'combine', 'repeat']:
             return self.apply_function_to_expression(node, self.json_column)
         # Note: The 'where' case here was for root-level where like `where(name.given = 'Peter')`.
         # This is now covered by apply_function_to_expression(node, self.json_column)
@@ -3574,6 +7958,25 @@ class SQLGenerator:
             if not (isinstance(node.right, self.LiteralNode) and node.right.type in ['integer', 'decimal']):
                 right = f"CAST({right} AS DOUBLE)"
             return f"({left} {sql_op} {right})"
+        
+        # Handle integer division and modulo operations
+        elif node.operator == 'div':
+            # Integer division - cast to integers and use integer division
+            if not (isinstance(node.left, self.LiteralNode) and node.left.type in ['integer', 'decimal']):
+                left = f"CAST({left} AS INTEGER)"
+            if not (isinstance(node.right, self.LiteralNode) and node.right.type in ['integer', 'decimal']):
+                right = f"CAST({right} AS INTEGER)"
+            # Use floor division to ensure integer result, with division by zero protection
+            return f"CASE WHEN {right} = 0 THEN NULL ELSE CAST(floor(CAST({left} AS DOUBLE) / CAST({right} AS DOUBLE)) AS INTEGER) END"
+        
+        elif node.operator == 'mod':
+            # Modulo operation - cast to integers and use modulo
+            if not (isinstance(node.left, self.LiteralNode) and node.left.type in ['integer', 'decimal']):
+                left = f"CAST({left} AS INTEGER)"
+            if not (isinstance(node.right, self.LiteralNode) and node.right.type in ['integer', 'decimal']):
+                right = f"CAST({right} AS INTEGER)"
+            # Use modulo function with division by zero protection
+            return f"CASE WHEN {right} = 0 THEN NULL ELSE ({left} % {right}) END"
 
         # Handle logical operations (AND, OR) with proper boolean casting
         elif sql_op in ['AND', 'OR']:
@@ -3581,6 +7984,20 @@ class SQLGenerator:
             left_cast = self._ensure_boolean_casting(node.left, left)
             right_cast = self._ensure_boolean_casting(node.right, right)
             return f"({left_cast} {sql_op} {right_cast})"
+        
+        # Handle XOR operation (exclusive OR) - Phase 6 Week 15
+        elif node.operator == 'xor':
+            # XOR: true when operands differ, false when they're the same
+            left_cast = self._ensure_boolean_casting(node.left, left)
+            right_cast = self._ensure_boolean_casting(node.right, right)
+            return f"(({left_cast} AND NOT {right_cast}) OR (NOT {left_cast} AND {right_cast}))"
+        
+        # Handle IMPLIES operation (logical implication) - Phase 6 Week 15  
+        elif node.operator == 'implies':
+            # IMPLIES: equivalent to (NOT left OR right), or false only when left is true and right is false
+            left_cast = self._ensure_boolean_casting(node.left, left)
+            right_cast = self._ensure_boolean_casting(node.right, right)
+            return f"(NOT {left_cast} OR {right_cast})"
 
         # Handle JSON value comparisons with proper type casting
         elif node.operator in ['=', '!=', '>', '<', '>=', '<=', '~', '!~']:
@@ -3722,6 +8139,45 @@ class SQLGenerator:
             'decode': (0, 0),              # no arguments (decodes the current value)
             'conformsto': (1, 1),          # 1 argument (profile URI to check)
             'memberof': (1, 1),            # 1 argument (ValueSet URI to check)
+            'single': (0, 0),              # no arguments (returns single element or error)
+            'tail': (0, 0),                # no arguments (returns all but first element)
+            'skip': (1, 1),                # 1 argument (number of elements to skip)
+            'take': (1, 1),                # 1 argument (number of elements to take)
+            'intersect': (1, 1),           # 1 argument (collection to intersect with)
+            'exclude': (1, 1),             # 1 argument (collection to exclude from current)
+            'alltrue': (0, 0),             # no arguments (checks if all elements are true)
+            'allfalse': (0, 0),            # no arguments (checks if all elements are false)
+            'anytrue': (0, 0),             # no arguments (checks if any element is true)
+            'anyfalse': (0, 0),            # no arguments (checks if any element is false)
+            'iif': (3, 3),                 # 3 arguments (condition, true-result, false-result)
+            'subsetof': (1, 1),            # 1 argument (collection to compare against)
+            'supersetof': (1, 1),          # 1 argument (collection to check if subset of current)
+            'isdistinct': (0, 0),          # no arguments (checks if all elements are distinct)
+            'as': (1, 1),                  # 1 argument (type to cast to)
+            'is': (1, 1),                  # 1 argument (type to check for)
+            'toboolean': (0, 0),           # no arguments (converts current collection to boolean)
+            'convertstoboolean': (0, 0),   # no arguments (tests if current collection can be converted to boolean)
+            'todecimal': (0, 0),           # no arguments (converts current collection to decimal)
+            'convertstodecimal': (0, 0),   # no arguments (tests if current collection can be converted to decimal)
+            'convertstointeger': (0, 0),   # no arguments (tests if current collection can be converted to integer)
+            'todate': (0, 0),              # no arguments (converts current collection to date)
+            'convertstodate': (0, 0),      # no arguments (tests if current collection can be converted to date)
+            'todatetime': (0, 0),          # no arguments (converts current collection to datetime)
+            'convertstodatetime': (0, 0),  # no arguments (tests if current collection can be converted to datetime)
+            'totime': (0, 0),              # no arguments (converts current collection to time)
+            'convertstotime': (0, 0),      # no arguments (tests if current collection can be converted to time)
+            'exp': (0, 0),                 # no arguments (exponential function applied to current collection)
+            'ln': (0, 0),                  # no arguments (natural logarithm applied to current collection)
+            'log': (0, 0),                 # no arguments (base-10 logarithm applied to current collection)
+            'power': (1, 1),               # 1 argument (exponent - base is current collection)
+            'tochars': (0, 0),             # no arguments (converts current collection to character array)
+            'matches': (1, 1),             # 1 argument (regex pattern to match against)
+            'replacematches': (2, 2),      # 2 arguments (regex pattern, replacement string)
+            'children': (0, 0),            # no arguments (returns all direct child elements)
+            'descendants': (0, 0),         # no arguments (returns all descendant elements recursively)
+            'union': (1, 1),               # 1 argument (collection to union with current collection)
+            'combine': (1, 1),             # 1 argument (collection to combine with current collection)
+            'repeat': (1, 1),              # 1 argument (expression to apply iteratively)
         }
         
         if func_name in arg_requirements:
@@ -4146,8 +8602,16 @@ FROM {self.table_name}"""
         # Generate JSON object construction from key-value pairs
         json_pairs = []
         for key, value_node in node.elements:
-            # Key should be a string literal
-            key_sql = f"'{key}'"
+            # Key can be a string literal or a computed expression
+            if isinstance(key, str):
+                # Simple string key
+                key_sql = f"'{key}'"
+            else:
+                # Computed key expression - visit it and ensure it's a string
+                key_expr_sql = self.visit(key)
+                # Cast the result to string for use as JSON key
+                key_sql = f"CAST({key_expr_sql} AS VARCHAR)"
+            
             # Value can be any expression
             value_sql = self.visit(value_node)
             json_pairs.extend([key_sql, value_sql])

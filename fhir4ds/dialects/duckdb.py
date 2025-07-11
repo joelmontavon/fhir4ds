@@ -425,3 +425,21 @@ class DuckDBDialect(DatabaseDialect):
         # - Column store optimization hints
         
         return cte_expr
+    
+    def url_encode(self, expression: str) -> str:
+        """URL encode string using DuckDB's url_encode function"""
+        # DuckDB has built-in url_encode function
+        return f"url_encode(CAST({expression} AS VARCHAR))"
+    
+    def url_decode(self, expression: str) -> str:
+        """URL decode string using DuckDB's url_decode function"""
+        # DuckDB has built-in url_decode function  
+        return f"url_decode(CAST({expression} AS VARCHAR))"
+    
+    def base64_encode(self, expression: str) -> str:
+        """Base64 encode string using DuckDB's base64 function"""
+        return f"base64(CAST({expression} AS VARCHAR))"
+        
+    def base64_decode(self, expression: str) -> str:
+        """Base64 decode string using DuckDB's from_base64 function"""
+        return f"from_base64(CAST({expression} AS VARCHAR))"
