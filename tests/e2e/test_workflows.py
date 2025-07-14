@@ -64,7 +64,7 @@ class TestBasicAnalyticsWorkflow:
             # Step 2: Execute query with optional performance monitoring
             if PerformanceMonitor:
                 monitor = PerformanceMonitor(db)
-                result = monitor.execute_with_profiling(db, demographics_query)
+                result = monitor.execute_with_profiling(demographics_query)
                 metrics = monitor.get_last_metrics()
             else:
                 result = db.execute(demographics_query)
@@ -74,25 +74,24 @@ class TestBasicAnalyticsWorkflow:
             assert_valid_query_result(result)
             
             # Step 4: Convert to DataFrame for analysis
-            formatter = ResultFormatter(result)
-            df = formatter.to_dataframe()
+            df = ResultFormatter.to_dataframe(result)
             assert_valid_dataframe(df, expected_min_rows=0)
             
             # Step 5: Export results to different formats
             with tempfile.TemporaryDirectory() as temp_dir:
                 # Export to CSV
                 csv_path = os.path.join(temp_dir, "demographics.csv")
-                formatter.to_csv(csv_path)
+                ResultFormatter.to_csv(result, csv_path)
                 assert_file_exists_and_not_empty(csv_path)
                 
                 # Export to JSON
                 json_path = os.path.join(temp_dir, "demographics.json")
-                formatter.to_json(json_path)
+                ResultFormatter.to_json(result, json_path)
                 assert_file_exists_and_not_empty(json_path)
                 
                 # Export to Excel
                 excel_path = os.path.join(temp_dir, "demographics.xlsx")
-                formatter.to_excel(excel_path)
+                ResultFormatter.to_excel([result], excel_path)
                 assert_file_exists_and_not_empty(excel_path)
             
             # Step 6: Validate performance metrics (if available)
@@ -117,9 +116,9 @@ class TestBasicAnalyticsWorkflow:
             
             # Step 4: Process all results
             results_data = {
-                'vital_signs': ResultFormatter(vital_signs_result).to_dataframe(),
-                'lab_results': ResultFormatter(lab_results_result).to_dataframe(),
-                'medications': ResultFormatter(medications_result).to_dataframe()
+                'vital_signs': ResultFormatter.to_dataframe(vital_signs_result),
+                'lab_results': ResultFormatter.to_dataframe(lab_results_result),
+                'medications': ResultFormatter.to_dataframe(medications_result)
             }
             
             # Step 5: Validate all data
@@ -157,8 +156,7 @@ class TestQueryBuilderWorkflow:
             assert_valid_query_result(result)
             
             # Step 3: Process results
-            formatter = ResultFormatter(result)
-            df = formatter.to_dataframe()
+            df = ResultFormatter.to_dataframe(result)
             
             # Step 4: Validate filtering worked
             assert_valid_dataframe(df)
@@ -170,7 +168,7 @@ class TestQueryBuilderWorkflow:
             # Step 5: Export filtered results
             with tempfile.TemporaryDirectory() as temp_dir:
                 export_path = os.path.join(temp_dir, "male_patients.json")
-                json_data = formatter.to_json(export_path)
+                json_data = ResultFormatter.to_json(result, export_path)
                 assert_file_exists_and_not_empty(export_path)
     
     def test_observation_analysis_workflow(self):
@@ -195,12 +193,11 @@ class TestQueryBuilderWorkflow:
                         .build())
             
             # Step 2: Execute and monitor
-            result = monitor.execute_with_profiling(db, obs_query)
+            result = monitor.execute_with_profiling(obs_query)
             assert_valid_query_result(result)
             
             # Step 3: Analyze results
-            formatter = ResultFormatter(result)
-            df = formatter.to_dataframe()
+            df = ResultFormatter.to_dataframe(result)
             assert_valid_dataframe(df)
             
             # Step 4: Check data quality
@@ -257,9 +254,8 @@ class TestBatchProcessingWorkflow:
                 
                 for i, (name, query) in enumerate(queries):
                     if batch_results[i].success and batch_results[i].result:
-                        formatter = ResultFormatter(batch_results[i].result)
                         export_path = os.path.join(batch_export_dir, f"{name}.csv")
-                        formatter.to_csv(export_path)
+                        ResultFormatter.to_csv(batch_results[i].result, export_path)
                         assert_file_exists_and_not_empty(export_path)
     
     def test_custom_query_batch_workflow(self):
@@ -315,11 +311,11 @@ class TestComplexAnalyticsWorkflow:
             
             # Step 1: Identify patient cohort
             cohort_query = Templates.cohort_identification(["E11", "E10"])  # Diabetes codes
-            cohort_result = monitor.execute_with_profiling(db, cohort_query)
+            cohort_result = monitor.execute_with_profiling(cohort_query)
             
             # Step 2: Get demographics for cohort
             demographics_query = Templates.patient_demographics()
-            demographics_result = monitor.execute_with_profiling(db, demographics_query)
+            demographics_result = monitor.execute_with_profiling(demographics_query)
             
             # Step 3: Get clinical data for cohort
             clinical_queries = [
@@ -330,12 +326,12 @@ class TestComplexAnalyticsWorkflow:
             
             clinical_results = {}
             for name, query in clinical_queries:
-                result = monitor.execute_with_profiling(db, query)
+                result = monitor.execute_with_profiling(query)
                 clinical_results[name] = result
             
             # Step 4: Combine and analyze data
-            cohort_df = ResultFormatter(cohort_result).to_dataframe() if cohort_result else None
-            demographics_df = ResultFormatter(demographics_result).to_dataframe()
+            cohort_df = ResultFormatter.to_dataframe(cohort_result) if cohort_result else None
+            demographics_df = ResultFormatter.to_dataframe(demographics_result)
             
             # Validate core data
             assert_valid_dataframe(demographics_df)
@@ -347,14 +343,14 @@ class TestComplexAnalyticsWorkflow:
                 
                 # Export demographics
                 demographics_path = os.path.join(report_dir, "demographics.xlsx")
-                ResultFormatter(demographics_result).to_excel(demographics_path)
+                ResultFormatter.to_excel([demographics_result], demographics_path)
                 assert_file_exists_and_not_empty(demographics_path)
                 
                 # Export clinical data
                 for name, result in clinical_results.items():
                     if result:
                         clinical_path = os.path.join(report_dir, f"{name}.csv")
-                        ResultFormatter(result).to_csv(clinical_path)
+                        ResultFormatter.to_csv(result, clinical_path)
                         assert_file_exists_and_not_empty(clinical_path)
                 
                 # Export performance report
@@ -409,16 +405,14 @@ class TestComplexAnalyticsWorkflow:
                 for i, (name, query) in enumerate(dashboard_queries.items()):
                     result = batch_results[i]
                     if result.success and result.result:
-                        formatter = ResultFormatter(result.result)
-                        
                         # Export as JSON for web dashboard
                         json_path = os.path.join(dashboard_dir, f"{name}.json")
-                        formatter.to_json(json_path)
+                        ResultFormatter.to_json(result.result, json_path)
                         assert_file_exists_and_not_empty(json_path)
                         
                         # Export as CSV for analysis
                         csv_path = os.path.join(dashboard_dir, f"{name}.csv")
-                        formatter.to_csv(csv_path)
+                        ResultFormatter.to_csv(result.result, csv_path)
                         assert_file_exists_and_not_empty(csv_path)
                         
                         successful_exports += 1
@@ -486,9 +480,8 @@ class TestErrorHandlingWorkflow:
                 for i, (name, query) in enumerate(queries):
                     result = batch_results[i]
                     if result.success and result.result:
-                        formatter = ResultFormatter(result.result)
                         export_path = os.path.join(success_dir, f"{name}.json")
-                        formatter.to_json(export_path)
+                        ResultFormatter.to_json(result.result, export_path)
                         assert_file_exists_and_not_empty(export_path)
                         exported_count += 1
                 
@@ -508,7 +501,7 @@ class TestErrorHandlingWorkflow:
             
             all_metrics = []
             for i, query in enumerate(queries_to_test):
-                result = monitor.execute_with_profiling(db, query)
+                result = monitor.execute_with_profiling(query)
                 metrics = monitor.get_last_metrics()
                 all_metrics.append(metrics)
                 
@@ -594,12 +587,12 @@ class TestRealWorldScenarios:
                     if result.success and result.result:
                         # Excel for stakeholders
                         excel_path = os.path.join(monthly_dir, f"{name}.xlsx")
-                        ResultFormatter(result.result).to_excel(excel_path)
+                        ResultFormatter.to_excel([result.result], excel_path)
                         assert_file_exists_and_not_empty(excel_path)
                         
                         # CSV for analysis
                         csv_path = os.path.join(monthly_dir, f"{name}.csv")
-                        ResultFormatter(result.result).to_csv(csv_path)
+                        ResultFormatter.to_csv(result.result, csv_path)
                         assert_file_exists_and_not_empty(csv_path)
                 
                 # Generate summary report
@@ -617,7 +610,7 @@ class TestRealWorldScenarios:
                     summary_data['datasets'][name] = {
                         'success': result.success,
                         'execution_time': result.execution_time,
-                        'row_count': len(ResultFormatter(result.result).to_dataframe()) if result.success and result.result else 0
+                        'row_count': len(ResultFormatter.to_dataframe(result.result)) if result.success and result.result else 0
                     }
                 
                 with open(summary_path, 'w') as f:
@@ -640,7 +633,7 @@ class TestRealWorldScenarios:
             # Step 2: Extract research data with detailed monitoring
             research_data = {}
             for name, query in research_queries:
-                result = monitor.execute_with_profiling(db, query)
+                result = monitor.execute_with_profiling(query)
                 research_data[name] = {
                     'result': result,
                     'metrics': monitor.get_last_metrics()
@@ -660,11 +653,9 @@ class TestRealWorldScenarios:
                 # Export all datasets
                 for name, data in research_data.items():
                     if data['result'] and data['metrics'].success:
-                        formatter = ResultFormatter(data['result'])
-                        
                         # CSV for statistical analysis
                         csv_path = os.path.join(research_dir, f"{name}.csv")
-                        formatter.to_csv(csv_path)
+                        ResultFormatter.to_csv(data['result'], csv_path)
                         assert_file_exists_and_not_empty(csv_path)
                 
                 # Create research metadata

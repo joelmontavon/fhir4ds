@@ -73,7 +73,23 @@ class DuckDBDialect(DatabaseDialect):
     
     def create_fhir_table(self, table_name: str, json_col: str) -> None:
         """Create FHIR resources table optimized for DuckDB"""
-        self.connection.execute(f"DROP TABLE IF EXISTS {table_name}")
+        # Check if table already exists before dropping
+        try:
+            result = self.connection.execute(f"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{table_name}'").fetchone()
+            table_exists = result[0] > 0 if result else False
+        except:
+            # Fallback check method for older DuckDB versions
+            try:
+                self.connection.execute(f"SELECT 1 FROM {table_name} LIMIT 1").fetchone()
+                table_exists = True
+            except:
+                table_exists = False
+        
+        if table_exists:
+            logger.info(f"FHIR table '{table_name}' already exists, skipping creation")
+            return
+        
+        # Create table only if it doesn't exist
         self.connection.execute("CREATE SEQUENCE IF NOT EXISTS id_sequence START 1;")
         self.connection.execute(f"""
             CREATE TABLE {table_name} (
@@ -337,7 +353,12 @@ class DuckDBDialect(DatabaseDialect):
                     self.insert_resource(data, table_name, json_col)
                     loaded_count += 1
                     
+        except (FileNotFoundError, PermissionError, json_module.JSONDecodeError) as e:
+            # Re-raise fundamental errors that should not be silently handled
+            logging.error(f"Fallback loading failed for {file_path}: {e}")
+            raise
         except Exception as e:
+            # Log other errors but don't raise
             logging.error(f"Fallback loading failed for {file_path}: {e}")
             
         return loaded_count
