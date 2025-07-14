@@ -126,8 +126,9 @@ class TestQuickConnectIntegration:
         """Test QuickConnect file persistence with other components."""
         test_data = get_standard_test_data()
         
-        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as temp_file:
-            temp_path = temp_file.name
+        # Use tempdir + filename pattern (like working integration tests)
+        temp_dir = tempfile.mkdtemp()
+        temp_path = os.path.join(temp_dir, "test_persistence.db")
         
         try:
             # Step 1: Create persistent database
@@ -137,22 +138,24 @@ class TestQuickConnectIntegration:
             # Execute a template
             template = Templates.patient_demographics()
             result1 = db1.execute(template)
-            df1 = ResultFormatter(result1).to_dataframe()
+            df1 = ResultFormatter.to_dataframe(result1)
             
             # Step 2: Reconnect to same database
             db2 = QuickConnect.duckdb(temp_path)
             
             # Execute same template
             result2 = db2.execute(template)
-            df2 = ResultFormatter(result2).to_dataframe()
+            df2 = ResultFormatter.to_dataframe(result2)
             
             # Step 3: Validate persistence
             assert len(df1) == len(df2), "Results should be identical after reconnection"
             assert list(df1.columns) == list(df2.columns), "Columns should be identical"
             
         finally:
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
+            # Cleanup temp directory
+            import shutil
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
 
 
 class TestPerformanceMonitoringIntegration:
@@ -172,7 +175,7 @@ class TestPerformanceMonitoringIntegration:
             
             all_metrics = []
             for name, template in templates_to_monitor:
-                result = monitor.execute_with_profiling(db, template)
+                result = monitor.execute_with_profiling(template)
                 metrics = monitor.get_last_metrics()
                 all_metrics.append((name, metrics))
                 
@@ -235,28 +238,31 @@ class TestResultFormatterIntegration:
             # Step 1: Execute template and format results
             template = Templates.patient_demographics()
             result = db.execute(template)
-            formatter = ResultFormatter(result)
             
             # Step 2: Test multiple export formats
             with tempfile.TemporaryDirectory() as temp_dir:
                 # DataFrame conversion
-                df = formatter.to_dataframe()
+                df = ResultFormatter.to_dataframe(result)
                 assert_valid_dataframe(df)
                 
                 # CSV export
                 csv_path = os.path.join(temp_dir, "template_result.csv")
-                formatter.to_csv(csv_path)
+                ResultFormatter.to_csv(result, csv_path)
                 assert_file_exists_and_not_empty(csv_path)
                 
                 # JSON export
                 json_path = os.path.join(temp_dir, "template_result.json")
-                json_data = formatter.to_json(json_path)
+                # Save to file (returns None)
+                ResultFormatter.to_json(result, json_path)
                 assert_file_exists_and_not_empty(json_path)
+                
+                # Get JSON as string (no output_path)
+                json_data = ResultFormatter.to_json(result)
                 assert isinstance(json_data, str)
                 
                 # Excel export
                 excel_path = os.path.join(temp_dir, "template_result.xlsx")
-                formatter.to_excel(excel_path)
+                ResultFormatter.to_excel([result], excel_path)
                 assert_file_exists_and_not_empty(excel_path)
             
             # Step 3: Validate data consistency across formats
@@ -280,10 +286,8 @@ class TestResultFormatterIntegration:
             
             # Step 2: Execute and format
             result = db.execute(query)
-            formatter = ResultFormatter(result)
-            
             # Step 3: Test formatting
-            df = formatter.to_dataframe()
+            df = ResultFormatter.to_dataframe(result)
             assert_valid_dataframe(df)
             
             # Validate expected columns
@@ -294,7 +298,7 @@ class TestResultFormatterIntegration:
             # Step 4: Test JSON export structure
             with tempfile.TemporaryDirectory() as temp_dir:
                 json_path = os.path.join(temp_dir, "query_result.json")
-                json_data = formatter.to_json(json_path)
+                json_data = ResultFormatter.to_json(result, json_path)
                 
                 # Parse JSON to validate structure
                 import json
@@ -407,7 +411,7 @@ class TestComplexIntegrationScenarios:
                 # Execute even if validation has minor issues for test completeness
             
             # Execute with monitoring
-            result = monitor.execute_with_profiling(db, query)
+            result = monitor.execute_with_profiling(query)
             metrics = monitor.get_last_metrics()
             
             pipeline_results[name] = {
@@ -424,16 +428,14 @@ class TestComplexIntegrationScenarios:
             export_count = 0
             for name, data in pipeline_results.items():
                 if data['success'] and data['result']:
-                    formatter = ResultFormatter(data['result'])
-                    
                     # Export as CSV
                     csv_path = os.path.join(pipeline_dir, f"{name}.csv")
-                    formatter.to_csv(csv_path)
+                    ResultFormatter.to_csv(data['result'], csv_path)
                     assert_file_exists_and_not_empty(csv_path)
                     
                     # Export as JSON
                     json_path = os.path.join(pipeline_dir, f"{name}.json")
-                    formatter.to_json(json_path)
+                    ResultFormatter.to_json(data['result'], json_path)
                     assert_file_exists_and_not_empty(json_path)
                     
                     export_count += 1
@@ -473,8 +475,8 @@ class TestComplexIntegrationScenarios:
         result2 = db2.execute(query)
         
         # Step 3: Combine results
-        df1 = ResultFormatter(result1).to_dataframe()
-        df2 = ResultFormatter(result2).to_dataframe()
+        df1 = ResultFormatter.to_dataframe(result1)
+        df2 = ResultFormatter.to_dataframe(result2)
         
         # Step 4: Validate data distribution
         assert_valid_dataframe(df1)
@@ -494,8 +496,8 @@ class TestComplexIntegrationScenarios:
             csv1_path = os.path.join(temp_dir, "db1_patients.csv")
             csv2_path = os.path.join(temp_dir, "db2_patients.csv")
             
-            ResultFormatter(result1).to_csv(csv1_path)
-            ResultFormatter(result2).to_csv(csv2_path)
+            ResultFormatter.to_csv(result1, csv1_path)
+            ResultFormatter.to_csv(result2, csv2_path)
             
             assert_file_exists_and_not_empty(csv1_path)
             assert_file_exists_and_not_empty(csv2_path)
@@ -526,7 +528,7 @@ class TestComponentCompatibility:
             # Step 1: Execute template
             template = Templates.patient_demographics()
             template_result = db.execute(template)
-            template_df = ResultFormatter(template_result).to_dataframe()
+            template_df = ResultFormatter.to_dataframe(template_result)
             
             # Step 2: Build equivalent query manually
             manual_query = (QueryBuilder()
@@ -541,7 +543,7 @@ class TestComponentCompatibility:
                           .build())
             
             manual_result = db.execute(manual_query)
-            manual_df = ResultFormatter(manual_result).to_dataframe()
+            manual_df = ResultFormatter.to_dataframe(manual_result)
             
             # Step 3: Compare core columns
             core_columns = ["id", "family_name", "birth_date", "gender", "active"]
@@ -575,7 +577,7 @@ class TestComponentCompatibility:
             for name, query in queries:
                 try:
                     result = db.execute(query)
-                    sequential_results[name] = ResultFormatter(result).to_dataframe()
+                    sequential_results[name] = ResultFormatter.to_dataframe(result)
                 except Exception as e:
                     sequential_results[name] = None
                     print(f"Sequential execution failed for {name}: {e}")
@@ -591,7 +593,7 @@ class TestComponentCompatibility:
             for i, (name, query) in enumerate(queries):
                 if name in sequential_results and sequential_results[name] is not None:
                     if i < len(batch_results) and batch_results[i].success:
-                        batch_df = ResultFormatter(batch_results[i].result).to_dataframe()
+                        batch_df = ResultFormatter.to_dataframe(batch_results[i].result)
                         sequential_df = sequential_results[name]
                         
                         # Compare basic properties

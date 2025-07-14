@@ -81,6 +81,7 @@ class QueryMetrics:
         database_type: Type of database (duckdb, postgresql)
         success: Whether the query executed successfully
         error_message: Error message if query failed
+        result: The actual query result object
     """
     query_id: str
     view_definition: Dict[str, Any]
@@ -96,6 +97,7 @@ class QueryMetrics:
     database_type: str = ""
     success: bool = True
     error_message: Optional[str] = None
+    result: Optional[Any] = None  # The actual query result
     
     def __post_init__(self):
         if not self.timestamp:
@@ -122,6 +124,18 @@ class QueryMetrics:
         time_score = max(0, 30 - (self.execution_time - 1) * 5) if self.execution_time > 1 else 30  # Max 30 points
         
         return min(100, throughput_score + memory_score + time_score)
+    
+    def fetchall(self):
+        """Delegate fetchall() to the stored result."""
+        if self.result and hasattr(self.result, 'fetchall'):
+            return self.result.fetchall()
+        return []
+    
+    def to_df(self, include_metadata: bool = True):
+        """Delegate to_df() to the stored result."""
+        if self.result and hasattr(self.result, 'to_df'):
+            return self.result.to_df(include_metadata=include_metadata)
+        return None
 
 
 @dataclass
@@ -287,6 +301,7 @@ class PerformanceMonitor:
                 metrics.row_count = 0
                 
             metrics.success = True
+            metrics.result = result  # Store the actual query result
             
         except Exception as e:
             metrics.success = False
@@ -556,6 +571,32 @@ class PerformanceMonitor:
             })
         
         return summary
+    
+    def get_last_metrics(self) -> Optional[QueryMetrics]:
+        """
+        Get the most recent QueryMetrics from the last executed query.
+        
+        Returns:
+            QueryMetrics object from the most recently executed query, 
+            or None if no queries have been executed yet
+        """
+        if not self.query_history:
+            return None
+        return self.query_history[-1]
+    
+    def get_optimization_suggestions(self) -> OptimizationSuggestions:
+        """
+        Get optimization suggestions for recent queries.
+        
+        Returns:
+            OptimizationSuggestions for the most recent query,
+            or empty suggestions if no queries have been executed
+        """
+        if not self.query_history:
+            return OptimizationSuggestions([], "No queries executed yet")
+        
+        last_metrics = self.query_history[-1]
+        return self.analyze_performance(last_metrics.view_definition, last_metrics)
 
 
 class QueryProfiler:

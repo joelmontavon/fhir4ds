@@ -39,6 +39,7 @@ class BatchResult:
         execution_time: Time taken to execute (in seconds)
         timestamp: When the execution completed
         index: Position in the original batch
+        query_name: Optional name/identifier for the query
     """
     view_definition: Dict[str, Any]
     result: Any = None
@@ -46,6 +47,7 @@ class BatchResult:
     execution_time: float = 0.0
     timestamp: str = ""
     index: int = 0
+    query_name: Optional[str] = None  # Name/identifier for the query
     
     @property
     def success(self) -> bool:
@@ -120,10 +122,66 @@ class BatchProcessor:
         self.show_progress = show_progress
         self.timeout = timeout
         
+        # Query queue for incremental batch building
+        self.query_queue = []  # List of (name, view_definition) tuples
+        
         # Track batch statistics
         self.total_batches_processed = 0
         self.total_queries_executed = 0
         self.total_processing_time = 0.0
+    
+    def add_query(self, name: str, view_definition: Dict[str, Any]) -> None:
+        """
+        Add a named query to the batch queue for later execution.
+        
+        Args:
+            name: Name/identifier for the query
+            view_definition: FHIR ViewDefinition dictionary
+        """
+        self.query_queue.append((name, view_definition))
+    
+    def clear_queue(self) -> None:
+        """Clear all queries from the batch queue."""
+        self.query_queue.clear()
+    
+    def execute_queued(self, parallel: bool = True) -> List[BatchResult]:
+        """
+        Execute all queries currently in the queue.
+        
+        Args:
+            parallel: Whether to execute in parallel (True) or sequentially (False)
+            
+        Returns:
+            List of BatchResult objects with execution results
+        """
+        if not self.query_queue:
+            return []
+        
+        # Extract just the ViewDefinitions for execution
+        view_definitions = [vd for name, vd in self.query_queue]
+        results = self.execute_batch(view_definitions, parallel)
+        
+        # Update results with query names
+        for i, (name, _) in enumerate(self.query_queue):
+            if i < len(results):
+                results[i].query_name = name
+        
+        return results
+    
+    def execute_all(self, parallel: bool = True, monitor_performance: bool = False, 
+                   max_workers: Optional[int] = None) -> List[BatchResult]:
+        """
+        Execute all queries in the queue (alias for execute_queued with extra options).
+        
+        Args:
+            parallel: Whether to execute in parallel
+            monitor_performance: Whether to enable performance monitoring (not used currently)
+            max_workers: Override max_workers setting (not used currently)
+            
+        Returns:
+            List of BatchResult objects with execution results
+        """
+        return self.execute_queued(parallel)
     
     def execute_batch(self, view_definitions: List[Dict[str, Any]], 
                      parallel: bool = True) -> List[BatchResult]:

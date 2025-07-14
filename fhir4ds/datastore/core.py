@@ -219,7 +219,12 @@ class FHIRDataStore:
                     self.load_resource(data)
                     loaded_count += 1
                     
+        except (FileNotFoundError, PermissionError, json.JSONDecodeError) as e:
+            # Re-raise fundamental errors that should not be silently handled
+            self.logger.error(f"Failed to load {file_path}: {e}")
+            raise
         except Exception as e:
+            # Log other errors but don't raise
             self.logger.error(f"Failed to load {file_path}: {e}")
             
         return loaded_count
