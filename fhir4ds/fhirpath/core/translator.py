@@ -23,6 +23,24 @@ class FHIRPathToSQL:
         self.table_name = table_name
         self.json_column = json_column
         self.dialect = dialect
+        
+        # CTEBuilder system support
+        self.use_new_cte_system = False  # Default to legacy system
+    
+    def enable_new_cte_system(self) -> None:
+        """
+        Enable the new CTEBuilder system for CTE management.
+        
+        This switches from the legacy scattered CTE system to the new
+        centralized CTEBuilder architecture.
+        """
+        self.use_new_cte_system = True
+    
+    def disable_new_cte_system(self) -> None:
+        """
+        Disable the new CTEBuilder system and use legacy CTE system.
+        """
+        self.use_new_cte_system = False
     
     def translate(
         self,
@@ -50,7 +68,13 @@ class FHIRPathToSQL:
         determined_resource_type_filter: Optional[str] = None
         
         # Create a master generator to collect all CTEs from expressions and criteria
-        master_generator = SQLGenerator(self.table_name, self.json_column, resource_type=resource_type_context, dialect=self.dialect)
+        master_generator = SQLGenerator(
+            self.table_name, 
+            self.json_column, 
+            resource_type=resource_type_context, 
+            dialect=self.dialect,
+            use_new_cte_system=self.use_new_cte_system
+        )
 
         if isinstance(expressions, str):
             parts = self.translate_to_parts_with_generator(expressions, resource_type_context, master_generator)
@@ -129,10 +153,15 @@ class FHIRPathToSQL:
         select_statement = f"SELECT\n    {select_clauses_str}\nFROM {self.table_name}\n{final_where_clause}".strip()
         
         # Build final query with all accumulated CTEs
-        if master_generator.ctes:
-            final_query = master_generator._build_final_query_with_ctes(select_statement)
+        if self.use_new_cte_system:
+            # Use CTEBuilder system
+            final_query = master_generator.build_final_query_with_cte_builder(select_statement)
         else:
-            final_query = select_statement
+            # Use legacy CTE system
+            if master_generator.ctes:
+                final_query = master_generator._build_final_query_with_ctes(select_statement)
+            else:
+                final_query = select_statement
             
         final_query += ";"
         return final_query
@@ -153,7 +182,13 @@ class FHIRPathToSQL:
         }
         """
         # Create a new generator for this standalone translation
-        generator = SQLGenerator(self.table_name, self.json_column, resource_type=resource_type_context, dialect=self.dialect)
+        generator = SQLGenerator(
+            self.table_name, 
+            self.json_column, 
+            resource_type=resource_type_context, 
+            dialect=self.dialect,
+            use_new_cte_system=self.use_new_cte_system
+        )
         return self.translate_to_parts_with_generator(fhirpath_expression, resource_type_context, generator)
     
     def translate_to_expression_only(
@@ -176,7 +211,8 @@ class FHIRPathToSQL:
                 self.table_name, 
                 self.json_column, 
                 resource_type=resource_type_context, 
-                dialect=self.dialect
+                dialect=self.dialect,
+                use_new_cte_system=False  # Always disable CTEs for expression-only
             )
             
             # Temporarily disable all CTE features to force simple expression generation
