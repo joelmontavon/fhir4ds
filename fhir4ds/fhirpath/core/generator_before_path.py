@@ -8,14 +8,6 @@ into SQL queries compatible with DuckDB's JSON extension.
 import re
 import hashlib
 from typing import List, Dict, Any, Optional, Union, Tuple
-from .generators import LiteralHandler
-from .generators.operators import OperatorHandler
-from .generators.path import PathHandler
-from .generators.functions.collection_functions import CollectionFunctionHandler
-from .generators.functions.string_functions import StringFunctionHandler
-from .generators.functions.math_functions import MathFunctionHandler
-from .generators.functions.type_functions import TypeFunctionHandler
-from .generators.functions.datetime_functions import DateTimeFunctionHandler
 
 class SQLGenerator:
     """Generates SQL from FHIRPath AST with dependency injection"""
@@ -24,8 +16,6 @@ class SQLGenerator:
                  table_name: str = "fhir_resources", 
                  json_column: str = "resource", 
                  resource_type: Optional[str] = None,
-                 # CTE system selection
-                 use_new_cte_system: bool = False,
                  # Advanced CTE optimizations (optional)
                  enable_cte_deduplication: bool = False,
                  enable_dialect_optimizations: bool = False,
@@ -51,27 +41,15 @@ class SQLGenerator:
             'max_case_statements': 3
         }
         
-        # CTE system selection and configuration
-        self.use_new_cte_system = use_new_cte_system
+        # CTE support - ENABLED BY DEFAULT (post-transition)
+        self.ctes = {}  # CTE name -> CTE SQL
+        self.cte_counter = 0
         
-        if use_new_cte_system:
-            # Initialize new CTEBuilder system
-            from .cte_builder import CTEBuilder
-            self.cte_builder = CTEBuilder()
-            self.enable_cte = True  # CTEBuilder handles CTE decisions
-            # Legacy CTE system disabled but still need basic structures
-            self.ctes = {}
-            self.cte_counter = 0
-            # Still need legacy configs for compatibility
-            self._setup_cte_configs()
-        else:
-            # Use legacy CTE system
-            self.cte_builder = None
-            self.ctes = {}  # CTE name -> CTE SQL  
-            self.cte_counter = 0
-            self.enable_cte = True  # Global CTE enablement (replaces all enable_cte_for_* flags)
-            # Unified CTE decision system
-            self._setup_cte_configs()
+        # CTE configuration - simplified from 29 individual flags
+        self.enable_cte = True  # Global CTE enablement (replaces all enable_cte_for_* flags)
+        
+        # Unified CTE decision system
+        self._setup_cte_configs()
         
         # Advanced CTE optimizations (optional)
         self.enable_cte_deduplication = enable_cte_deduplication
@@ -129,43 +107,6 @@ class SQLGenerator:
         else:
             # Use injected choice types
             self.fhir_choice_types = choice_types_dict
-        
-        # Initialize extracted component handlers
-        self.literal_handler = LiteralHandler()
-        
-        # Initialize operator handler with required dependencies
-        ast_nodes_dict = {
-            'LiteralNode': self.LiteralNode,
-            'IdentifierNode': self.IdentifierNode,
-            'PathNode': self.PathNode,
-            'FunctionCallNode': self.FunctionCallNode,
-            'IndexerNode': self.IndexerNode
-        }
-        self.operator_handler = OperatorHandler(self.SQL_OPERATORS, ast_nodes_dict, self.dialect)
-        
-        # Initialize path handler with required dependencies  
-        self.path_handler = PathHandler(ast_nodes_dict, self.dialect, self.json_column, self.fhir_choice_types)
-        self.path_handler.set_generator_context(self)
-        
-        # Initialize function handlers with CTEBuilder support
-        if use_new_cte_system:
-            # Use new CTEBuilder-aware handlers
-            from .generators.functions.string_functions_new import StringFunctionHandler as NewStringFunctionHandler
-            from .generators.functions.collection_functions_new import CollectionFunctionHandler as NewCollectionFunctionHandler
-            self.string_function_handler = NewStringFunctionHandler(self, self.cte_builder)
-            self.collection_function_handler = NewCollectionFunctionHandler(self, self.cte_builder)
-            
-            # Use legacy handlers for others until they're migrated
-            self.math_function_handler = MathFunctionHandler(self)
-            self.type_function_handler = TypeFunctionHandler(self)
-            self.datetime_function_handler = DateTimeFunctionHandler(self)
-        else:
-            # Use legacy function handlers
-            self.collection_function_handler = CollectionFunctionHandler(self)
-            self.string_function_handler = StringFunctionHandler(self)
-            self.math_function_handler = MathFunctionHandler(self)
-            self.type_function_handler = TypeFunctionHandler(self)
-            self.datetime_function_handler = DateTimeFunctionHandler(self)
 
     def _setup_cte_configs(self):
         """Setup CTE configuration system to replace 29 individual methods"""
@@ -319,11 +260,11 @@ class SQLGenerator:
     # Dialect-aware helper methods for JSON operations
     def extract_json_field(self, column: str, path: str) -> str:
         """Extract JSON field as text using dialect-specific method"""
-        return self.path_handler.extract_json_field(column, path)
+        return self.dialect.extract_json_field(column, path)
     
     def extract_json_object(self, column: str, path: str) -> str:
         """Extract JSON object using dialect-specific method"""
-        return self.path_handler.extract_json_object(column, path)
+        return self.dialect.extract_json_object(column, path)
     
     def iterate_json_array(self, column: str, path: str) -> str:
         """Iterate JSON array using dialect-specific method"""
@@ -469,18 +410,13 @@ class SQLGenerator:
     
     def _create_optimized_expression(self, base_expr: str, operation_name: str) -> str:
         """Create an optimized placeholder for complex expressions"""
-        # TEMPORARY FIX: Disable optimization to prevent unresolved placeholders
-        # TODO: Fix the optimization system to properly resolve placeholders
+        if self._is_complex_expression(base_expr):
+            # Create a unique identifier for this complex expression
+            expr_hash = hash(base_expr) % 1000000
+            placeholder = f"__OPTIMIZED_{operation_name}__resource_data__${expr_hash}__"
+            self.complex_expr_cache[placeholder] = base_expr
+            return placeholder
         return base_expr
-        
-        # Original implementation (disabled)
-        # if self._is_complex_expression(base_expr):
-        #     # Create a unique identifier for this complex expression
-        #     expr_hash = hash(base_expr) % 1000000
-        #     placeholder = f"__OPTIMIZED_{operation_name}__resource_data__${expr_hash}__"
-        #     self.complex_expr_cache[placeholder] = base_expr
-        #     return placeholder
-        # return base_expr
     
     def _resolve_optimized_placeholders(self, sql: str) -> str:
         """Resolve optimized placeholders back to their actual expressions"""
@@ -566,9 +502,6 @@ class SQLGenerator:
     
     def _build_final_query_with_ctes(self, main_query: str) -> str:
         """Build the final query with CTEs if any exist, with optional optimizations"""
-        # CRITICAL FIX: Resolve optimized placeholders before building final query
-        main_query = self._resolve_optimized_placeholders(main_query)
-        
         if not self.ctes:
             return main_query
         
@@ -583,9 +516,7 @@ class SQLGenerator:
         # Build WITH clause (original implementation)
         cte_definitions = []
         for cte_name, cte_expr in self.ctes.items():
-            # Also resolve placeholders in CTE expressions
-            resolved_cte_expr = self._resolve_optimized_placeholders(cte_expr)
-            cte_definitions.append(f"{cte_name} AS ({resolved_cte_expr})")
+            cte_definitions.append(f"{cte_name} AS ({cte_expr})")
         
         with_clause = "WITH " + ",\n".join(cte_definitions)
         return f"{with_clause}\n{main_query}"
@@ -598,15 +529,10 @@ class SQLGenerator:
         - PostgreSQL: MATERIALIZED/NOT MATERIALIZED hints
         - DuckDB: JSON-specific optimizations
         """
-        # CRITICAL FIX: Resolve optimized placeholders before dialect optimizations
-        main_query = self._resolve_optimized_placeholders(main_query)
-        
         # Build CTE definitions with dialect-specific hints
         cte_definitions = []
         for cte_name, cte_expr in self.ctes.items():
-            # Resolve placeholders in CTE expressions before optimization
-            resolved_cte_expr = self._resolve_optimized_placeholders(cte_expr)
-            optimized_cte = self._optimize_cte_for_dialect(cte_name, resolved_cte_expr)
+            optimized_cte = self._optimize_cte_for_dialect(cte_name, cte_expr)
             cte_definitions.append(optimized_cte)
         
         with_clause = "WITH " + ",\n".join(cte_definitions)
@@ -627,9 +553,6 @@ class SQLGenerator:
         Analyzes CTEs for inlining opportunities to eliminate unnecessary overhead.
         Simple CTEs that don't provide performance benefits are inlined directly.
         """
-        # CRITICAL FIX: Resolve optimized placeholders before smart inlining
-        main_query = self._resolve_optimized_placeholders(main_query)
-        
         if not self.ctes:
             return main_query
         
@@ -638,12 +561,10 @@ class SQLGenerator:
         ctes_to_keep = {}
         
         for cte_name, cte_expr in self.ctes.items():
-            # Resolve placeholders in CTE expressions before analysis
-            resolved_cte_expr = self._resolve_optimized_placeholders(cte_expr)
-            if self._should_inline_cte(cte_name, resolved_cte_expr, main_query):
-                ctes_to_inline[cte_name] = resolved_cte_expr
+            if self._should_inline_cte(cte_name, cte_expr, main_query):
+                ctes_to_inline[cte_name] = cte_expr
             else:
-                ctes_to_keep[cte_name] = resolved_cte_expr
+                ctes_to_keep[cte_name] = cte_expr
         
         # Apply inlining to main query and remaining CTEs
         inlined_query = self._apply_cte_inlining(main_query, ctes_to_inline)
@@ -3403,9 +3324,11 @@ class SQLGenerator:
             SELECT 
                 CASE 
                     WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN (
-                        SELECT CASE WHEN COUNT(*) > 0 THEN true ELSE false END
-                        FROM {self.iterate_json_array(base_ref, "$")}
-                        WHERE value = {search_value}
+                        CASE WHEN EXISTS(
+                            SELECT 1 
+                            FROM {self.iterate_json_array(base_ref, "$")}
+                            WHERE value = {search_value}
+                        ) THEN true ELSE false END
                     )
                     WHEN {base_ref} = {search_value} THEN true
                     ELSE false
@@ -4117,82 +4040,65 @@ class SQLGenerator:
         else:
             raise ValueError(f"Unknown node type: {type(node)}")
     
-    def translate_with_cte_builder(self, expression_node) -> str:
-        """
-        Translate expression using new CTEBuilder system.
-        
-        This method uses the CTEBuilder architecture for CTE management
-        instead of the legacy scattered CTE system.
-        
-        Args:
-            expression_node: Parsed FHIRPath AST node
-            
-        Returns:
-            SQL expression that may reference CTEs managed by CTEBuilder
-            
-        Raises:
-            ValueError: If CTEBuilder not enabled
-        """
-        if not self.use_new_cte_system or not self.cte_builder:
-            raise ValueError("CTEBuilder system not enabled. Set use_new_cte_system=True")
-        
-        # Generate main expression using CTEBuilder-aware handlers
-        main_sql = self.visit(expression_node)
-        
-        # Return the expression (CTEs will be built at query level)
-        return main_sql
-    
-    def build_final_query_with_cte_builder(self, main_sql: str) -> str:
-        """
-        Build complete SQL query using CTEBuilder for CTE management.
-        
-        Args:
-            main_sql: Main SELECT statement that may reference CTEs
-            
-        Returns:
-            Complete SQL with WITH clause if CTEs exist
-        """
-        if not self.use_new_cte_system or not self.cte_builder:
-            return main_sql
-        
-        return self.cte_builder.build_final_query(main_sql)
-    
-    def get_cte_debug_info(self) -> Dict[str, Any]:
-        """
-        Get debugging information about CTE system state.
-        
-        Returns:
-            Dictionary with CTE system information
-        """
-        if self.use_new_cte_system and self.cte_builder:
-            return {
-                'system': 'CTEBuilder',
-                'cte_builder_info': self.cte_builder.debug_info(),
-                'validation_issues': self.cte_builder.validate_state()
-            }
-        else:
-            return {
-                'system': 'Legacy',
-                'cte_count': len(self.ctes),
-                'cte_names': list(self.ctes.keys()),
-                'counter': self.cte_counter
-            }
-    
     def visit_literal(self, node) -> str:
         """Visit a literal node"""
-        return self.literal_handler.visit_literal(node)
+        if node.type == 'string':
+            return f"'{node.value}'"
+        elif node.type in ['integer', 'decimal']:
+            return str(node.value)
+        elif node.type == 'boolean':
+            return str(node.value).lower()
+        else:
+            return str(node.value)
     
     def visit_variable(self, node) -> str:
         """Visit a variable node ($index, $total, etc.)"""
-        return self.literal_handler.visit_variable(node)
+        # Phase 7 Week 16: Context Variables Implementation
+        
+        if node.name == 'index':
+            # $index variable: represents the 0-based index in collection iteration
+            # For now, return a placeholder that can be filled in by collection operations
+            # In a real implementation, this would need context from the containing iteration
+            return "ROW_NUMBER() OVER () - 1"  # 0-based index
+            
+        elif node.name == 'total':
+            # $total variable: represents the total count in collection iteration
+            # For now, return a placeholder that can be filled in by collection operations
+            # In a real implementation, this would need context from the containing iteration
+            return "COUNT(*) OVER ()"  # Total count
+            
+        else:
+            raise ValueError(f"Unknown context variable: ${node.name}")
     
     def visit_identifier(self, node) -> str:
         """Visit an identifier node"""
-        return self.path_handler.visit_identifier(node, self.resource_type)
+        if self.resource_type == 'Observation' and node.name == 'value':
+            # Handle Observation.value choice type by coalescing possible value[x] fields.
+            # This makes 'Observation.value' resolve to the actual typed data if present.
+            possible_value_fields = [
+                'valueQuantity', 'valueCodeableConcept', 'valueString', 'valueBoolean',
+                'valueInteger', 'valueRange', 'valueRatio', 'valueSampledData',
+                'valueTime', 'valueDateTime', 'valuePeriod'
+            ]
+            # COALESCE returns the first non-null expression.
+            coalesce_args = ", ".join([self.extract_json_object(self.json_column, f"$.{field}") for field in possible_value_fields])
+            return f"COALESCE({coalesce_args})"
+        elif self.resource_type == 'Patient' and node.name == 'deceased':
+            # Handle Patient.deceased choice type by coalescing possible deceased[x] fields.
+            possible_deceased_fields = ['deceasedBoolean', 'deceasedDateTime']
+            coalesce_args = ", ".join([self.extract_json_object(self.json_column, f"$.{field}") for field in possible_deceased_fields])
+            return f"COALESCE({coalesce_args})"
+
+        # Default behavior for other identifiers
+        json_path = f"$.{node.name}"
+        return self.extract_json_object(self.json_column, json_path)
     
     def visit_path(self, node) -> str:
         """Visit a path node - builds the JSON path sequentially"""
-        return self.path_handler.visit_path(node)
+        if len(node.segments) == 0:
+            return self.json_column
+        
+        return self.build_path_expression(node.segments)
     
     def _apply_identifier_segment(self, identifier_name: str, base_sql: str) -> str:
         """Applies an identifier segment to a base SQL expression with proper array flattening."""
@@ -4413,18 +4319,6 @@ class SQLGenerator:
             self._validate_function_args(func_name, func_node.args)
         except ValueError as e:
             raise ValueError(f"Function '{func_name}': {str(e)}") from e
-        
-        # Delegate to specialized function handlers
-        if self.collection_function_handler.can_handle(func_name):
-            return self.collection_function_handler.handle_function(func_name, base_expr, func_node)
-        elif self.string_function_handler.can_handle(func_name):
-            return self.string_function_handler.handle_function(func_name, base_expr, func_node)
-        elif self.math_function_handler.can_handle(func_name):
-            return self.math_function_handler.handle_function(func_name, base_expr, func_node)
-        elif self.type_function_handler.can_handle(func_name):
-            return self.type_function_handler.handle_function(func_name, base_expr, func_node)
-        elif self.datetime_function_handler.can_handle(func_name):
-            return self.datetime_function_handler.handle_function(func_name, base_expr, func_node)
         
         if func_name == 'exists':
             # PHASE 2D: CTE Implementation with Feature Flag
@@ -5052,6 +4946,59 @@ class SQLGenerator:
             END
             """
             
+        elif func_name == 'tointeger':
+            # toInteger() function - convert string to integer
+            if len(func_node.args) != 0:
+                raise ValueError("toInteger() function takes no arguments")
+            
+            # PHASE 5M: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'tointeger'):
+                try:
+                    return self._generate_tointeger_with_cte(base_expr)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for tointeger(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # Handle the case where base_expr is already extracted
+            if 'json_extract' in base_expr or 'SUBSTRING' in base_expr:
+                # If already a string value, cast directly
+                base_value = base_expr
+            else:
+                # Extract as string first
+                base_value = self.extract_json_field(base_expr, '$')
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NOT NULL THEN
+                    CAST({base_value} AS INTEGER)
+                ELSE NULL
+            END
+            """
+            
+        elif func_name == 'tostring':
+            # toString() function - convert value to string
+            if len(func_node.args) != 0:
+                raise ValueError("toString() function takes no arguments")
+            
+            # PHASE 5M: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'tostring'):
+                try:
+                    return self._generate_tostring_with_cte(base_expr)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for tostring(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # toString() should truncate decimal values for integer-like results  
+            # For numeric results from arithmetic operations, always truncate to integer
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NOT NULL THEN
+                    CAST(CAST({base_expr} AS INTEGER) AS VARCHAR)
+                ELSE NULL
+            END
+            """
         elif func_name == 'startswith':
             # startsWith(prefix) function - check if string starts with prefix
             if len(func_node.args) != 1:
@@ -5957,6 +5904,33 @@ class SQLGenerator:
                 )
             END
             """
+            
+        elif func_name == 'now':
+            # now() function - returns current datetime
+            if len(func_node.args) != 0:
+                raise ValueError("now() function takes no arguments")
+            
+            # Direct implementation - returns current timestamp
+            # Note: This is a context-independent function (doesn't use base_expr)
+            return f"CURRENT_TIMESTAMP"
+            
+        elif func_name == 'today':
+            # today() function - returns current date
+            if len(func_node.args) != 0:
+                raise ValueError("today() function takes no arguments")
+            
+            # Direct implementation - returns current date
+            # Note: This is a context-independent function (doesn't use base_expr)
+            return f"CURRENT_DATE"
+            
+        elif func_name == 'timeofday':
+            # timeOfDay() function - returns current time
+            if len(func_node.args) != 0:
+                raise ValueError("timeOfDay() function takes no arguments")
+            
+            # Direct implementation - returns current time
+            # Note: This is a context-independent function (doesn't use base_expr)
+            return f"CURRENT_TIME"
             
         elif func_name == 'trace':
             # trace(name[, projection]) function - debug tracing functionality
@@ -7420,6 +7394,484 @@ class SQLGenerator:
                     END
             END
             """
+
+        elif func_name == 'convertstoboolean':
+            # Phase 3 Week 8: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'convertstoboolean'):
+                try:
+                    return self._generate_convertstoboolean_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for convertsToBoolean(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # convertsToBoolean() - tests if the input collection can be converted to boolean
+            # FHIRPath specification: convertsToBoolean() - returns true if conversion is possible
+            
+            # convertsToBoolean() takes no arguments
+            if len(func_node.args) != 0:
+                raise ValueError(f"convertsToBoolean() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                -- Check if collection is null or empty
+                WHEN {base_expr} IS NULL THEN false
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Empty array returns false
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN false
+                        -- Check if all elements can be converted to boolean
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(*) = COUNT(CASE 
+                                    WHEN {self.get_json_type('value')} = 'BOOLEAN' THEN 1
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND LOWER(CAST(value AS VARCHAR)) IN ('true', 'false') THEN 1
+                                    WHEN {self.get_json_type('value')} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN 1
+                                    ELSE NULL
+                                END) THEN true
+                                ELSE false
+                            END
+                            FROM {self.dialect.json_each_function}({base_expr})
+                        )
+                    END
+                -- Single element - check if it can be converted to boolean
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} = 'BOOLEAN' THEN true
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND LOWER(CAST({base_expr} AS VARCHAR)) IN ('true', 'false') THEN true
+                        WHEN {self.get_json_type(base_expr)} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN true
+                        ELSE false
+                    END
+            END
+            """
+
+        elif func_name == 'todecimal':
+            # Phase 3 Week 8: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'todecimal'):
+                try:
+                    return self._generate_todecimal_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for toDecimal(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # toDecimal() - converts the input collection to decimal values
+            # FHIRPath specification: toDecimal() - converts strings, numbers to decimal
+            
+            # toDecimal() takes no arguments
+            if len(func_node.args) != 0:
+                raise ValueError(f"toDecimal() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                -- Check if collection is null or empty
+                WHEN {base_expr} IS NULL THEN NULL
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Empty array returns NULL
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        -- Convert each element to decimal
+                        ELSE (
+                            SELECT {self.dialect.json_array_function}(
+                                CAST(value AS DOUBLE)::VARCHAR
+                            )
+                            FROM {self.dialect.json_each_function}({base_expr})
+                            WHERE CASE 
+                                WHEN {self.get_json_type('value')} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN true
+                                WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS DOUBLE) IS NOT NULL THEN true
+                                ELSE false
+                            END
+                        )
+                    END
+                -- Single element - convert to decimal
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN {self.dialect.json_array_function}(CAST({base_expr} AS DOUBLE)::VARCHAR)
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND TRY_CAST({base_expr} AS DOUBLE) IS NOT NULL THEN {self.dialect.json_array_function}(CAST({base_expr} AS DOUBLE)::VARCHAR)
+                        ELSE NULL
+                    END
+            END
+            """
+
+        elif func_name == 'convertstodecimal':
+            # Phase 3 Week 8: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'convertstodecimal'):
+                try:
+                    return self._generate_convertstodecimal_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for convertsToDecimal(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # convertsToDecimal() - tests if the input collection can be converted to decimal
+            # FHIRPath specification: convertsToDecimal() - returns true if conversion is possible
+            
+            # convertsToDecimal() takes no arguments
+            if len(func_node.args) != 0:
+                raise ValueError(f"convertsToDecimal() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                -- Check if collection is null or empty
+                WHEN {base_expr} IS NULL THEN false
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Empty array returns false
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN false
+                        -- Check if all elements can be converted to decimal
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(*) = COUNT(CASE 
+                                    WHEN {self.get_json_type('value')} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN 1
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS DOUBLE) IS NOT NULL THEN 1
+                                    ELSE NULL
+                                END) THEN true
+                                ELSE false
+                            END
+                            FROM {self.dialect.json_each_function}({base_expr})
+                        )
+                    END
+                -- Single element - check if it can be converted to decimal
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN true
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND TRY_CAST({base_expr} AS DOUBLE) IS NOT NULL THEN true
+                        ELSE false
+                    END
+            END
+            """
+
+        elif func_name == 'convertstointeger':
+            # Phase 3 Week 8: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'convertstointeger'):
+                try:
+                    return self._generate_convertstointeger_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for convertsToInteger(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # convertsToInteger() - tests if the input collection can be converted to integer
+            # FHIRPath specification: convertsToInteger() - returns true if conversion is possible
+            
+            # convertsToInteger() takes no arguments
+            if len(func_node.args) != 0:
+                raise ValueError(f"convertsToInteger() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                -- Check if collection is null or empty
+                WHEN {base_expr} IS NULL THEN false
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Empty array returns false
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN false
+                        -- Check if all elements can be converted to integer
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(*) = COUNT(CASE 
+                                    WHEN {self.get_json_type('value')} = 'INTEGER' THEN 1
+                                    WHEN {self.get_json_type('value')} IN ('NUMBER', 'DOUBLE') AND CAST(value AS DOUBLE) = floor(CAST(value AS DOUBLE)) THEN 1
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS INTEGER) IS NOT NULL THEN 1
+                                    ELSE NULL
+                                END) THEN true
+                                ELSE false
+                            END
+                            FROM {self.dialect.json_each_function}({base_expr})
+                        )
+                    END
+                -- Single element - check if it can be converted to integer
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} = 'INTEGER' THEN true
+                        WHEN {self.get_json_type(base_expr)} IN ('NUMBER', 'DOUBLE') AND CAST({base_expr} AS DOUBLE) = floor(CAST({base_expr} AS DOUBLE)) THEN true
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND TRY_CAST({base_expr} AS INTEGER) IS NOT NULL THEN true
+                        ELSE false
+                    END
+            END
+            """
+
+        elif func_name == 'todate':
+            # Phase 3 Week 9: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'todate'):
+                try:
+                    return self._generate_todate_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for toDate(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # toDate() - converts the input collection to date values
+            if len(func_node.args) != 0:
+                raise ValueError(f"toDate() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN NULL
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        ELSE (
+                            SELECT json_group_array(
+                                CASE 
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS DATE) IS NOT NULL THEN TRY_CAST(value AS DATE)
+                                    WHEN {self.get_json_type('value')} = 'DATE' THEN CAST(value AS DATE)
+                                    ELSE NULL
+                                END
+                            )
+                            FROM {self.dialect.json_each_function}({base_expr})
+                            WHERE CASE 
+                                WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS DATE) IS NOT NULL THEN true
+                                WHEN {self.get_json_type('value')} = 'DATE' THEN true
+                                ELSE false
+                            END
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND TRY_CAST({base_expr} AS DATE) IS NOT NULL THEN TRY_CAST({base_expr} AS DATE)
+                        WHEN {self.get_json_type(base_expr)} = 'DATE' THEN CAST({base_expr} AS DATE)
+                        ELSE NULL
+                    END
+            END
+            """
+
+        elif func_name == 'convertstodate':
+            # Phase 3 Week 9: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'convertstodate'):
+                try:
+                    return self._generate_convertstodate_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for convertsToDate(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # convertsToDate() - tests if the input collection can be converted to date values
+            if len(func_node.args) != 0:
+                raise ValueError(f"convertsToDate() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                -- Check if collection is null or empty
+                WHEN {base_expr} IS NULL THEN false
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Empty array returns false
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN false
+                        -- Check if all elements can be converted to date
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(*) = COUNT(CASE 
+                                    WHEN {self.get_json_type('value')} = 'DATE' THEN 1
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS DATE) IS NOT NULL THEN 1
+                                    ELSE NULL
+                                END) THEN true
+                                ELSE false
+                            END
+                            FROM {self.dialect.json_each_function}({base_expr})
+                        )
+                    END
+                -- Single element - check if it can be converted to date
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} = 'DATE' THEN true
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND TRY_CAST({base_expr} AS DATE) IS NOT NULL THEN true
+                        ELSE false
+                    END
+            END
+            """
+
+        elif func_name == 'todatetime':
+            # Phase 3 Week 9: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'todatetime'):
+                try:
+                    return self._generate_todatetime_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for toDateTime(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # toDateTime() - converts the input collection to datetime values
+            if len(func_node.args) != 0:
+                raise ValueError(f"toDateTime() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN NULL
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        ELSE (
+                            SELECT json_group_array(
+                                CASE 
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIMESTAMP) IS NOT NULL THEN TRY_CAST(value AS TIMESTAMP)
+                                    WHEN {self.get_json_type('value')} = 'TIMESTAMP' THEN CAST(value AS TIMESTAMP)
+                                    WHEN {self.get_json_type('value')} = 'DATE' THEN CAST(value AS TIMESTAMP)
+                                    ELSE NULL
+                                END
+                            )
+                            FROM {self.dialect.json_each_function}({base_expr})
+                            WHERE CASE 
+                                WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIMESTAMP) IS NOT NULL THEN true
+                                WHEN {self.get_json_type('value')} IN ('TIMESTAMP', 'DATE') THEN true
+                                ELSE false
+                            END
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND TRY_CAST({base_expr} AS TIMESTAMP) IS NOT NULL THEN TRY_CAST({base_expr} AS TIMESTAMP)
+                        WHEN {self.get_json_type(base_expr)} = 'TIMESTAMP' THEN CAST({base_expr} AS TIMESTAMP)
+                        WHEN {self.get_json_type(base_expr)} = 'DATE' THEN CAST({base_expr} AS TIMESTAMP)
+                        ELSE NULL
+                    END
+            END
+            """
+
+        elif func_name == 'convertstodatetime':
+            # Phase 3 Week 9: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'convertstodatetime'):
+                try:
+                    return self._generate_convertstodatetime_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for convertsToDateTime(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # convertsToDateTime() - tests if the input collection can be converted to datetime values
+            if len(func_node.args) != 0:
+                raise ValueError(f"convertsToDateTime() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                -- Check if collection is null or empty
+                WHEN {base_expr} IS NULL THEN false
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Empty array returns false
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN false
+                        -- Check if all elements can be converted to datetime
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(*) = COUNT(CASE 
+                                    WHEN {self.get_json_type('value')} IN ('TIMESTAMP', 'DATE') THEN 1
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIMESTAMP) IS NOT NULL THEN 1
+                                    ELSE NULL
+                                END) THEN true
+                                ELSE false
+                            END
+                            FROM {self.dialect.json_each_function}({base_expr})
+                        )
+                    END
+                -- Single element - check if it can be converted to datetime
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} IN ('TIMESTAMP', 'DATE') THEN true
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND TRY_CAST({base_expr} AS TIMESTAMP) IS NOT NULL THEN true
+                        ELSE false
+                    END
+            END
+            """
+
+        elif func_name == 'totime':
+            # Phase 3 Week 9: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'totime'):
+                try:
+                    return self._generate_totime_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for toTime(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # toTime() - converts the input collection to time values
+            if len(func_node.args) != 0:
+                raise ValueError(f"toTime() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN NULL
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        ELSE (
+                            SELECT json_group_array(
+                                CASE 
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIME) IS NOT NULL THEN TRY_CAST(value AS TIME)
+                                    WHEN {self.get_json_type('value')} = 'TIME' THEN CAST(value AS TIME)
+                                    WHEN {self.get_json_type('value')} = 'TIMESTAMP' THEN CAST(value AS TIME)
+                                    ELSE NULL
+                                END
+                            )
+                            FROM {self.dialect.json_each_function}({base_expr})
+                            WHERE CASE 
+                                WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIME) IS NOT NULL THEN true
+                                WHEN {self.get_json_type('value')} IN ('TIME', 'TIMESTAMP') THEN true
+                                ELSE false
+                            END
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND TRY_CAST({base_expr} AS TIME) IS NOT NULL THEN TRY_CAST({base_expr} AS TIME)
+                        WHEN {self.get_json_type(base_expr)} = 'TIME' THEN CAST({base_expr} AS TIME)
+                        WHEN {self.get_json_type(base_expr)} = 'TIMESTAMP' THEN CAST({base_expr} AS TIME)
+                        ELSE NULL
+                    END
+            END
+            """
+
+        elif func_name == 'convertstotime':
+            # Phase 3 Week 9: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'convertstotime'):
+                try:
+                    return self._generate_convertstotime_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for convertsToTime(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # convertsToTime() - tests if the input collection can be converted to time values
+            if len(func_node.args) != 0:
+                raise ValueError(f"convertsToTime() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                -- Check if collection is null or empty
+                WHEN {base_expr} IS NULL THEN false
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Empty array returns false
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN false
+                        -- Check if all elements can be converted to time
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(*) = COUNT(CASE 
+                                    WHEN {self.get_json_type('value')} IN ('TIME', 'TIMESTAMP') THEN 1
+                                    WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIME) IS NOT NULL THEN 1
+                                    ELSE NULL
+                                END) THEN true
+                                ELSE false
+                            END
+                            FROM {self.dialect.json_each_function}({base_expr})
+                        )
+                    END
+                -- Single element - check if it can be converted to time
+                ELSE 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} IN ('TIME', 'TIMESTAMP') THEN true
+                        WHEN {self.get_json_type(base_expr)} = 'VARCHAR' AND TRY_CAST({base_expr} AS TIME) IS NOT NULL THEN true
+                        ELSE false
+                    END
+            END
+            """
+
         else:
             raise ValueError(f"Unknown function: {func_name}")
     
@@ -7478,12 +7930,85 @@ class SQLGenerator:
     
     def visit_binary_op(self, node) -> str:
         """Visit a binary operation node with proper type casting"""
-        return self.operator_handler.visit_binary_op(
-            node, 
-            self.visit, 
-            self.determine_comparison_casts, 
-            self._generate_union_sql
-        )
+        left = self.visit(node.left)
+        right = self.visit(node.right)
+        
+        sql_op = self.SQL_OPERATORS.get(node.operator.lower(), node.operator)
+        
+        # Handle string concatenation vs arithmetic for + operator
+        if sql_op == '+':
+            # Check if this should be string concatenation
+            if self._is_string_concatenation(node.left, node.right):
+                # Use dialect-specific string concatenation
+                return self.dialect.string_concat(left, right)
+            else:
+                # Treat as arithmetic - cast to numeric types
+                if not (isinstance(node.left, self.LiteralNode) and node.left.type in ['integer', 'decimal']):
+                    left = f"CAST({left} AS DOUBLE)"
+                if not (isinstance(node.right, self.LiteralNode) and node.right.type in ['integer', 'decimal']):
+                    right = f"CAST({right} AS DOUBLE)"
+                return f"({left} {sql_op} {right})"
+        
+        # Handle other arithmetic operations with potential JSON operands
+        elif sql_op in ['-', '*', '/']:
+            # If left is not a number literal, cast it (it might be from json_extract)
+            if not (isinstance(node.left, self.LiteralNode) and node.left.type in ['integer', 'decimal']):
+                left = f"CAST({left} AS DOUBLE)"
+            # If right is not a number literal, cast it
+            if not (isinstance(node.right, self.LiteralNode) and node.right.type in ['integer', 'decimal']):
+                right = f"CAST({right} AS DOUBLE)"
+            return f"({left} {sql_op} {right})"
+        
+        # Handle integer division and modulo operations
+        elif node.operator == 'div':
+            # Integer division - cast to integers and use integer division
+            if not (isinstance(node.left, self.LiteralNode) and node.left.type in ['integer', 'decimal']):
+                left = f"CAST({left} AS INTEGER)"
+            if not (isinstance(node.right, self.LiteralNode) and node.right.type in ['integer', 'decimal']):
+                right = f"CAST({right} AS INTEGER)"
+            # Use floor division to ensure integer result, with division by zero protection
+            return f"CASE WHEN {right} = 0 THEN NULL ELSE CAST(floor(CAST({left} AS DOUBLE) / CAST({right} AS DOUBLE)) AS INTEGER) END"
+        
+        elif node.operator == 'mod':
+            # Modulo operation - cast to integers and use modulo
+            if not (isinstance(node.left, self.LiteralNode) and node.left.type in ['integer', 'decimal']):
+                left = f"CAST({left} AS INTEGER)"
+            if not (isinstance(node.right, self.LiteralNode) and node.right.type in ['integer', 'decimal']):
+                right = f"CAST({right} AS INTEGER)"
+            # Use modulo function with division by zero protection
+            return f"CASE WHEN {right} = 0 THEN NULL ELSE ({left} % {right}) END"
+
+        # Handle logical operations (AND, OR) with proper boolean casting
+        elif sql_op in ['AND', 'OR']:
+            # Cast known boolean fields to proper boolean types for logical operations
+            left_cast = self._ensure_boolean_casting(node.left, left)
+            right_cast = self._ensure_boolean_casting(node.right, right)
+            return f"({left_cast} {sql_op} {right_cast})"
+        
+        # Handle XOR operation (exclusive OR) - Phase 6 Week 15
+        elif node.operator == 'xor':
+            # XOR: true when operands differ, false when they're the same
+            left_cast = self._ensure_boolean_casting(node.left, left)
+            right_cast = self._ensure_boolean_casting(node.right, right)
+            return f"(({left_cast} AND NOT {right_cast}) OR (NOT {left_cast} AND {right_cast}))"
+        
+        # Handle IMPLIES operation (logical implication) - Phase 6 Week 15  
+        elif node.operator == 'implies':
+            # IMPLIES: equivalent to (NOT left OR right), or false only when left is true and right is false
+            left_cast = self._ensure_boolean_casting(node.left, left)
+            right_cast = self._ensure_boolean_casting(node.right, right)
+            return f"(NOT {left_cast} OR {right_cast})"
+
+        # Handle JSON value comparisons with proper type casting
+        elif node.operator in ['=', '!=', '>', '<', '>=', '<=', '~', '!~']:
+            left_cast, right_cast = self.determine_comparison_casts(node.left, node.right, left, right)
+            return f"({left_cast} {sql_op} {right_cast})"
+        
+        # Handle collection union operations
+        elif node.operator == '|':
+            return self._generate_union_sql(left, right)
+        
+        return f"({left} {sql_op} {right})"
     
     def _ensure_boolean_casting(self, node, sql_expr: str) -> str:
         """Ensure proper boolean casting for logical operations"""
@@ -7827,7 +8352,16 @@ class SQLGenerator:
     
     def visit_unary_op(self, node) -> str:
         """Visit a unary operation node"""
-        return self.operator_handler.visit_unary_op(node, self.visit)
+        operand = self.visit(node.operand)
+        
+        if node.operator.lower() == 'not':
+            return f"NOT ({operand})"
+        elif node.operator == '+': # Unary plus
+            return f"+({operand})" 
+        elif node.operator == '-': # Unary minus
+            return f"-({operand})"
+        else:
+            return f"{node.operator}({operand})"
     
     def visit_indexer(self, node) -> str:
         """Visit an indexer node - handles array indexing"""
@@ -8085,10 +8619,4 @@ FROM {self.table_name}"""
         # Build the function call with key-value pairs
         pairs_str = ", ".join(json_pairs)
         return f"{self.dialect.json_object_function}({pairs_str})"
-    
-    def _handle_function_fallback(self, func_name: str, base_expr: str, func_node) -> str:
-        """Fallback handler for functions not yet fully extracted."""
-        # This allows extracted handlers to delegate back to main generator
-        # for functions that are partially implemented
-        raise ValueError(f"Function '{func_name}' is not yet fully implemented in extracted handlers")
     

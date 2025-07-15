@@ -21,13 +21,38 @@ class CollectionFunctionHandler:
         self.generator = generator
         self.dialect = generator.dialect
         
+    def get_iteration_index_column(self) -> str:
+        """Get the correct column name for array iteration index based on dialect."""
+        if self.dialect.name == "POSTGRESQL":
+            return "ordinality"
+        else:  # DuckDB and others
+            return "key"
+    
+    def get_zero_based_index_condition(self, index_column: str, comparison: str, value: str) -> str:
+        """Get a zero-based index condition that works for both dialects."""
+        if self.dialect.name == "POSTGRESQL":
+            # PostgreSQL ordinality starts from 1, so we need to adjust
+            if comparison == ">":
+                return f"CAST({index_column} AS INTEGER) > ({value} + 1)"
+            elif comparison == ">=":
+                return f"CAST({index_column} AS INTEGER) >= ({value} + 1)"
+            elif comparison == "<":
+                return f"CAST({index_column} AS INTEGER) <= ({value})"
+            elif comparison == "<=":
+                return f"CAST({index_column} AS INTEGER) <= ({value})"
+            else:
+                return f"CAST({index_column} AS INTEGER) {comparison} ({value})"
+        else:  # DuckDB and others use 0-based indexing
+            return f"CAST({index_column} AS INTEGER) {comparison} ({value})"
+        
     def can_handle(self, function_name: str) -> bool:
         """Check if this handler can process the given function."""
         collection_functions = {
             'exists', 'empty', 'first', 'last', 'count', 'length',
             'select', 'where', 'all', 'distinct', 'single', 'tail',
             'skip', 'take', 'union', 'combine', 'intersect', 'exclude',
-            'alltrue', 'allfalse', 'anytrue', 'anyfalse', 'contains'
+            'alltrue', 'allfalse', 'anytrue', 'anyfalse', 'contains',
+            'children', 'descendants', 'subsetof', 'supersetof', 'isdistinct'
         }
         return function_name.lower() in collection_functions
     
@@ -91,6 +116,16 @@ class CollectionFunctionHandler:
             return self._handle_anyfalse(base_expr, func_node)
         elif func_name == 'contains':
             return self._handle_contains(base_expr, func_node)
+        elif func_name == 'children':
+            return self._handle_children(base_expr, func_node)
+        elif func_name == 'descendants':
+            return self._handle_descendants(base_expr, func_node)
+        elif func_name == 'subsetof':
+            return self._handle_subsetof(base_expr, func_node)
+        elif func_name == 'supersetof':
+            return self._handle_supersetof(base_expr, func_node)
+        elif func_name == 'isdistinct':
+            return self._handle_isdistinct(base_expr, func_node)
         else:
             raise ValueError(f"Unsupported collection function: {func_name}")
     
@@ -396,64 +431,833 @@ class CollectionFunctionHandler:
     # These would need to be extracted from the main generator as well
     
     def _handle_single(self, base_expr: str, func_node) -> str:
-        """Handle single() function - placeholder."""
-        # Delegate to main generator for now
-        return self.generator._handle_function_fallback('single', base_expr, func_node)
+        """
+        Handle single() function - returns exactly one element or error.
+        
+        Args:
+            base_expr: SQL expression for the base collection
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns single element or raises error
+            
+        Raises:
+            ValueError: If function has arguments (single() takes no arguments)
+        """
+        # Validate no arguments
+        if hasattr(func_node, 'args') and func_node.args:
+            raise ValueError("single() function takes no arguments")
+        
+        # CTE Implementation with Feature Flag
+        if self.generator.enable_cte and self.generator._should_use_cte_unified(base_expr, 'single'):
+            try:
+                return self._generate_single_with_cte(base_expr)
+            except Exception as e:
+                # Fallback to original implementation if CTE generation fails
+                print(f"CTE generation failed for single(), falling back to subqueries: {e}")
+        
+        # Original implementation (fallback)
+        return self._generate_single_inline(base_expr)
+    
+    def _generate_single_with_cte(self, base_expr: str) -> str:
+        """Generate single() function using CTE approach."""
+        # This would use the CTE system for optimization
+        # For now, delegate to inline implementation
+        return self._generate_single_inline(base_expr)
+    
+    def _generate_single_inline(self, base_expr: str) -> str:
+        """Generate single() function using inline approach."""
+        # single() function must validate that there's exactly one element
+        # Throws error if empty collection or multiple elements
+        # FHIRPath spec requires strict validation for single()
+        
+        # Get dialect-specific error expression
+        if self.generator.dialect.name == "POSTGRESQL":
+            error_expr = "(1/0)::jsonb"
+            array_type = "'array'"
+        else:  # DuckDB
+            error_expr = "CAST(1/0 AS JSON)"
+            array_type = "'ARRAY'"
+        
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL THEN {error_expr}
+            WHEN {self.generator.get_json_type(base_expr)} = {array_type} THEN
+                CASE 
+                    WHEN {self.generator.get_json_array_length(base_expr)} = 0 THEN {error_expr}
+                    WHEN {self.generator.get_json_array_length(base_expr)} = 1 THEN {self.generator.extract_json_object(base_expr, '$[0]')}
+                    ELSE {error_expr}
+                END
+            ELSE {base_expr}
+        END
+        """
     
     def _handle_tail(self, base_expr: str, func_node) -> str:
-        """Handle tail() function - placeholder."""
-        # Delegate to main generator for now
-        return self.generator._handle_function_fallback('tail', base_expr, func_node)
+        """
+        Handle tail() function - returns all elements except the first.
+        
+        Args:
+            base_expr: SQL expression for the base collection
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns all elements except the first
+            
+        Raises:
+            ValueError: If function has arguments (tail() takes no arguments)
+        """
+        # Validate no arguments
+        if hasattr(func_node, 'args') and func_node.args:
+            raise ValueError("tail() function takes no arguments")
+        
+        # CTE Implementation with Feature Flag
+        if self.generator.enable_cte and self.generator._should_use_cte_unified(base_expr, 'tail'):
+            try:
+                return self._generate_tail_with_cte(base_expr)
+            except Exception as e:
+                # Fallback to original implementation if CTE generation fails
+                print(f"CTE generation failed for tail(), falling back to subqueries: {e}")
+        
+        # Original implementation (fallback)
+        return self._generate_tail_inline(base_expr)
+    
+    def _generate_tail_with_cte(self, base_expr: str) -> str:
+        """Generate tail() function using CTE approach."""
+        # This would use the CTE system for optimization
+        # For now, delegate to inline implementation
+        return self._generate_tail_inline(base_expr)
+    
+    def _generate_tail_inline(self, base_expr: str) -> str:
+        """Generate tail() function using inline approach."""
+        # tail() returns all elements except the first
+        # For arrays: slice from index 1 to end
+        # For single objects: return empty array
+        
+        index_column = self.get_iteration_index_column()
+        index_condition = self.get_zero_based_index_condition(index_column, ">", "0")
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL THEN NULL
+            WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN
+                CASE 
+                    WHEN {self.generator.get_json_array_length(base_expr)} <= 1 THEN {self.generator.dialect.json_array_function}()
+                    ELSE (
+                        SELECT {self.generator.aggregate_to_json_array('value')}
+                        FROM {self.generator.iterate_json_array(base_expr, "$")}
+                        WHERE {index_condition}
+                    )
+                END
+            ELSE {self.generator.dialect.json_array_function}()
+        END
+        """
     
     def _handle_skip(self, base_expr: str, func_node) -> str:
-        """Handle skip() function - placeholder."""
-        # Delegate to main generator for now
-        return self.generator._handle_function_fallback('skip', base_expr, func_node)
+        """
+        Handle skip(num) function - returns all elements after skipping the first num elements.
+        
+        Args:
+            base_expr: SQL expression for the base collection
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns all elements after skipping the first num
+            
+        Raises:
+            ValueError: If function doesn't have exactly one argument
+        """
+        # Validate exactly one argument
+        if not hasattr(func_node, 'args') or len(func_node.args) != 1:
+            raise ValueError("skip() function requires exactly one argument")
+        
+        # Get the skip count argument
+        skip_count_expr = self.generator.visit(func_node.args[0])
+        
+        # CTE Implementation with Feature Flag
+        if self.generator.enable_cte and self.generator._should_use_cte_unified(base_expr, 'skip'):
+            try:
+                return self._generate_skip_with_cte(base_expr, skip_count_expr)
+            except Exception as e:
+                # Fallback to original implementation if CTE generation fails
+                print(f"CTE generation failed for skip(), falling back to subqueries: {e}")
+        
+        # Original implementation (fallback)
+        return self._generate_skip_inline(base_expr, skip_count_expr)
+    
+    def _generate_skip_with_cte(self, base_expr: str, skip_count_expr: str) -> str:
+        """Generate skip() function using CTE approach."""
+        # This would use the CTE system for optimization
+        # For now, delegate to inline implementation
+        return self._generate_skip_inline(base_expr, skip_count_expr)
+    
+    def _generate_skip_inline(self, base_expr: str, skip_count_expr: str) -> str:
+        """Generate skip() function using inline approach."""
+        # skip(num) returns all elements after skipping the first num elements
+        # For arrays: slice from index num to end
+        # For single objects: return empty if num > 0, else return the object
+        
+        index_column = self.get_iteration_index_column()
+        index_condition = self.get_zero_based_index_condition(index_column, ">=", skip_count_expr)
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL THEN NULL
+            WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN
+                CASE 
+                    WHEN {self.generator.get_json_array_length(base_expr)} <= ({skip_count_expr}) THEN {self.generator.dialect.json_array_function}()
+                    ELSE (
+                        SELECT {self.generator.aggregate_to_json_array('value')}
+                        FROM {self.generator.iterate_json_array(base_expr, "$")}
+                        WHERE {index_condition}
+                    )
+                END
+            ELSE 
+                CASE 
+                    WHEN ({skip_count_expr}) > 0 THEN {self.generator.dialect.json_array_function}()
+                    ELSE {self.generator.dialect.json_array_function}({base_expr})
+                END
+        END
+        """
     
     def _handle_take(self, base_expr: str, func_node) -> str:
-        """Handle take() function - placeholder."""
-        # Delegate to main generator for now
-        return self.generator._handle_function_fallback('take', base_expr, func_node)
+        """
+        Handle take(num) function - returns the first num elements of a collection.
+        
+        Args:
+            base_expr: SQL expression for the base collection
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns the first num elements
+            
+        Raises:
+            ValueError: If function doesn't have exactly one argument
+        """
+        # Validate exactly one argument
+        if not hasattr(func_node, 'args') or len(func_node.args) != 1:
+            raise ValueError("take() function requires exactly one argument")
+        
+        # Get the take count argument
+        take_count_expr = self.generator.visit(func_node.args[0])
+        
+        # CTE Implementation with Feature Flag
+        if self.generator.enable_cte and self.generator._should_use_cte_unified(base_expr, 'take'):
+            try:
+                return self._generate_take_with_cte(base_expr, take_count_expr)
+            except Exception as e:
+                # Fallback to original implementation if CTE generation fails
+                print(f"CTE generation failed for take(), falling back to subqueries: {e}")
+        
+        # Original implementation (fallback)
+        return self._generate_take_inline(base_expr, take_count_expr)
+    
+    def _generate_take_with_cte(self, base_expr: str, take_count_expr: str) -> str:
+        """Generate take() function using CTE approach."""
+        # This would use the CTE system for optimization
+        # For now, delegate to inline implementation
+        return self._generate_take_inline(base_expr, take_count_expr)
+    
+    def _generate_take_inline(self, base_expr: str, take_count_expr: str) -> str:
+        """Generate take() function using inline approach."""
+        # take(num) returns the first num elements of a collection
+        # For arrays: slice from index 0 to num-1
+        # For single objects: return the object if num > 0, else return empty array
+        
+        index_column = self.get_iteration_index_column()
+        index_condition = self.get_zero_based_index_condition(index_column, "<", take_count_expr)
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL THEN NULL
+            WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN
+                CASE 
+                    WHEN ({take_count_expr}) <= 0 THEN {self.generator.dialect.json_array_function}()
+                    WHEN {self.generator.get_json_array_length(base_expr)} <= ({take_count_expr}) THEN {base_expr}
+                    ELSE (
+                        SELECT {self.generator.aggregate_to_json_array('value')}
+                        FROM {self.generator.iterate_json_array(base_expr, "$")}
+                        WHERE {index_condition}
+                    )
+                END
+            ELSE 
+                CASE 
+                    WHEN ({take_count_expr}) > 0 THEN {self.generator.dialect.json_array_function}({base_expr})
+                    ELSE {self.generator.dialect.json_array_function}()
+                END
+        END
+        """
     
     def _handle_union(self, base_expr: str, func_node) -> str:
-        """Handle union() function - placeholder."""
-        # Delegate to main generator for now
-        return self.generator._handle_function_fallback('union', base_expr, func_node)
+        """
+        Handle union(other) function - returns union of two collections.
+        
+        Args:
+            base_expr: SQL expression for the base collection
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns the union of two collections
+            
+        Raises:
+            ValueError: If function doesn't have exactly one argument
+        """
+        # Validate exactly one argument
+        if not hasattr(func_node, 'args') or len(func_node.args) != 1:
+            raise ValueError("union() function requires exactly one argument")
+        
+        # Get the other collection argument
+        other_expr = self.generator.visit(func_node.args[0])
+        
+        # CTE Implementation with Feature Flag
+        if self.generator.enable_cte and self.generator._should_use_cte_unified(base_expr, 'union'):
+            try:
+                return self._generate_union_with_cte(base_expr, other_expr)
+            except Exception as e:
+                # Fallback to original implementation if CTE generation fails
+                print(f"CTE generation failed for union(), falling back to subqueries: {e}")
+        
+        # Original implementation (fallback)
+        return self._generate_union_inline(base_expr, other_expr)
+    
+    def _generate_union_with_cte(self, base_expr: str, other_expr: str) -> str:
+        """Generate union() function using CTE approach."""
+        # This would use the CTE system for optimization
+        # For now, delegate to inline implementation
+        return self._generate_union_inline(base_expr, other_expr)
+    
+    def _generate_union_inline(self, base_expr: str, other_expr: str) -> str:
+        """Generate union() function using inline approach."""
+        # union(other) returns the union of two collections
+        # Convert both to arrays, then combine and deduplicate
+        
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL AND {other_expr} IS NULL THEN NULL
+            WHEN {base_expr} IS NULL THEN
+                CASE 
+                    WHEN {self.generator.get_json_type(other_expr)} = 'ARRAY' THEN {other_expr}
+                    ELSE {self.generator.dialect.json_array_function}({other_expr})
+                END
+            WHEN {other_expr} IS NULL THEN
+                CASE 
+                    WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN {base_expr}
+                    ELSE {self.generator.dialect.json_array_function}({base_expr})
+                END
+            ELSE (
+                SELECT {self.generator.aggregate_to_json_array('value')}
+                FROM (
+                    SELECT DISTINCT value FROM (
+                        SELECT value FROM {self.generator.iterate_json_array(base_expr, "$")}
+                        WHERE CASE 
+                            WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN true
+                            ELSE value = {base_expr}
+                        END
+                        UNION ALL
+                        SELECT value FROM {self.generator.iterate_json_array(other_expr, "$")}
+                        WHERE CASE 
+                            WHEN {self.generator.get_json_type(other_expr)} = 'ARRAY' THEN true
+                            ELSE value = {other_expr}
+                        END
+                    ) combined
+                    WHERE value IS NOT NULL
+                ) deduplicated
+            )
+        END
+        """
     
     def _handle_combine(self, base_expr: str, func_node) -> str:
-        """Handle combine() function - placeholder."""
-        # Delegate to main generator for now
-        return self.generator._handle_function_fallback('combine', base_expr, func_node)
+        """
+        Handle combine(other) function - returns combination of two collections without removing duplicates.
+        
+        Args:
+            base_expr: SQL expression for the base collection
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns the combination of two collections
+            
+        Raises:
+            ValueError: If function doesn't have exactly one argument
+        """
+        # Validate exactly one argument
+        if not hasattr(func_node, 'args') or len(func_node.args) != 1:
+            raise ValueError("combine() function requires exactly one argument")
+        
+        # Get the other collection argument
+        other_expr = self.generator.visit(func_node.args[0])
+        
+        # CTE Implementation with Feature Flag
+        if self.generator.enable_cte and self.generator._should_use_cte_unified(base_expr, 'combine'):
+            try:
+                return self._generate_combine_with_cte(base_expr, other_expr)
+            except Exception as e:
+                # Fallback to original implementation if CTE generation fails
+                print(f"CTE generation failed for combine(), falling back to subqueries: {e}")
+        
+        # Original implementation (fallback)
+        return self._generate_combine_inline(base_expr, other_expr)
+    
+    def _generate_combine_with_cte(self, base_expr: str, other_expr: str) -> str:
+        """Generate combine() function using CTE approach."""
+        # This would use the CTE system for optimization
+        # For now, delegate to inline implementation
+        return self._generate_combine_inline(base_expr, other_expr)
+    
+    def _generate_combine_inline(self, base_expr: str, other_expr: str) -> str:
+        """Generate combine() function using inline approach."""
+        # combine(other) returns the combination of two collections without removing duplicates
+        # Similar to union() but without DISTINCT
+        
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL AND {other_expr} IS NULL THEN NULL
+            WHEN {base_expr} IS NULL THEN
+                CASE 
+                    WHEN {self.generator.get_json_type(other_expr)} = 'ARRAY' THEN {other_expr}
+                    ELSE {self.generator.dialect.json_array_function}({other_expr})
+                END
+            WHEN {other_expr} IS NULL THEN
+                CASE 
+                    WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN {base_expr}
+                    ELSE {self.generator.dialect.json_array_function}({base_expr})
+                END
+            ELSE (
+                SELECT {self.generator.aggregate_to_json_array('value')}
+                FROM (
+                    SELECT value FROM {self.generator.iterate_json_array(base_expr, "$")}
+                    WHERE CASE 
+                        WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN true
+                        ELSE value = {base_expr}
+                    END
+                    UNION ALL
+                    SELECT value FROM {self.generator.iterate_json_array(other_expr, "$")}
+                    WHERE CASE 
+                        WHEN {self.generator.get_json_type(other_expr)} = 'ARRAY' THEN true
+                        ELSE value = {other_expr}
+                    END
+                ) combined
+                WHERE value IS NOT NULL
+            )
+        END
+        """
     
     def _handle_intersect(self, base_expr: str, func_node) -> str:
-        """Handle intersect() function - placeholder."""
-        # Delegate to main generator for now
-        return self.generator._handle_function_fallback('intersect', base_expr, func_node)
+        """
+        Handle intersect(other) function - returns intersection of two collections.
+        
+        Args:
+            base_expr: SQL expression for the base collection
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns the intersection of two collections
+            
+        Raises:
+            ValueError: If function doesn't have exactly one argument
+        """
+        # Validate exactly one argument
+        if not hasattr(func_node, 'args') or len(func_node.args) != 1:
+            raise ValueError("intersect() function requires exactly one argument")
+        
+        # Get the other collection argument
+        other_expr = self.generator.visit(func_node.args[0])
+        
+        # CTE Implementation with Feature Flag
+        if self.generator.enable_cte and self.generator._should_use_cte_unified(base_expr, 'intersect'):
+            try:
+                return self._generate_intersect_with_cte(base_expr, other_expr)
+            except Exception as e:
+                # Fallback to original implementation if CTE generation fails
+                print(f"CTE generation failed for intersect(), falling back to subqueries: {e}")
+        
+        # Original implementation (fallback)
+        return self._generate_intersect_inline(base_expr, other_expr)
+    
+    def _generate_intersect_with_cte(self, base_expr: str, other_expr: str) -> str:
+        """Generate intersect() function using CTE approach."""
+        # This would use the CTE system for optimization
+        # For now, delegate to inline implementation
+        return self._generate_intersect_inline(base_expr, other_expr)
+    
+    def _generate_intersect_inline(self, base_expr: str, other_expr: str) -> str:
+        """Generate intersect() function using inline approach."""
+        # intersect(other) returns elements that exist in both collections
+        # Use EXISTS with subquery to find matching elements
+        
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL OR {other_expr} IS NULL THEN {self.generator.dialect.json_array_function}()
+            ELSE (
+                SELECT {self.generator.aggregate_to_json_array('DISTINCT base_value')}
+                FROM (
+                    SELECT CASE 
+                        WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN base_val.value
+                        ELSE {base_expr}
+                    END as base_value
+                    FROM {self.generator.iterate_json_array(base_expr, "$")} base_val
+                    WHERE CASE 
+                        WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN true
+                        ELSE base_val.value = {base_expr}
+                    END
+                    AND EXISTS (
+                        SELECT 1 FROM (
+                            SELECT CASE 
+                                WHEN {self.generator.get_json_type(other_expr)} = 'ARRAY' THEN other_val.value
+                                ELSE {other_expr}
+                            END as other_value
+                            FROM {self.generator.iterate_json_array(other_expr, "$")} other_val
+                            WHERE CASE 
+                                WHEN {self.generator.get_json_type(other_expr)} = 'ARRAY' THEN true
+                                ELSE other_val.value = {other_expr}
+                            END
+                        ) other_collection
+                        WHERE other_collection.other_value = base_value
+                    )
+                ) intersection
+                WHERE base_value IS NOT NULL
+            )
+        END
+        """
     
     def _handle_exclude(self, base_expr: str, func_node) -> str:
-        """Handle exclude() function - placeholder."""
-        # Delegate to main generator for now
-        return self.generator._handle_function_fallback('exclude', base_expr, func_node)
+        """
+        Handle exclude(other) function - returns elements in base collection that are not in other collection.
+        
+        Args:
+            base_expr: SQL expression for the base collection
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns elements in base collection excluding those in other collection
+            
+        Raises:
+            ValueError: If function doesn't have exactly one argument
+        """
+        # Validate exactly one argument
+        if not hasattr(func_node, 'args') or len(func_node.args) != 1:
+            raise ValueError("exclude() function requires exactly one argument")
+        
+        # Get the other collection argument
+        other_expr = self.generator.visit(func_node.args[0])
+        
+        # CTE Implementation with Feature Flag
+        if self.generator.enable_cte and self.generator._should_use_cte_unified(base_expr, 'exclude'):
+            try:
+                return self._generate_exclude_with_cte(base_expr, other_expr)
+            except Exception as e:
+                # Fallback to original implementation if CTE generation fails
+                print(f"CTE generation failed for exclude(), falling back to subqueries: {e}")
+        
+        # Original implementation (fallback)
+        return self._generate_exclude_inline(base_expr, other_expr)
+    
+    def _generate_exclude_with_cte(self, base_expr: str, other_expr: str) -> str:
+        """Generate exclude() function using CTE approach."""
+        # This would use the CTE system for optimization
+        # For now, delegate to inline implementation
+        return self._generate_exclude_inline(base_expr, other_expr)
+    
+    def _generate_exclude_inline(self, base_expr: str, other_expr: str) -> str:
+        """Generate exclude() function using inline approach."""
+        # exclude(other) returns elements in base collection that are NOT in other collection
+        # Use NOT EXISTS with subquery to find non-matching elements
+        
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL THEN NULL
+            WHEN {other_expr} IS NULL THEN 
+                CASE 
+                    WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN {base_expr}
+                    ELSE {self.generator.dialect.json_array_function}({base_expr})
+                END
+            ELSE (
+                SELECT {self.generator.aggregate_to_json_array('DISTINCT base_value')}
+                FROM (
+                    SELECT CASE 
+                        WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN base_val.value
+                        ELSE {base_expr}
+                    END as base_value
+                    FROM {self.generator.iterate_json_array(base_expr, "$")} base_val
+                    WHERE CASE 
+                        WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN true
+                        ELSE base_val.value = {base_expr}
+                    END
+                    AND NOT EXISTS (
+                        SELECT 1 FROM (
+                            SELECT CASE 
+                                WHEN {self.generator.get_json_type(other_expr)} = 'ARRAY' THEN other_val.value
+                                ELSE {other_expr}
+                            END as other_value
+                            FROM {self.generator.iterate_json_array(other_expr, "$")} other_val
+                            WHERE CASE 
+                                WHEN {self.generator.get_json_type(other_expr)} = 'ARRAY' THEN true
+                                ELSE other_val.value = {other_expr}
+                            END
+                        ) other_collection
+                        WHERE other_collection.other_value = base_value
+                    )
+                ) exclusion
+                WHERE base_value IS NOT NULL
+            )
+        END
+        """
     
     def _handle_alltrue(self, base_expr: str, func_node) -> str:
-        """Handle alltrue() function - placeholder."""
-        # Delegate to main generator for now
-        return self.generator._handle_function_fallback('alltrue', base_expr, func_node)
+        """
+        Handle allTrue() function - returns true if all boolean values are true.
+        
+        Args:
+            base_expr: SQL expression for the base collection
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns true if all values are true, false otherwise
+            
+        Raises:
+            ValueError: If function has arguments (allTrue() takes no arguments)
+        """
+        # Validate no arguments
+        if hasattr(func_node, 'args') and func_node.args:
+            raise ValueError("allTrue() function takes no arguments")
+        
+        # CTE Implementation with Feature Flag
+        if self.generator.enable_cte and self.generator._should_use_cte_unified(base_expr, 'alltrue'):
+            try:
+                return self._generate_alltrue_with_cte(base_expr)
+            except Exception as e:
+                # Fallback to original implementation if CTE generation fails
+                print(f"CTE generation failed for allTrue(), falling back to subqueries: {e}")
+        
+        # Original implementation (fallback)
+        return self._generate_alltrue_inline(base_expr)
+    
+    def _generate_alltrue_with_cte(self, base_expr: str) -> str:
+        """Generate allTrue() function using CTE approach."""
+        # This would use the CTE system for optimization
+        # For now, delegate to inline implementation
+        return self._generate_alltrue_inline(base_expr)
+    
+    def _generate_alltrue_inline(self, base_expr: str) -> str:
+        """Generate allTrue() function using inline approach."""
+        # allTrue() returns true if all boolean values in collection are true
+        # Returns false if any value is false
+        # Returns null if collection is empty or contains null values
+        
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL THEN NULL
+            WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN
+                CASE 
+                    WHEN {self.generator.get_json_array_length(base_expr)} = 0 THEN NULL
+                    ELSE (
+                        SELECT CASE 
+                            WHEN COUNT(CASE WHEN value IS NULL THEN 1 END) > 0 THEN NULL
+                            WHEN COUNT(CASE WHEN CAST(value AS BOOLEAN) = false THEN 1 END) > 0 THEN false
+                            ELSE true
+                        END
+                        FROM {self.generator.iterate_json_array(base_expr, "$")}
+                    )
+                END
+            ELSE 
+                CASE 
+                    WHEN {base_expr} IS NULL THEN NULL
+                    WHEN CAST({base_expr} AS BOOLEAN) = true THEN true
+                    ELSE false
+                END
+        END
+        """
     
     def _handle_allfalse(self, base_expr: str, func_node) -> str:
-        """Handle allfalse() function - placeholder."""
-        # Delegate to main generator for now
-        return self.generator._handle_function_fallback('allfalse', base_expr, func_node)
+        """
+        Handle allFalse() function - returns true if all boolean values are false.
+        
+        Args:
+            base_expr: SQL expression for the base collection
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns true if all values are false, false otherwise
+            
+        Raises:
+            ValueError: If function has arguments (allFalse() takes no arguments)
+        """
+        # Validate no arguments
+        if hasattr(func_node, 'args') and func_node.args:
+            raise ValueError("allFalse() function takes no arguments")
+        
+        # CTE Implementation with Feature Flag
+        if self.generator.enable_cte and self.generator._should_use_cte_unified(base_expr, 'allfalse'):
+            try:
+                return self._generate_allfalse_with_cte(base_expr)
+            except Exception as e:
+                # Fallback to original implementation if CTE generation fails
+                print(f"CTE generation failed for allFalse(), falling back to subqueries: {e}")
+        
+        # Original implementation (fallback)
+        return self._generate_allfalse_inline(base_expr)
+    
+    def _generate_allfalse_with_cte(self, base_expr: str) -> str:
+        """Generate allFalse() function using CTE approach."""
+        # This would use the CTE system for optimization
+        # For now, delegate to inline implementation
+        return self._generate_allfalse_inline(base_expr)
+    
+    def _generate_allfalse_inline(self, base_expr: str) -> str:
+        """Generate allFalse() function using inline approach."""
+        # allFalse() returns true if all boolean values in collection are false
+        # Returns false if any value is true
+        # Returns null if collection is empty or contains null values
+        
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL THEN NULL
+            WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN
+                CASE 
+                    WHEN {self.generator.get_json_array_length(base_expr)} = 0 THEN NULL
+                    ELSE (
+                        SELECT CASE 
+                            WHEN COUNT(CASE WHEN value IS NULL THEN 1 END) > 0 THEN NULL
+                            WHEN COUNT(CASE WHEN CAST(value AS BOOLEAN) = true THEN 1 END) > 0 THEN false
+                            ELSE true
+                        END
+                        FROM {self.generator.iterate_json_array(base_expr, "$")}
+                    )
+                END
+            ELSE 
+                CASE 
+                    WHEN {base_expr} IS NULL THEN NULL
+                    WHEN CAST({base_expr} AS BOOLEAN) = false THEN true
+                    ELSE false
+                END
+        END
+        """
     
     def _handle_anytrue(self, base_expr: str, func_node) -> str:
-        """Handle anytrue() function - placeholder."""
-        # Delegate to main generator for now
-        return self.generator._handle_function_fallback('anytrue', base_expr, func_node)
+        """
+        Handle anyTrue() function - returns true if any boolean value is true.
+        
+        Args:
+            base_expr: SQL expression for the base collection
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns true if any value is true, false otherwise
+            
+        Raises:
+            ValueError: If function has arguments (anyTrue() takes no arguments)
+        """
+        # Validate no arguments
+        if hasattr(func_node, 'args') and func_node.args:
+            raise ValueError("anyTrue() function takes no arguments")
+        
+        # CTE Implementation with Feature Flag
+        if self.generator.enable_cte and self.generator._should_use_cte_unified(base_expr, 'anytrue'):
+            try:
+                return self._generate_anytrue_with_cte(base_expr)
+            except Exception as e:
+                # Fallback to original implementation if CTE generation fails
+                print(f"CTE generation failed for anyTrue(), falling back to subqueries: {e}")
+        
+        # Original implementation (fallback)
+        return self._generate_anytrue_inline(base_expr)
+    
+    def _generate_anytrue_with_cte(self, base_expr: str) -> str:
+        """Generate anyTrue() function using CTE approach."""
+        # This would use the CTE system for optimization
+        # For now, delegate to inline implementation
+        return self._generate_anytrue_inline(base_expr)
+    
+    def _generate_anytrue_inline(self, base_expr: str) -> str:
+        """Generate anyTrue() function using inline approach."""
+        # anyTrue() returns true if any boolean value in collection is true
+        # Returns false if all values are false
+        # Returns null if collection is empty or contains only null values
+        
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL THEN NULL
+            WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN
+                CASE 
+                    WHEN {self.generator.get_json_array_length(base_expr)} = 0 THEN NULL
+                    ELSE (
+                        SELECT CASE 
+                            WHEN COUNT(CASE WHEN value IS NOT NULL THEN 1 END) = 0 THEN NULL
+                            WHEN COUNT(CASE WHEN CAST(value AS BOOLEAN) = true THEN 1 END) > 0 THEN true
+                            ELSE false
+                        END
+                        FROM {self.generator.iterate_json_array(base_expr, "$")}
+                    )
+                END
+            ELSE 
+                CASE 
+                    WHEN {base_expr} IS NULL THEN NULL
+                    WHEN CAST({base_expr} AS BOOLEAN) = true THEN true
+                    ELSE false
+                END
+        END
+        """
     
     def _handle_anyfalse(self, base_expr: str, func_node) -> str:
-        """Handle anyfalse() function - placeholder."""
-        # Delegate to main generator for now
-        return self.generator._handle_function_fallback('anyfalse', base_expr, func_node)
+        """
+        Handle anyFalse() function - returns true if any boolean value is false.
+        
+        Args:
+            base_expr: SQL expression for the base collection
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns true if any value is false, false otherwise
+            
+        Raises:
+            ValueError: If function has arguments (anyFalse() takes no arguments)
+        """
+        # Validate no arguments
+        if hasattr(func_node, 'args') and func_node.args:
+            raise ValueError("anyFalse() function takes no arguments")
+        
+        # CTE Implementation with Feature Flag
+        if self.generator.enable_cte and self.generator._should_use_cte_unified(base_expr, 'anyfalse'):
+            try:
+                return self._generate_anyfalse_with_cte(base_expr)
+            except Exception as e:
+                # Fallback to original implementation if CTE generation fails
+                print(f"CTE generation failed for anyFalse(), falling back to subqueries: {e}")
+        
+        # Original implementation (fallback)
+        return self._generate_anyfalse_inline(base_expr)
+    
+    def _generate_anyfalse_with_cte(self, base_expr: str) -> str:
+        """Generate anyFalse() function using CTE approach."""
+        # This would use the CTE system for optimization
+        # For now, delegate to inline implementation
+        return self._generate_anyfalse_inline(base_expr)
+    
+    def _generate_anyfalse_inline(self, base_expr: str) -> str:
+        """Generate anyFalse() function using inline approach."""
+        # anyFalse() returns true if any boolean value in collection is false
+        # Returns false if all values are true
+        # Returns null if collection is empty or contains only null values
+        
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL THEN NULL
+            WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN
+                CASE 
+                    WHEN {self.generator.get_json_array_length(base_expr)} = 0 THEN NULL
+                    ELSE (
+                        SELECT CASE 
+                            WHEN COUNT(CASE WHEN value IS NOT NULL THEN 1 END) = 0 THEN NULL
+                            WHEN COUNT(CASE WHEN CAST(value AS BOOLEAN) = false THEN 1 END) > 0 THEN true
+                            ELSE false
+                        END
+                        FROM {self.generator.iterate_json_array(base_expr, "$")}
+                    )
+                END
+            ELSE 
+                CASE 
+                    WHEN {base_expr} IS NULL THEN NULL
+                    WHEN CAST({base_expr} AS BOOLEAN) = false THEN true
+                    ELSE false
+                END
+        END
+        """
     
     def _handle_contains(self, base_expr: str, func_node) -> str:
         """Handle contains() function."""
@@ -479,5 +1283,225 @@ class CollectionFunctionHandler:
             )
             WHEN {base_expr} = {search_value} THEN true
             ELSE false
+        END
+        """
+    
+    def _handle_children(self, base_expr: str, func_node) -> str:
+        """
+        Handle children() function - returns all immediate child elements.
+        
+        Args:
+            base_expr: SQL expression for the base collection
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns all immediate child elements
+            
+        Raises:
+            ValueError: If function has arguments (children() takes no arguments)
+        """
+        # Validate no arguments
+        if hasattr(func_node, 'args') and func_node.args:
+            raise ValueError("children() function takes no arguments")
+        
+        # Use inline implementation for reliable functionality
+        return self._generate_children_inline(base_expr)
+    
+    def _generate_children_inline(self, base_expr: str) -> str:
+        """Generate children() function using inline approach."""
+        # children() returns all immediate child elements of the current collection
+        # For FHIR resources, this extracts direct properties/fields
+        
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL THEN NULL
+            WHEN {self.generator.get_json_type(base_expr)} = 'OBJECT' THEN (
+                SELECT {self.generator.aggregate_to_json_array('child_value')}
+                FROM {self.generator.dialect.json_each_function}({base_expr}) as child_table(child_key, child_value)
+            )
+            WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN (
+                SELECT {self.generator.aggregate_to_json_array('array_element')}
+                FROM {self.generator.dialect.json_each_function}({base_expr}) as array_table(array_key, array_element)
+            )
+            ELSE {self.generator.dialect.json_array_function}()
+        END
+        """
+    
+    def _handle_descendants(self, base_expr: str, func_node) -> str:
+        """
+        Handle descendants() function - returns all descendant elements recursively.
+        
+        Args:
+            base_expr: SQL expression for the base collection
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns all descendant elements
+            
+        Raises:
+            ValueError: If function has arguments (descendants() takes no arguments)
+        """
+        # Validate no arguments
+        if hasattr(func_node, 'args') and func_node.args:
+            raise ValueError("descendants() function takes no arguments")
+        
+        # Use inline implementation for reliable functionality
+        return self._generate_descendants_inline(base_expr)
+    
+    def _generate_descendants_inline(self, base_expr: str) -> str:
+        """Generate descendants() function using inline approach."""
+        # descendants() returns all descendant elements recursively
+        # This is a simplified implementation that flattens all values
+        
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL THEN NULL
+            WHEN {self.generator.get_json_type(base_expr)} = 'OBJECT' THEN (
+                SELECT {self.generator.aggregate_to_json_array('child_value')}
+                FROM {self.generator.dialect.json_each_function}({base_expr}) as child_table(child_key, child_value)
+            )
+            WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN (
+                SELECT {self.generator.aggregate_to_json_array('array_element')}
+                FROM {self.generator.dialect.json_each_function}({base_expr}) as array_table(array_key, array_element)
+            )
+            ELSE {self.generator.dialect.json_array_function}()
+        END
+        """    
+    def _handle_subsetof(self, base_expr: str, func_node) -> str:
+        """
+        Handle subsetOf(other) function - returns true if all items in input are in other collection.
+        
+        Args:
+            base_expr: SQL expression for the base collection
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns true if input is subset of other collection
+            
+        Raises:
+            ValueError: If function doesn't have exactly one argument
+        """
+        # Validate exactly one argument
+        if not hasattr(func_node, 'args') or len(func_node.args) != 1:
+            raise ValueError("subsetOf() function requires exactly one argument")
+        
+        # Get the other collection argument
+        other_expr = self.generator.visit(func_node.args[0])
+        
+        return self._generate_subsetof_inline(base_expr, other_expr)
+    
+    def _generate_subsetof_inline(self, base_expr: str, other_expr: str) -> str:
+        """Generate subsetOf() function using inline approach."""
+        # subsetOf(other) returns true if all items in base collection exist in other collection
+        # Uses NOT EXISTS to check if any base item is not in other collection
+        
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL THEN NULL
+            WHEN {other_expr} IS NULL THEN false
+            WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' AND {self.generator.get_json_array_length(base_expr)} = 0 THEN true
+            ELSE NOT EXISTS (
+                SELECT 1
+                FROM {self.generator.dialect.json_each_function}({base_expr}) as base_table(base_key, base_value)
+                WHERE NOT EXISTS (
+                    SELECT 1 
+                    FROM {self.generator.dialect.json_each_function}({other_expr}) as other_table(other_key, other_value)
+                    WHERE base_value = other_value
+                )
+                AND CASE 
+                    WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN true
+                    ELSE base_value = {base_expr}
+                END
+            )
+        END
+        """
+    
+    def _handle_supersetof(self, base_expr: str, func_node) -> str:
+        """
+        Handle supersetOf(other) function - returns true if input collection contains all items in other collection.
+        
+        Args:
+            base_expr: SQL expression for the base collection
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns true if input is superset of other collection
+            
+        Raises:
+            ValueError: If function doesn't have exactly one argument
+        """
+        # Validate exactly one argument
+        if not hasattr(func_node, 'args') or len(func_node.args) != 1:
+            raise ValueError("supersetOf() function requires exactly one argument")
+        
+        # Get the other collection argument
+        other_expr = self.generator.visit(func_node.args[0])
+        
+        return self._generate_supersetof_inline(base_expr, other_expr)
+    
+    def _generate_supersetof_inline(self, base_expr: str, other_expr: str) -> str:
+        """Generate supersetOf() function using inline approach."""
+        # supersetOf(other) returns true if base collection contains all items in other collection
+        # This is equivalent to other.subsetOf(base), so we reverse the arguments
+        
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL THEN false
+            WHEN {other_expr} IS NULL THEN NULL
+            WHEN {self.generator.get_json_type(other_expr)} = 'ARRAY' AND {self.generator.get_json_array_length(other_expr)} = 0 THEN true
+            ELSE NOT EXISTS (
+                SELECT 1
+                FROM {self.generator.dialect.json_each_function}({other_expr}) as other_table(other_key, other_value)
+                WHERE NOT EXISTS (
+                    SELECT 1 
+                    FROM {self.generator.dialect.json_each_function}({base_expr}) as base_table(base_key, base_value)
+                    WHERE other_value = base_value
+                )
+                AND CASE 
+                    WHEN {self.generator.get_json_type(other_expr)} = 'ARRAY' THEN true
+                    ELSE other_value = {other_expr}
+                END
+            )
+        END
+        """
+    
+    def _handle_isdistinct(self, base_expr: str, func_node) -> str:
+        """
+        Handle isDistinct() function - returns true if all items in collection are unique.
+        
+        Args:
+            base_expr: SQL expression for the base collection
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns true if all values are distinct
+            
+        Raises:
+            ValueError: If function has arguments (isDistinct() takes no arguments)
+        """
+        # Validate no arguments
+        if hasattr(func_node, 'args') and func_node.args:
+            raise ValueError("isDistinct() function takes no arguments")
+        
+        return self._generate_isdistinct_inline(base_expr)
+    
+    def _generate_isdistinct_inline(self, base_expr: str) -> str:
+        """Generate isDistinct() function using inline approach."""
+        # isDistinct() returns true if all values in collection are unique (no duplicates)
+        # Compares total count with distinct count
+        
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL THEN NULL
+            WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN
+                CASE 
+                    WHEN {self.generator.get_json_array_length(base_expr)} <= 1 THEN true
+                    ELSE (
+                        SELECT 
+                            COUNT(*) = COUNT(DISTINCT value)
+                        FROM {self.generator.dialect.json_each_function}({base_expr}) as table_alias(key, value)
+                    )
+                END
+            ELSE true  -- Single values are always distinct
         END
         """
