@@ -284,19 +284,161 @@ class StringFunctionHandler:
         """
     
     def _handle_tochars(self, base_expr: str, func_node) -> str:
-        """Handle tochars() function - placeholder."""
-        # Delegate to main generator for now
-        return self.generator._handle_function_fallback('tochars', base_expr, func_node)
+        """
+        Handle toChars() function - converts string into collection of individual characters.
+        
+        Args:
+            base_expr: SQL expression for the base string
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns collection of individual characters
+            
+        Raises:
+            ValueError: If function has any arguments (should be no arguments)
+        """
+        # Validate no arguments
+        if hasattr(func_node, 'args') and len(func_node.args) > 0:
+            raise ValueError("toChars() function takes no arguments")
+        
+        return self._generate_tochars_inline(base_expr)
+    
+    def _generate_tochars_inline(self, base_expr: str) -> str:
+        """Generate toChars() function using inline approach."""
+        # toChars() converts string into collection of individual characters
+        # Use dialect-specific string splitting and character extraction
+        
+        # Prepare the string value for character extraction
+        string_value = self._prepare_string_value(base_expr)
+        
+        if self.dialect.name == "POSTGRESQL":
+            # PostgreSQL approach using string_to_array and unnest
+            return f"""
+            CASE 
+                WHEN {string_value} IS NULL THEN {self.dialect.json_array_function}()
+                ELSE (
+                    SELECT {self.generator.aggregate_to_json_array('char_value')}
+                    FROM (
+                        SELECT regexp_split_to_table(CAST({string_value} AS TEXT), '') AS char_value
+                        WHERE char_value != ''
+                    ) chars_table
+                )
+            END
+            """
+        else:  # DuckDB and others
+            # DuckDB approach using string splitting and array generation
+            return f"""
+            CASE 
+                WHEN {string_value} IS NULL THEN {self.dialect.json_array_function}()
+                WHEN LENGTH(CAST({string_value} AS VARCHAR)) = 0 THEN {self.dialect.json_array_function}()
+                ELSE (
+                    SELECT {self.generator.aggregate_to_json_array('char_value')}
+                    FROM (
+                        SELECT substr(CAST({string_value} AS VARCHAR), generate_series.num, 1) AS char_value
+                        FROM generate_series(1, LENGTH(CAST({string_value} AS VARCHAR))) AS generate_series(num)
+                    ) chars_table
+                )
+            END
+            """
     
     def _handle_matches(self, base_expr: str, func_node) -> str:
-        """Handle matches() function - placeholder."""
-        # Delegate to main generator for now
-        return self.generator._handle_function_fallback('matches', base_expr, func_node)
+        """
+        Handle matches(regex) function - returns true if string matches regular expression.
+        
+        Args:
+            base_expr: SQL expression for the base string
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns true if string matches regex pattern
+            
+        Raises:
+            ValueError: If function doesn't have exactly one argument
+        """
+        # Validate exactly one argument
+        if not hasattr(func_node, 'args') or len(func_node.args) != 1:
+            raise ValueError("matches() function requires exactly one argument")
+        
+        # Get the regex pattern argument
+        pattern_sql = self.generator.visit(func_node.args[0])
+        
+        return self._generate_matches_inline(base_expr, pattern_sql)
+    
+    def _generate_matches_inline(self, base_expr: str, pattern_sql: str) -> str:
+        """Generate matches() function using inline approach."""
+        # matches(regex) returns true if string matches regular expression pattern
+        # Use dialect-specific regex matching
+        
+        # Prepare the string value for regex matching
+        string_value = self._prepare_string_value(base_expr)
+        
+        if self.dialect.name == "POSTGRESQL":
+            # PostgreSQL uses ~ operator for regex matching
+            return f"""
+            CASE 
+                WHEN {string_value} IS NULL OR {pattern_sql} IS NULL THEN NULL
+                ELSE (CAST({string_value} AS TEXT) ~ CAST({pattern_sql} AS TEXT))
+            END
+            """
+        else:  # DuckDB and others
+            # DuckDB uses regexp_matches function
+            return f"""
+            CASE 
+                WHEN {string_value} IS NULL OR {pattern_sql} IS NULL THEN NULL
+                ELSE regexp_matches(CAST({string_value} AS VARCHAR), CAST({pattern_sql} AS VARCHAR))
+            END
+            """
     
     def _handle_replacematches(self, base_expr: str, func_node) -> str:
-        """Handle replacematches() function - placeholder."""
-        # Delegate to main generator for now
-        return self.generator._handle_function_fallback('replacematches', base_expr, func_node)
+        """
+        Handle replaceMatches(regex, replacement) function - replaces all regex matches with replacement.
+        
+        Args:
+            base_expr: SQL expression for the base string
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that returns string with regex matches replaced
+            
+        Raises:
+            ValueError: If function doesn't have exactly two arguments
+        """
+        # Validate exactly two arguments
+        if not hasattr(func_node, 'args') or len(func_node.args) != 2:
+            raise ValueError("replaceMatches() function requires exactly two arguments")
+        
+        # Get the regex pattern and replacement arguments
+        pattern_sql = self.generator.visit(func_node.args[0])
+        replacement_sql = self.generator.visit(func_node.args[1])
+        
+        return self._generate_replacematches_inline(base_expr, pattern_sql, replacement_sql)
+    
+    def _generate_replacematches_inline(self, base_expr: str, pattern_sql: str, replacement_sql: str) -> str:
+        """Generate replaceMatches() function using inline approach."""
+        # replaceMatches(regex, replacement) replaces all regex matches with replacement string
+        # Use dialect-specific regex replacement
+        
+        # Prepare the string value for regex replacement
+        string_value = self._prepare_string_value(base_expr)
+        
+        if self.dialect.name == "POSTGRESQL":
+            # PostgreSQL uses regexp_replace function
+            return f"""
+            CASE 
+                WHEN {string_value} IS NULL THEN NULL
+                WHEN {pattern_sql} IS NULL OR {replacement_sql} IS NULL THEN {string_value}
+                ELSE regexp_replace(CAST({string_value} AS TEXT), CAST({pattern_sql} AS TEXT), CAST({replacement_sql} AS TEXT), 'g')
+            END
+            """
+        else:  # DuckDB and others
+            # DuckDB uses regexp_replace function (similar to PostgreSQL)
+            return f"""
+            CASE 
+                WHEN {string_value} IS NULL THEN NULL
+                WHEN {pattern_sql} IS NULL OR {replacement_sql} IS NULL THEN {string_value}
+                ELSE regexp_replace(CAST({string_value} AS VARCHAR), CAST({pattern_sql} AS VARCHAR), CAST({replacement_sql} AS VARCHAR), 'g')
+            END
+            """
     
     def _prepare_string_value(self, base_expr: str) -> str:
         """
