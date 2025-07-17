@@ -205,7 +205,7 @@ class Select(QueryItem):
                 {(" LIMIT " + str(self.limit)) if self.limit else ""}
                 {(" OFFSET " + str(self.offset)) if self.offset else ""}"""
         
-        return re.sub(r'\s+', ' ', sql)
+        return re.sub(r'[ \t]+', ' ', sql)
 
 
 class FromItem(QueryItem):

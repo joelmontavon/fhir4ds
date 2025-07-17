@@ -1032,54 +1032,6 @@ class ViewRunner:
         if any(func in path for func in string_functions):
             return True
             
-        # Enable for single() function - needed for collection function testing
-        # But only if it's not a simple pattern handled by optimized array functions
-        if 'single(' in path and not self._is_simple_array_function_pattern(path):
-            return True
-            
-        # Enable for tail() function - needed for collection function testing
-        if 'tail(' in path:
-            return True
-            
-        # Enable for skip() function - needed for collection function testing
-        if 'skip(' in path:
-            return True
-            
-        # Enable for take() function - needed for collection function testing
-        if 'take(' in path:
-            return True
-            
-        # Enable for union() function - needed for collection function testing
-        if 'union(' in path:
-            return True
-            
-        # Enable for combine() function - needed for collection function testing
-        if 'combine(' in path:
-            return True
-            
-        # Enable for intersect() function - needed for collection function testing
-        if 'intersect(' in path:
-            return True
-            
-        # Enable for exclude() function - needed for collection function testing
-        if 'exclude(' in path:
-            return True
-            
-        # Enable for Phase 2 boolean aggregate functions - needed for boolean function testing
-        boolean_functions = ['allTrue()', 'anyTrue()', 'allFalse()', 'anyFalse()']
-        if any(func in path for func in boolean_functions):
-            return True
-            
-        # Enable for Phase 3 tree navigation functions - needed for tree navigation testing
-        tree_functions = ['children()', 'descendants()']
-        if any(func in path for func in tree_functions):
-            return True
-            
-        # Enable for Phase 4 collection validation functions - needed for validation testing
-        validation_functions = ['subsetOf(', 'supersetOf(', 'isDistinct()']
-        if any(func in path for func in validation_functions):
-            return True
-            
         # Enable for arithmetic expressions within array indices - these work well
         import re
         array_index_pattern = r'\[([^[\]]*[+\-*/][^[\]]*)\]'
@@ -1088,6 +1040,11 @@ class ViewRunner:
             
         # Only enable join() for now - it's working. Disable where(), first(), exists() temporarily
         if 'join(' in path and not any(prob in path for prob in ['where(', 'first()', 'exists()']):
+            return True
+            
+        # Enable collection functions - these are now working and needed for tests
+        collection_functions = ['allTrue()', 'allFalse()', 'anyTrue()', 'anyFalse()', 'combine(', 'single()', 'union(', 'skip(', 'take(', 'tail()', 'count()']
+        if any(func in path for func in collection_functions):
             return True
             
         # Keep everything else using simple processing to maintain compatibility
@@ -2242,7 +2199,12 @@ class ViewRunner:
             # Return as raw SQL literal (already quoted)
             return Expr([path], sep='')
         
-        # Handle collection: true - return arrays
+        # Handle complex FHIRPath expressions that need the translator BEFORE collection handling
+        # This ensures that paths like "name.tail().use" with collection: true get proper FHIRPath processing
+        if self._needs_fhirpath_translator(path):
+            return self._generate_fhirpath_expression(path, column_type)
+        
+        # Handle collection: true - return arrays (but only for non-FHIRPath expressions)
         if collection_setting is True:
             return self._generate_collection_expression(path, column_type)
         
@@ -2260,10 +2222,6 @@ class ViewRunner:
         
         # Handle string concatenation (check after mathematical expressions)
         if self._is_string_concatenation(path):
-            return self._generate_fhirpath_expression(path, column_type)
-        
-        # Handle complex FHIRPath expressions that need the translator
-        if self._needs_fhirpath_translator(path):
             return self._generate_fhirpath_expression(path, column_type)
         
         # Handle comparison expressions with constants (optimize before complex parsing)
@@ -2680,28 +2638,37 @@ class ViewRunner:
             sql_gen = SQLGenerator(self.table_name, self.json_col, dialect=self.dialect)
             sql_expression = sql_gen.visit(ast)
             
-            # CRITICAL FIX: Resolve optimized placeholders to prevent unresolved variables
-            if hasattr(sql_gen, '_resolve_optimized_placeholders'):
-                sql_expression = sql_gen._resolve_optimized_placeholders(sql_expression)
+            # Check if CTEs were created - if so, we need to create a complete query
+            if sql_gen.ctes:
+                # If CTEs exist, we need to create a full SQL query and extract just the expression
+                # This is a complex case that requires special handling
+                from .fhirpath.core.translator import FHIRPathToSQL
+                
+                # Use the translator to get the complete SQL with CTEs
+                translator = FHIRPathToSQL(self.table_name, self.json_col, dialect=self.dialect)
+                complete_sql = translator.translate([path])
+                
+                # Extract just the expression part from the complete SQL
+                # The complete SQL has format: "WITH ... SELECT expression FROM table"
+                # We need to extract the expression part
+                import re
+                # Find the SELECT clause and extract the expression
+                select_match = re.search(r'SELECT\s+(.+?)\s+FROM\s+' + re.escape(self.table_name), complete_sql, re.IGNORECASE | re.DOTALL)
+                if select_match:
+                    extracted_expression = select_match.group(1).strip()
+                    # Remove AS alias if present
+                    extracted_expression = re.sub(r'\s+AS\s+\w+\s*$', '', extracted_expression, flags=re.IGNORECASE)
+                    sql_expression = extracted_expression
+                else:
+                    # Fallback to original expression if extraction fails
+                    self.logger.warning(f"Could not extract expression from CTE query for '{path}', using original")
             
             # Check if the generated SQL is too complex (likely to cause parser errors)
-            if len(sql_expression) > 1000:
+            # Increase threshold for CTE-based expressions since they can be legitimately long
+            complexity_threshold = 5000 if sql_gen.ctes else 1000
+            if len(sql_expression) > complexity_threshold:
                 self.logger.warning(f"Generated SQL too complex for '{path}' ({len(sql_expression)} chars), using simplified version")
                 return self._generate_simplified_where_expression(path, column_type)
-            
-            # CRITICAL FIX: Check if CTEs were generated and include them in the final query
-            if hasattr(sql_gen, 'ctes') and sql_gen.ctes:
-                # If CTEs were generated, we need to build the complete query with CTEs
-                cte_definitions = []
-                for cte_name, cte_def in sql_gen.ctes.items():
-                    cte_definitions.append(f"{cte_name} AS ({cte_def})")
-                
-                # Build the complete query with CTEs
-                cte_prefix = "WITH " + ", ".join(cte_definitions) + " "
-                complete_expression = f"({cte_prefix}SELECT ({sql_expression}))"
-                
-                # Return as an Expr
-                return Expr(complete_expression)
             
             # Return as an Expr to integrate with SQL builder
             return Expr(sql_expression)
@@ -2712,7 +2679,7 @@ class ViewRunner:
             return self._generate_simplified_where_expression(path, column_type)
     
     def _is_simple_array_function_pattern(self, path: str) -> bool:
-        """Check if this is a simple pattern like 'array.field.first()', 'array.first().field', 'array.single().field', or 'array.empty()'"""
+        """Check if this is a simple pattern like 'array.field.first()', 'array.first().field', or 'array.empty()'"""
         import re
         # Match patterns like "name.family.first()" or "address.line.first()"
         pattern1 = r'^(\w+)\.(\w+)\.first\(\)$'
@@ -2720,9 +2687,7 @@ class ViewRunner:
         pattern2 = r'^(\w+)\.first\(\)\.(\w+)(?:\.first\(\))?$'
         # Match patterns like "name.empty()"
         pattern3 = r'^(\w+)\.empty\(\)$'
-        # Match patterns like "name.single().family"
-        pattern4 = r'^(\w+)\.single\(\)\.(\w+)$'
-        return bool(re.match(pattern1, path) or re.match(pattern2, path) or re.match(pattern3, path) or re.match(pattern4, path))
+        return bool(re.match(pattern1, path) or re.match(pattern2, path) or re.match(pattern3, path))
     
     def _generate_optimized_array_functions(self, path: str, column_type: str) -> QueryItem:
         """Generate optimized SQL for array.field.first() and array.first().field patterns"""
@@ -2778,18 +2743,6 @@ class ViewRunner:
                 ELSE true
             END"""
             return Expr(sql)
-        
-        # Pattern 5: array.single().field -> $.array[0].field (same as first() for single element)
-        match5 = re.match(r'^(\w+)\.single\(\)\.(\w+)$', path)
-        if match5:
-            array_field = match5.group(1)  # e.g., "name"
-            element_field = match5.group(2)  # e.g., "family"
-            
-            # Generate optimized JSON path: $.name[0].family
-            # Note: This is the same as first() for simplicity. Full single() validation would require 
-            # checking that the array has exactly one element, but for now we optimize to [0]
-            optimized_path = f'{array_field}[0].{element_field}'
-            return self._generate_typed_json_extraction(optimized_path, column_type)
         
         # Fallback if pattern doesn't match as expected
         return self._generate_typed_json_extraction(path, column_type)

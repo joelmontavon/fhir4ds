@@ -329,6 +329,19 @@ class SQLGenerator:
         """Iterate JSON array using dialect-specific method"""
         return self.dialect.iterate_json_array(column, path)
     
+    def iterate_json_elements_indexed(self, column: str) -> str:
+        """Iterate JSON elements with proper indexing for both arrays and objects"""
+        # For PostgreSQL, we need to handle arrays vs objects differently
+        if self.dialect.name == 'POSTGRESQL':
+            # PostgreSQL needs different functions for arrays vs objects
+            return f"""(
+                SELECT value, (ordinality - 1)::text as key 
+                FROM jsonb_array_elements({column}) WITH ORDINALITY AS t(value, ordinality)
+            )"""
+        else:
+            # For DuckDB and other dialects, use the existing method
+            return f"{self.dialect.json_each_function}({column})"
+    
     def check_json_exists(self, column: str, path: str) -> str:
         """Check JSON path exists using dialect-specific method"""
         return self.dialect.check_json_exists(column, path)
@@ -469,18 +482,17 @@ class SQLGenerator:
     
     def _create_optimized_expression(self, base_expr: str, operation_name: str) -> str:
         """Create an optimized placeholder for complex expressions"""
-        # TEMPORARY FIX: Disable optimization to prevent unresolved placeholders
-        # TODO: Fix the optimization system to properly resolve placeholders
+        # Don't create placeholders when CTEs are disabled, as they won't be resolved properly
+        if not self.enable_cte:
+            return base_expr
+            
+        if self._is_complex_expression(base_expr):
+            # Create a unique identifier for this complex expression
+            expr_hash = hash(base_expr) % 1000000
+            placeholder = f"__OPTIMIZED_{operation_name}__resource_data__${expr_hash}__"
+            self.complex_expr_cache[placeholder] = base_expr
+            return placeholder
         return base_expr
-        
-        # Original implementation (disabled)
-        # if self._is_complex_expression(base_expr):
-        #     # Create a unique identifier for this complex expression
-        #     expr_hash = hash(base_expr) % 1000000
-        #     placeholder = f"__OPTIMIZED_{operation_name}__resource_data__${expr_hash}__"
-        #     self.complex_expr_cache[placeholder] = base_expr
-        #     return placeholder
-        # return base_expr
     
     def _resolve_optimized_placeholders(self, sql: str) -> str:
         """Resolve optimized placeholders back to their actual expressions"""
@@ -988,7 +1000,7 @@ class SQLGenerator:
                                 FROM (
                                     SELECT 
                                         {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
-                                    FROM {self.dialect.json_each_function}({base_ref})
+                                    FROM {self.iterate_json_elements_indexed(base_ref)}
                                     WHERE ROW_NUMBER() OVER () > 1
                                 ) AS tail_elements
                             )
@@ -1051,7 +1063,7 @@ class SQLGenerator:
                                 FROM (
                                     SELECT 
                                         {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
-                                    FROM {self.dialect.json_each_function}({base_ref})
+                                    FROM {self.iterate_json_elements_indexed(base_ref)}
                                     WHERE ROW_NUMBER() OVER () > {skip_count}
                                 ) AS skip_elements
                             )
@@ -1120,7 +1132,7 @@ class SQLGenerator:
                                 FROM (
                                     SELECT 
                                         {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
-                                    FROM {self.dialect.json_each_function}({base_ref})
+                                    FROM {self.iterate_json_elements_indexed(base_ref)}
                                     WHERE ROW_NUMBER() OVER () <= {take_count}
                                 ) AS take_elements
                             )
@@ -1196,14 +1208,14 @@ class SQLGenerator:
                                 FROM (
                                     SELECT 
                                         {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
-                                    FROM {self.dialect.json_each_function}({base_ref})
+                                    FROM {self.iterate_json_elements_indexed(base_ref)}
                                 ) AS left_elements
                                 WHERE EXISTS (
                                     SELECT 1 
                                     FROM (
                                         SELECT 
                                             {self.dialect.json_extract_function}({other_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as other_value
-                                        FROM {self.dialect.json_each_function}({other_ref})
+                                        FROM {self.iterate_json_elements_indexed(other_ref)}
                                     ) AS right_elements
                                     WHERE left_elements.value = right_elements.other_value
                                 )
@@ -1218,7 +1230,7 @@ class SQLGenerator:
                                 FROM (
                                     SELECT 
                                         {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
-                                    FROM {self.dialect.json_each_function}({base_ref})
+                                    FROM {self.iterate_json_elements_indexed(base_ref)}
                                 ) AS array_elements
                                 WHERE array_elements.value = {other_ref}
                             ) THEN {self.dialect.json_array_function}({other_ref}::VARCHAR)
@@ -1232,7 +1244,7 @@ class SQLGenerator:
                                 FROM (
                                     SELECT 
                                         {self.dialect.json_extract_function}({other_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
-                                    FROM {self.dialect.json_each_function}({other_ref})
+                                    FROM {self.iterate_json_elements_indexed(other_ref)}
                                 ) AS array_elements
                                 WHERE array_elements.value = {base_ref}
                             ) THEN {self.dialect.json_array_function}({base_ref}::VARCHAR)
@@ -1311,14 +1323,14 @@ class SQLGenerator:
                                 FROM (
                                     SELECT 
                                         {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
-                                    FROM {self.dialect.json_each_function}({base_ref})
+                                    FROM {self.iterate_json_elements_indexed(base_ref)}
                                 ) AS left_elements
                                 WHERE NOT EXISTS (
                                     SELECT 1 
                                     FROM (
                                         SELECT 
                                             {self.dialect.json_extract_function}({other_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as other_value
-                                        FROM {self.dialect.json_each_function}({other_ref})
+                                        FROM {self.iterate_json_elements_indexed(other_ref)}
                                     ) AS right_elements
                                     WHERE left_elements.value = right_elements.other_value
                                 )
@@ -1334,7 +1346,7 @@ class SQLGenerator:
                                 FROM (
                                     SELECT 
                                         {self.dialect.json_extract_function}({base_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
-                                    FROM {self.dialect.json_each_function}({base_ref})
+                                    FROM {self.iterate_json_elements_indexed(base_ref)}
                                 ) AS array_elements
                                 WHERE array_elements.value != {other_ref}
                             )
@@ -1350,7 +1362,7 @@ class SQLGenerator:
                                         FROM (
                                             SELECT 
                                                 {self.dialect.json_extract_function}({other_ref}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
-                                            FROM {self.dialect.json_each_function}({other_ref})
+                                            FROM {self.iterate_json_elements_indexed(other_ref)}
                                         ) AS array_elements
                                         WHERE array_elements.value = {base_ref}
                                     ) THEN NULL
@@ -1419,7 +1431,7 @@ class SQLGenerator:
                                     -- If all elements are true, return true
                                     ELSE true
                                 END
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                             )
                         END
                     -- For non-arrays (single values), check if the value is true
@@ -1485,7 +1497,7 @@ class SQLGenerator:
                                     -- If all elements are false, return true
                                     ELSE true
                                 END
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                             )
                         END
                     -- For non-arrays (single values), check if the value is false
@@ -1551,7 +1563,7 @@ class SQLGenerator:
                                     -- If all elements are false, return false
                                     ELSE false
                                 END
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                             )
                         END
                     -- For non-arrays (single values), check if the value is true
@@ -1617,7 +1629,7 @@ class SQLGenerator:
                                     -- If all elements are true, return false
                                     ELSE false
                                 END
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                             )
                         END
                     -- For non-arrays (single values), check if the value is false
@@ -1716,8 +1728,8 @@ class SQLGenerator:
                             WHEN COUNT(CASE WHEN other_elem.value IS NULL THEN 1 END) > 0 THEN false  -- Any element not found in other collection
                             ELSE true  -- All elements found
                         END
-                        FROM {self.dialect.json_each_function}({base_ref}) base_elem
-                        LEFT JOIN {self.dialect.json_each_function}({other_collection_sql}) other_elem 
+                        FROM {self.iterate_json_elements_indexed(base_ref)} base_elem
+                        LEFT JOIN {self.iterate_json_elements_indexed(other_collection_sql)} other_elem 
                             ON base_elem.value = other_elem.value
                     )
                     -- Handle single element cases
@@ -1726,7 +1738,7 @@ class SQLGenerator:
                             WHEN COUNT(*) > 0 THEN true
                             ELSE false
                         END
-                        FROM {self.dialect.json_each_function}({other_collection_sql})
+                        FROM {self.iterate_json_elements_indexed(other_collection_sql)}
                         WHERE value = {base_ref}
                     )
                     WHEN {self.get_json_type(base_ref)} = 'ARRAY' AND {self.get_json_type(other_collection_sql)} != 'ARRAY' THEN (
@@ -1784,8 +1796,8 @@ class SQLGenerator:
                             WHEN COUNT(CASE WHEN base_elem.value IS NULL THEN 1 END) > 0 THEN false  -- Any element of other not found in base collection
                             ELSE true  -- All elements found
                         END
-                        FROM {self.dialect.json_each_function}({other_collection_sql}) other_elem
-                        LEFT JOIN {self.dialect.json_each_function}({base_ref}) base_elem 
+                        FROM {self.iterate_json_elements_indexed(other_collection_sql)} other_elem
+                        LEFT JOIN {self.iterate_json_elements_indexed(base_ref)} base_elem 
                             ON other_elem.value = base_elem.value
                     )
                     -- Handle single element cases
@@ -1794,7 +1806,7 @@ class SQLGenerator:
                             WHEN COUNT(*) > 0 THEN true
                             ELSE false
                         END
-                        FROM {self.dialect.json_each_function}({base_ref})
+                        FROM {self.iterate_json_elements_indexed(base_ref)}
                         WHERE value = ({other_collection_sql})
                     )
                     WHEN {self.get_json_type(base_ref)} != 'ARRAY' AND {self.get_json_type(other_collection_sql)} = 'ARRAY' THEN (
@@ -1852,7 +1864,7 @@ class SQLGenerator:
                                     WHEN COUNT(*) = COUNT(DISTINCT value) THEN true
                                     ELSE false
                                 END
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                             )
                         END
                     -- Single element is distinct by definition
@@ -1918,7 +1930,7 @@ class SQLGenerator:
                             WHEN COUNT(*) = 0 THEN NULL
                             ELSE {self.dialect.json_array_function}(DISTINCT value::VARCHAR)
                         END
-                        FROM {self.dialect.json_each_function}({base_ref})
+                        FROM {self.iterate_json_elements_indexed(base_ref)}
                         WHERE {type_condition}
                     )
                     -- Single element - check if it matches the type
@@ -1993,7 +2005,7 @@ class SQLGenerator:
                                     WHEN COUNT(*) = COUNT(CASE WHEN {type_condition} THEN 1 END) THEN true
                                     ELSE false
                                 END
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                             )
                         END
                     -- Single element - check if it matches the type
@@ -2052,7 +2064,7 @@ class SQLGenerator:
                                         ELSE NULL
                                     END::VARCHAR
                                 )
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                                 WHERE CASE 
                                     WHEN {self.get_json_type('value')} = 'BOOLEAN' THEN true
                                     WHEN {self.get_json_type('value')} = 'VARCHAR' AND LOWER(CAST(value AS VARCHAR)) IN ('true', 'false') THEN true
@@ -2120,7 +2132,7 @@ class SQLGenerator:
                                     END) THEN true
                                     ELSE false
                                 END
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                             )
                         END
                     -- Single element - check if it can be converted to boolean
@@ -2174,7 +2186,7 @@ class SQLGenerator:
                                 SELECT {self.dialect.json_array_function}(
                                     CAST(value AS DOUBLE)::VARCHAR
                                 )
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                                 WHERE CASE 
                                     WHEN {self.get_json_type('value')} IN ('INTEGER', 'NUMBER', 'DOUBLE') THEN true
                                     WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS DOUBLE) IS NOT NULL THEN true
@@ -2237,7 +2249,7 @@ class SQLGenerator:
                                     END) THEN true
                                     ELSE false
                                 END
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                             )
                         END
                     -- Single element - check if it can be converted to decimal
@@ -2296,7 +2308,7 @@ class SQLGenerator:
                                     END) THEN true
                                     ELSE false
                                 END
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                             )
                         END
                     -- Single element - check if it can be converted to integer
@@ -2350,7 +2362,7 @@ class SQLGenerator:
                                         ELSE NULL
                                     END
                                 )
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                                 WHERE CASE 
                                     WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS DATE) IS NOT NULL THEN true
                                     WHEN {self.get_json_type('value')} = 'DATE' THEN true
@@ -2412,7 +2424,7 @@ class SQLGenerator:
                                     END) THEN true
                                     ELSE false
                                 END
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                             )
                         END
                     -- Single element - check if it can be converted to date
@@ -2466,7 +2478,7 @@ class SQLGenerator:
                                         ELSE NULL
                                     END
                                 )
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                                 WHERE CASE 
                                     WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIMESTAMP) IS NOT NULL THEN true
                                     WHEN {self.get_json_type('value')} IN ('TIMESTAMP', 'DATE') THEN true
@@ -2529,7 +2541,7 @@ class SQLGenerator:
                                     END) THEN true
                                     ELSE false
                                 END
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                             )
                         END
                     -- Single element - check if it can be converted to datetime
@@ -2583,7 +2595,7 @@ class SQLGenerator:
                                         ELSE NULL
                                     END
                                 )
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                                 WHERE CASE 
                                     WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS TIME) IS NOT NULL THEN true
                                     WHEN {self.get_json_type('value')} IN ('TIME', 'TIMESTAMP') THEN true
@@ -2646,7 +2658,7 @@ class SQLGenerator:
                                     END) THEN true
                                     ELSE false
                                 END
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                             )
                         END
                     -- Single element - check if it can be converted to time
@@ -2708,7 +2720,7 @@ class SQLGenerator:
                                         ELSE NULL
                                     END
                                 )
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                                 WHERE {self.get_json_type('value')} = 'VARCHAR'
                             )
                         END
@@ -2774,7 +2786,7 @@ class SQLGenerator:
                                     END) THEN true
                                     ELSE false
                                 END
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                                 WHERE {self.get_json_type('value')} = 'VARCHAR'
                             )
                         END
@@ -2839,7 +2851,7 @@ class SQLGenerator:
                                         ELSE value
                                     END
                                 )
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                             )
                         END
                     -- Single element - replace regex matches if it's a string
@@ -2902,7 +2914,7 @@ class SQLGenerator:
                                         ELSE NULL
                                     END
                                 )
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                                 WHERE {self.get_json_type('value')} IN ('OBJECT', 'ARRAY')
                             )
                         END
@@ -2911,11 +2923,11 @@ class SQLGenerator:
                         CASE 
                             WHEN {self.get_json_type(base_ref)} = 'OBJECT' THEN (
                                 SELECT {self.dialect.json_array_function}(child_value)
-                                FROM {self.dialect.json_each_function}({base_ref}) as child_table(child_key, child_value)
+                                FROM {self.iterate_json_elements_indexed(base_ref)} as child_table(child_key, child_value)
                             )
                             WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN (
                                 SELECT {self.dialect.json_array_function}(array_element)
-                                FROM {self.dialect.json_each_function}({base_ref}) as array_table(array_key, array_element)
+                                FROM {self.iterate_json_elements_indexed(base_ref)} as array_table(array_key, array_element)
                             )
                             ELSE {self.dialect.json_array_function}()
                         END
@@ -2954,13 +2966,13 @@ class SQLGenerator:
                     CASE 
                         WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN (
                             SELECT child_value
-                            FROM {self.dialect.json_each_function}({base_ref}) as root_table(root_key, root_value),
+                            FROM {self.iterate_json_elements_indexed(base_ref)} as root_table(root_key, root_value),
                                  {self.dialect.json_each_function}(root_value) as child_table(child_key, child_value)
                             WHERE {self.get_json_type('root_value')} IN ('OBJECT', 'ARRAY')
                         )
                         WHEN {self.get_json_type(base_ref)} IN ('OBJECT', 'ARRAY') THEN (
                             SELECT child_value
-                            FROM {self.dialect.json_each_function}({base_ref}) as child_table(child_key, child_value)
+                            FROM {self.iterate_json_elements_indexed(base_ref)} as child_table(child_key, child_value)
                         )
                         ELSE NULL
                     END as value,
@@ -3035,7 +3047,7 @@ class SQLGenerator:
                         CASE 
                             WHEN {self.get_json_type(other_ref)} = 'ARRAY' THEN (
                                 SELECT {self.dialect.json_array_function}(DISTINCT value)
-                                FROM {self.dialect.json_each_function}({other_ref})
+                                FROM {self.iterate_json_elements_indexed(other_ref)}
                             )
                             ELSE {self.dialect.json_array_function}({other_ref})
                         END
@@ -3043,7 +3055,7 @@ class SQLGenerator:
                         CASE 
                             WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN (
                                 SELECT {self.dialect.json_array_function}(DISTINCT value)
-                                FROM {self.dialect.json_each_function}({base_ref})
+                                FROM {self.iterate_json_elements_indexed(base_ref)}
                             )
                             ELSE {self.dialect.json_array_function}({base_ref})
                         END
@@ -3088,57 +3100,32 @@ class SQLGenerator:
         # Get the argument collection expression
         other_collection_expr = self.visit(func_node.args[0])
         
-        # Check if base_expr is already a CTE reference
-        if base_expr.startswith("(SELECT") and "FROM " in base_expr:
-            # Base expression is already complex, create CTE for it
-            base_cte_name = self._create_cte(
-                f"SELECT {base_expr} as base_value FROM {self.table_name}",
-                "combine_base"
-            )
-            base_ref = "base_value"
-            from_clause = base_cte_name
-        else:
-            # Simple base expression, reference directly
-            base_ref = base_expr
-            from_clause = self.table_name
-        
-        # Create CTE for other collection if it's complex
-        if other_collection_expr.startswith("(SELECT") and "FROM " in other_collection_expr:
-            other_cte_name = self._create_cte(
-                f"SELECT {other_collection_expr} as other_value FROM {self.table_name}",
-                "combine_other"
-            )
-            other_ref = "other_value"
-            other_from_clause = other_cte_name
-        else:
-            other_ref = other_collection_expr
-            other_from_clause = self.table_name
-        
         # Create CTE for combine operation without deduplication
+        # Fix GROUP BY issues by using a single table reference and avoiding cross joins
         combine_cte_name = self._create_cte(f"""
             SELECT 
                 CASE 
-                    WHEN {base_ref} IS NULL AND {other_ref} IS NULL THEN NULL
-                    WHEN {base_ref} IS NULL THEN 
+                    WHEN {base_expr} IS NULL AND {other_collection_expr} IS NULL THEN NULL
+                    WHEN {base_expr} IS NULL THEN 
                         CASE 
-                            WHEN {self.get_json_type(other_ref)} = 'ARRAY' THEN {other_ref}
-                            ELSE {self.dialect.json_array_function}({other_ref})
+                            WHEN {self.get_json_type(other_collection_expr)} = 'ARRAY' THEN {other_collection_expr}
+                            ELSE {self.dialect.json_array_function}({other_collection_expr})
                         END
-                    WHEN {other_ref} IS NULL THEN 
+                    WHEN {other_collection_expr} IS NULL THEN 
                         CASE 
-                            WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN {base_ref}
-                            ELSE {self.dialect.json_array_function}({base_ref})
+                            WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN {base_expr}
+                            ELSE {self.dialect.json_array_function}({base_expr})
                         END
                     ELSE (
                         -- Both collections are non-null, perform combination without deduplication
-                        SELECT {self.dialect.json_array_function}(combined_value)
+                        SELECT {self.dialect.json_array_agg_function('combined_value')}
                         FROM (
                             -- Values from the base collection
                             SELECT value as combined_value
                             FROM {self.dialect.json_each_function}(
                                 CASE 
-                                    WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN {base_ref}
-                                    ELSE {self.dialect.json_array_function}({base_ref})
+                                    WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN {base_expr}
+                                    ELSE {self.dialect.json_array_function}({base_expr})
                                 END
                             )
                             
@@ -3148,14 +3135,14 @@ class SQLGenerator:
                             SELECT value as combined_value
                             FROM {self.dialect.json_each_function}(
                                 CASE 
-                                    WHEN {self.get_json_type(other_ref)} = 'ARRAY' THEN {other_ref}
-                                    ELSE {self.dialect.json_array_function}({other_ref})
+                                    WHEN {self.get_json_type(other_collection_expr)} = 'ARRAY' THEN {other_collection_expr}
+                                    ELSE {self.dialect.json_array_function}({other_collection_expr})
                                 END
                             )
                         ) AS combine_source
                     )
                 END as combine_value
-            FROM {from_clause}, {other_from_clause}
+            FROM {self.table_name}
         """, "combine_result")
         
         return f"(SELECT combine_value FROM {combine_cte_name})"
@@ -5481,7 +5468,7 @@ class SQLGenerator:
                                     ELSE NULL
                                 END
                             )
-                            FROM {self.dialect.json_each_function}({base_ref})
+                            FROM {self.iterate_json_elements_indexed(base_ref)}
                             WHERE {self.get_json_type('value')} = 'VARCHAR'
                         )
                     END
@@ -5536,7 +5523,7 @@ class SQLGenerator:
                                 END) THEN true
                                 ELSE false
                             END
-                            FROM {self.dialect.json_each_function}({base_ref})
+                            FROM {self.iterate_json_elements_indexed(base_ref)}
                             WHERE {self.get_json_type('value')} = 'VARCHAR'
                         )
                     END
@@ -5590,7 +5577,7 @@ class SQLGenerator:
                                     ELSE value
                                 END
                             )
-                            FROM {self.dialect.json_each_function}({base_ref})
+                            FROM {self.iterate_json_elements_indexed(base_ref)}
                         )
                     END
                 ELSE 
@@ -5642,7 +5629,7 @@ class SQLGenerator:
                                     ELSE NULL
                                 END
                             )
-                            FROM {self.dialect.json_each_function}({base_ref})
+                            FROM {self.iterate_json_elements_indexed(base_ref)}
                             WHERE {self.get_json_type('value')} IN ('OBJECT', 'ARRAY')
                         )
                     END
@@ -5650,11 +5637,11 @@ class SQLGenerator:
                     CASE 
                         WHEN {self.get_json_type(base_ref)} = 'OBJECT' THEN (
                             SELECT {self.dialect.json_array_function}(child_value)
-                            FROM {self.dialect.json_each_function}({base_ref}) as child_table(child_key, child_value)
+                            FROM {self.iterate_json_elements_indexed(base_ref)} as child_table(child_key, child_value)
                         )
                         WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN (
                             SELECT {self.dialect.json_array_function}(array_element)
-                            FROM {self.dialect.json_each_function}({base_ref}) as array_table(array_key, array_element)
+                            FROM {self.iterate_json_elements_indexed(base_ref)} as array_table(array_key, array_element)
                         )
                         ELSE {self.dialect.json_array_function}()
                     END
@@ -5695,7 +5682,7 @@ class SQLGenerator:
                             WITH RECURSIVE descendants_cte(value, level) AS (
                                 -- Base case: direct children
                                 SELECT child_value as value, 1 as level
-                                FROM {self.dialect.json_each_function}({base_ref}) as parent_table(parent_key, parent_value),
+                                FROM {self.iterate_json_elements_indexed(base_ref)} as parent_table(parent_key, parent_value),
                                      {self.dialect.json_each_function}(parent_value) as child_table(child_key, child_value)
                                 WHERE {self.get_json_type('parent_value')} IN ('OBJECT', 'ARRAY')
                                 
@@ -5718,7 +5705,7 @@ class SQLGenerator:
                             WITH RECURSIVE descendants_cte(value, level) AS (
                                 -- Base case: direct children
                                 SELECT child_value as value, 1 as level
-                                FROM {self.dialect.json_each_function}({base_ref}) as child_table(child_key, child_value)
+                                FROM {self.iterate_json_elements_indexed(base_ref)} as child_table(child_key, child_value)
                                 
                                 UNION ALL
                                 
@@ -5778,7 +5765,7 @@ class SQLGenerator:
                     CASE 
                         WHEN {self.get_json_type(base_ref)} = 'ARRAY' THEN (
                             SELECT {self.dialect.json_array_function}(DISTINCT value)
-                            FROM {self.dialect.json_each_function}({base_ref})
+                            FROM {self.iterate_json_elements_indexed(base_ref)}
                         )
                         ELSE {self.dialect.json_array_function}({base_ref})
                     END
@@ -6099,6 +6086,110 @@ class SQLGenerator:
                      )
                 THEN TRUE
                 ELSE FALSE
+            END
+            """
+
+        elif func_name == 'getvalue':
+            # getValue() function - extracts primitive value from FHIR elements
+            if len(func_node.args) != 0:
+                raise ValueError("getValue() function takes no arguments")
+            
+            # Extract primitive value from FHIR element, handling both simple values and complex FHIR types
+            # According to FHIR spec, getValue() returns the primitive value if input is primitive type,
+            # or the value of a FHIR element
+            return f"""
+            CASE 
+                -- Handle primitive types (return as-is)
+                WHEN {self.dialect.json_type_function}({base_expr}) IN ('STRING', 'NUMBER', 'BOOLEAN') THEN 
+                    {base_expr}
+                
+                -- Handle FHIR types with 'value' property (Quantity, Identifier, ContactPoint, etc.)
+                WHEN {self.dialect.json_type_function}({base_expr}) = 'OBJECT' AND 
+                     {self.dialect.json_extract_function}({base_expr}, '$.value') IS NOT NULL THEN
+                    {self.dialect.json_extract_function}({base_expr}, '$.value')
+                
+                -- Handle HumanName (concatenate name parts)
+                WHEN {self.dialect.json_type_function}({base_expr}) = 'OBJECT' AND 
+                     ({self.dialect.json_extract_function}({base_expr}, '$.family') IS NOT NULL OR 
+                      {self.dialect.json_extract_function}({base_expr}, '$.given') IS NOT NULL) THEN
+                    TRIM({self.dialect.string_concat(
+                        self.dialect.string_concat(
+                            f"COALESCE({self.dialect.json_extract_string_function}({base_expr}, '$.given[0]'), '')",
+                            f"CASE WHEN {self.dialect.json_extract_function}({base_expr}, '$.given[0]') IS NOT NULL AND {self.dialect.json_extract_function}({base_expr}, '$.family') IS NOT NULL THEN ' ' ELSE '' END"
+                        ),
+                        f"COALESCE({self.dialect.json_extract_string_function}({base_expr}, '$.family'), '')"
+                    )})
+                
+                -- Handle Address (return formatted address string)
+                WHEN {self.dialect.json_type_function}({base_expr}) = 'OBJECT' AND 
+                     ({self.dialect.json_extract_function}({base_expr}, '$.line') IS NOT NULL OR 
+                      {self.dialect.json_extract_function}({base_expr}, '$.city') IS NOT NULL) THEN
+                    TRIM({self.dialect.string_concat(
+                        self.dialect.string_concat(
+                            f"COALESCE({self.dialect.json_extract_string_function}({base_expr}, '$.line[0]'), '')",
+                            f"CASE WHEN {self.dialect.json_extract_function}({base_expr}, '$.line[0]') IS NOT NULL AND {self.dialect.json_extract_function}({base_expr}, '$.city') IS NOT NULL THEN ', ' ELSE '' END"
+                        ),
+                        f"COALESCE({self.dialect.json_extract_string_function}({base_expr}, '$.city'), '')"
+                    )})
+                
+                -- Return null for complex types without clear value semantics
+                ELSE NULL
+            END
+            """
+
+        elif func_name == 'resolve':
+            # resolve() function - resolves FHIR references to actual resources
+            if len(func_node.args) != 0:
+                raise ValueError("resolve() function takes no arguments")
+            
+            # Generate reference resolution logic according to FHIR specification
+            # The resolve() function takes a reference and returns the resource(s) that are the target of the reference
+            
+            # Use dialect-specific string splitting approach
+            if self.dialect.name == "DUCKDB":
+                split_resource_type = f"CASE WHEN {self.dialect.json_extract_string_function}({base_expr}, '$.reference') LIKE '%/%' THEN string_split({self.dialect.json_extract_string_function}({base_expr}, '$.reference'), '/')[1] ELSE NULL END"
+                split_resource_id = f"CASE WHEN {self.dialect.json_extract_string_function}({base_expr}, '$.reference') LIKE '%/%' THEN string_split({self.dialect.json_extract_string_function}({base_expr}, '$.reference'), '/')[2] ELSE {self.dialect.json_extract_string_function}({base_expr}, '$.reference') END"
+            else:  # PostgreSQL or other
+                split_resource_type = f"CASE WHEN {self.dialect.json_extract_string_function}({base_expr}, '$.reference') LIKE '%/%' THEN split_part({self.dialect.json_extract_string_function}({base_expr}, '$.reference'), '/', 1) ELSE NULL END"
+                split_resource_id = f"CASE WHEN {self.dialect.json_extract_string_function}({base_expr}, '$.reference') LIKE '%/%' THEN split_part({self.dialect.json_extract_string_function}({base_expr}, '$.reference'), '/', 2) ELSE {self.dialect.json_extract_string_function}({base_expr}, '$.reference') END"
+            
+            return f"""
+            CASE 
+                -- Handle null or non-object references
+                WHEN {base_expr} IS NULL OR {self.dialect.json_type_function}({base_expr}) != 'OBJECT' THEN 
+                    {self.dialect.json_array_function}()
+                    
+                -- Handle references without reference property
+                WHEN {self.dialect.json_extract_function}({base_expr}, '$.reference') IS NULL THEN
+                    {self.dialect.json_array_function}()
+                    
+                -- Handle valid references with reference resolution
+                ELSE (
+                    WITH reference_parsing AS (
+                        SELECT 
+                            {base_expr} as reference_obj,
+                            {self.dialect.json_extract_string_function}({base_expr}, '$.reference') as ref_string,
+                            -- Extract resource type from reference (part before /)
+                            {split_resource_type} as resource_type,
+                            -- Extract resource ID from reference (part after /)
+                            {split_resource_id} as resource_id
+                    ),
+                    resolved_resources AS (
+                        SELECT target_resources.{self.json_column}
+                        FROM reference_parsing ref
+                        JOIN {self.table_name} target_resources ON (
+                            -- Match on resource type and ID
+                            {self.dialect.json_extract_string_function}(target_resources.{self.json_column}, '$.resourceType') = ref.resource_type AND
+                            {self.dialect.json_extract_string_function}(target_resources.{self.json_column}, '$.id') = ref.resource_id
+                        )
+                        WHERE ref.resource_type IS NOT NULL AND ref.resource_id IS NOT NULL
+                    )
+                    SELECT COALESCE(
+                        {self.dialect.aggregate_to_json_array(f"resolved_resources.{self.json_column}")}, 
+                        {self.dialect.json_array_function}()
+                    )
+                    FROM resolved_resources
+                )
             END
             """
 
@@ -6473,15 +6564,13 @@ class SQLGenerator:
                         WHEN {self.get_json_array_length(base_expr)} <= 1 THEN NULL
                         -- Array has multiple elements - return slice from index 1 to end
                         ELSE (
-                            SELECT {self.dialect.json_array_function}(
-                                value::VARCHAR
-                            )
+                            SELECT {self.dialect.aggregate_to_json_array('value')}
                             FROM (
-                                SELECT 
-                                    {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
-                                FROM {self.dialect.json_each_function}({base_expr})
-                                WHERE ROW_NUMBER() OVER () > 1
-                            ) AS tail_elements
+                                SELECT value
+                                FROM {self.iterate_json_elements_indexed(base_expr)}
+                                WHERE CAST(key AS INTEGER) >= 1
+                                ORDER BY CAST(key AS INTEGER)
+                            )
                         )
                     END
                 -- For non-arrays (single objects), return empty collection (NULL)
@@ -6526,15 +6615,13 @@ class SQLGenerator:
                         WHEN {self.get_json_array_length(base_expr)} <= {skip_count} THEN NULL
                         -- Array has more elements than skip count - return elements after skip
                         ELSE (
-                            SELECT {self.dialect.json_array_function}(
-                                value::VARCHAR
-                            )
+                            SELECT {self.dialect.aggregate_to_json_array('value')}
                             FROM (
-                                SELECT 
-                                    {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
-                                FROM {self.dialect.json_each_function}({base_expr})
-                                WHERE ROW_NUMBER() OVER () > {skip_count}
-                            ) AS skip_elements
+                                SELECT value
+                                FROM {self.iterate_json_elements_indexed(base_expr)}
+                                WHERE CAST(key AS INTEGER) >= {skip_count}
+                                ORDER BY CAST(key AS INTEGER)
+                            )
                         )
                     END
                 -- For non-arrays (single objects), skip behavior
@@ -6585,15 +6672,13 @@ class SQLGenerator:
                         WHEN {take_count} >= {self.get_json_array_length(base_expr)} THEN {base_expr}
                         -- Take count is less than array length - return first take_count elements
                         ELSE (
-                            SELECT {self.dialect.json_array_function}(
-                                value::VARCHAR
-                            )
+                            SELECT {self.dialect.aggregate_to_json_array('value')}
                             FROM (
-                                SELECT 
-                                    {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
-                                FROM {self.dialect.json_each_function}({base_expr})
-                                WHERE ROW_NUMBER() OVER () <= {take_count}
-                            ) AS take_elements
+                                SELECT value
+                                FROM {self.iterate_json_elements_indexed(base_expr)}
+                                WHERE CAST(key AS INTEGER) < {take_count}
+                                ORDER BY CAST(key AS INTEGER)
+                            )
                         )
                     END
                 -- For non-arrays (single objects), take behavior
@@ -6645,14 +6730,14 @@ class SQLGenerator:
                             FROM (
                                 SELECT 
                                     {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
-                                FROM {self.dialect.json_each_function}({base_expr})
+                                FROM {self.iterate_json_elements_indexed(base_expr)}
                             ) AS left_elements
                             WHERE EXISTS (
                                 SELECT 1 
                                 FROM (
                                     SELECT 
                                         {self.dialect.json_extract_function}({other_collection_sql}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as other_value
-                                    FROM {self.dialect.json_each_function}({other_collection_sql})
+                                    FROM {self.iterate_json_elements_indexed(other_collection_sql)}
                                 ) AS right_elements
                                 WHERE left_elements.value = right_elements.other_value
                             )
@@ -6667,7 +6752,7 @@ class SQLGenerator:
                             FROM (
                                 SELECT 
                                     {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
-                                FROM {self.dialect.json_each_function}({base_expr})
+                                FROM {self.iterate_json_elements_indexed(base_expr)}
                             ) AS array_elements
                             WHERE array_elements.value = {other_collection_sql}
                         ) THEN {self.dialect.json_array_function}({other_collection_sql}::VARCHAR)
@@ -6681,7 +6766,7 @@ class SQLGenerator:
                             FROM (
                                 SELECT 
                                     {self.dialect.json_extract_function}({other_collection_sql}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
-                                FROM {self.dialect.json_each_function}({other_collection_sql})
+                                FROM {self.iterate_json_elements_indexed(other_collection_sql)}
                             ) AS array_elements
                             WHERE array_elements.value = {base_expr}
                         ) THEN {self.dialect.json_array_function}({base_expr}::VARCHAR)
@@ -6738,14 +6823,14 @@ class SQLGenerator:
                             FROM (
                                 SELECT 
                                     {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
-                                FROM {self.dialect.json_each_function}({base_expr})
+                                FROM {self.iterate_json_elements_indexed(base_expr)}
                             ) AS left_elements
                             WHERE NOT EXISTS (
                                 SELECT 1 
                                 FROM (
                                     SELECT 
                                         {self.dialect.json_extract_function}({other_collection_sql}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as other_value
-                                    FROM {self.dialect.json_each_function}({other_collection_sql})
+                                    FROM {self.iterate_json_elements_indexed(other_collection_sql)}
                                 ) AS right_elements
                                 WHERE left_elements.value = right_elements.other_value
                             )
@@ -6761,7 +6846,7 @@ class SQLGenerator:
                             FROM (
                                 SELECT 
                                     {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
-                                FROM {self.dialect.json_each_function}({base_expr})
+                                FROM {self.iterate_json_elements_indexed(base_expr)}
                             ) AS array_elements
                             WHERE array_elements.value != {other_collection_sql}
                         )
@@ -6777,7 +6862,7 @@ class SQLGenerator:
                                     FROM (
                                         SELECT 
                                             {self.dialect.json_extract_function}({other_collection_sql}, '$[' || (ROW_NUMBER() OVER () - 1) || ']') as value
-                                        FROM {self.dialect.json_each_function}({other_collection_sql})
+                                        FROM {self.iterate_json_elements_indexed(other_collection_sql)}
                                     ) AS array_elements
                                     WHERE array_elements.value = {base_expr}
                                 ) THEN NULL
@@ -6793,13 +6878,13 @@ class SQLGenerator:
             END
             """
         elif func_name == 'alltrue':
-            # Phase 2: CTE Implementation with Feature Flag
-            if self.enable_cte and self._should_use_cte_unified(base_expr, 'alltrue'):
-                try:
-                    return self._generate_alltrue_with_cte(base_expr)
-                except Exception as e:
-                    # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for allTrue(), falling back to subqueries: {e}")
+            # Disable CTE for allTrue function until window function issue is resolved
+            # if self.enable_cte and self._should_use_cte_unified(base_expr, 'alltrue'):
+            #     try:
+            #         return self._generate_alltrue_with_cte(base_expr)
+            #     except Exception as e:
+            #         # Fallback to original implementation if CTE generation fails
+            #         print(f"CTE generation failed for allTrue(), falling back to subqueries: {e}")
             
             # Original implementation (fallback)
             # allTrue() returns true if all elements in a collection are true, false if any element is false
@@ -6821,30 +6906,33 @@ class SQLGenerator:
                                 -- If any element is false, return false
                                 WHEN COUNT(CASE WHEN 
                                     (CASE 
-                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'false' THEN false
-                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'true' THEN true
+                                        WHEN {self.dialect.json_type_function}(value) = 'BOOLEAN' THEN CAST(value AS BOOLEAN)
+                                        WHEN CAST(value AS VARCHAR) = 'true' THEN true
+                                        WHEN CAST(value AS VARCHAR) = 'false' THEN false
                                         ELSE NULL
                                     END) = false 
                                     THEN 1 END) > 0 THEN false
                                 -- If any element is null/non-boolean, return false (strict evaluation)
                                 WHEN COUNT(CASE WHEN 
                                     (CASE 
-                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'false' THEN false
-                                        WHEN {self.dialect.json_extract_function}({base_expr}, '$[' || (ROW_NUMBER() OVER () - 1) || ']')::VARCHAR = 'true' THEN true
+                                        WHEN {self.dialect.json_type_function}(value) = 'BOOLEAN' THEN CAST(value AS BOOLEAN)
+                                        WHEN CAST(value AS VARCHAR) = 'true' THEN true
+                                        WHEN CAST(value AS VARCHAR) = 'false' THEN false
                                         ELSE NULL
                                     END) IS NULL 
                                     THEN 1 END) > 0 THEN false
                                 -- If all elements are true, return true
                                 ELSE true
                             END
-                            FROM {self.dialect.json_each_function}({base_expr})
+                            FROM {self.iterate_json_elements_indexed(base_expr)}
                         )
                     END
                 -- For non-arrays (single values), check if the value is true
                 ELSE 
                     CASE 
-                        WHEN {base_expr}::VARCHAR = 'true' THEN true
-                        WHEN {base_expr}::VARCHAR = 'false' THEN false
+                        WHEN {self.dialect.json_type_function}({base_expr}) = 'BOOLEAN' THEN CAST({base_expr} AS BOOLEAN)
+                        WHEN CAST({base_expr} AS VARCHAR) = 'true' THEN true
+                        WHEN CAST({base_expr} AS VARCHAR) = 'false' THEN false
                         ELSE false  -- Non-boolean single values are treated as false
                     END
             END
@@ -6894,7 +6982,7 @@ class SQLGenerator:
                                 -- If all elements are false, return true
                                 ELSE true
                             END
-                            FROM {self.dialect.json_each_function}({base_expr})
+                            FROM {self.iterate_json_elements_indexed(base_expr)}
                         )
                     END
                 -- For non-arrays (single values), check if the value is false
@@ -6952,7 +7040,7 @@ class SQLGenerator:
                                 -- If all elements are false, return false
                                 ELSE false
                             END
-                            FROM {self.dialect.json_each_function}({base_expr})
+                            FROM {self.iterate_json_elements_indexed(base_expr)}
                         )
                     END
                 -- For non-arrays (single values), check if the value is true
@@ -7010,7 +7098,7 @@ class SQLGenerator:
                                 -- If all elements are true, return false
                                 ELSE false
                             END
-                            FROM {self.dialect.json_each_function}({base_expr})
+                            FROM {self.iterate_json_elements_indexed(base_expr)}
                         )
                     END
                 -- For non-arrays (single values), check if the value is false
@@ -7094,7 +7182,7 @@ class SQLGenerator:
                         WHEN COUNT(CASE WHEN other_elem.value IS NULL THEN 1 END) > 0 THEN false  -- Any element not found in other collection
                         ELSE true  -- All elements found
                     END
-                    FROM {self.dialect.json_each_function}({base_expr}) base_elem
+                    FROM {self.iterate_json_elements_indexed(base_expr)} base_elem
                     LEFT JOIN {self.dialect.json_each_function}({other_collection_sql}) other_elem 
                         ON base_elem.value = other_elem.value
                 )
@@ -7104,7 +7192,7 @@ class SQLGenerator:
                         WHEN COUNT(*) > 0 THEN true
                         ELSE false
                     END
-                    FROM {self.dialect.json_each_function}({other_collection_sql})
+                    FROM {self.iterate_json_elements_indexed(other_collection_sql)}
                     WHERE value = {base_expr}
                 )
                 WHEN {self.get_json_type(base_expr)} = 'ARRAY' AND {self.get_json_type(other_collection_sql)} != 'ARRAY' THEN (
@@ -7154,7 +7242,7 @@ class SQLGenerator:
                         WHEN COUNT(CASE WHEN base_elem.value IS NULL THEN 1 END) > 0 THEN false  -- Any element of other not found in base collection
                         ELSE true  -- All elements found
                     END
-                    FROM {self.dialect.json_each_function}({other_collection_sql}) other_elem
+                    FROM {self.iterate_json_elements_indexed(other_collection_sql)} other_elem
                     LEFT JOIN {self.dialect.json_each_function}({base_expr}) base_elem 
                         ON other_elem.value = base_elem.value
                 )
@@ -7164,7 +7252,7 @@ class SQLGenerator:
                         WHEN COUNT(*) > 0 THEN true
                         ELSE false
                     END
-                    FROM {self.dialect.json_each_function}({base_expr})
+                    FROM {self.iterate_json_elements_indexed(base_expr)}
                     WHERE value = {other_collection_sql}
                 )
                 WHEN {self.get_json_type(base_expr)} != 'ARRAY' AND {self.get_json_type(other_collection_sql)} = 'ARRAY' THEN (
@@ -7214,7 +7302,7 @@ class SQLGenerator:
                                 WHEN COUNT(*) = COUNT(DISTINCT value) THEN true
                                 ELSE false
                             END
-                            FROM {self.dialect.json_each_function}({base_expr})
+                            FROM {self.iterate_json_elements_indexed(base_expr)}
                         )
                     END
                 -- Single element is distinct by definition
@@ -7277,7 +7365,7 @@ class SQLGenerator:
                         WHEN COUNT(*) = 0 THEN NULL
                         ELSE {self.dialect.json_array_function}(DISTINCT value::VARCHAR)
                     END
-                    FROM {self.dialect.json_each_function}({base_expr})
+                    FROM {self.iterate_json_elements_indexed(base_expr)}
                     WHERE {type_condition}
                 )
                 -- Single element - check if it matches the type
@@ -7349,7 +7437,7 @@ class SQLGenerator:
                                 WHEN COUNT(*) = COUNT(CASE WHEN {type_condition} THEN 1 END) THEN true
                                 ELSE false
                             END
-                            FROM {self.dialect.json_each_function}({base_expr})
+                            FROM {self.iterate_json_elements_indexed(base_expr)}
                         )
                     END
                 -- Single element - check if it matches the type
@@ -7399,7 +7487,7 @@ class SQLGenerator:
                                     ELSE NULL
                                 END::VARCHAR
                             )
-                            FROM {self.dialect.json_each_function}({base_expr})
+                            FROM {self.iterate_json_elements_indexed(base_expr)}
                             WHERE CASE 
                                 WHEN {self.get_json_type('value')} = 'BOOLEAN' THEN true
                                 WHEN {self.get_json_type('value')} = 'VARCHAR' AND LOWER(CAST(value AS VARCHAR)) IN ('true', 'false') THEN true
@@ -7420,6 +7508,313 @@ class SQLGenerator:
                     END
             END
             """
+        elif func_name == 'subsumes':
+            # subsumes(code) - tests if input code subsumes (is parent/ancestor of) parameter code
+            if len(func_node.args) != 1:
+                raise ValueError("subsumes() function takes exactly one argument")
+            
+            # Get the code to check subsumption against
+            other_code_arg = func_node.args[0]
+            other_code_sql = self.visit(other_code_arg)
+            
+            # Implementation of terminology subsumption testing
+            # This is a basic implementation - full subsumption would require terminology service
+            return f"""
+            CASE 
+                -- Both inputs must be Coding objects or CodeableConcept with coding
+                WHEN {base_expr} IS NULL OR {other_code_sql} IS NULL THEN NULL
+                
+                -- Handle base CodeableConcept (extract first coding)
+                WHEN {self.dialect.json_extract_function}({base_expr}, '$.coding') IS NOT NULL AND
+                     {self.dialect.json_type_function}({self.dialect.json_extract_function}({base_expr}, '$.coding')) = 'ARRAY' AND
+                     {self.dialect.json_array_length_function}({self.dialect.json_extract_function}({base_expr}, '$.coding')) > 0
+                THEN
+                    -- Extract first coding from base CodeableConcept
+                    CASE 
+                        WHEN {self.dialect.json_extract_function}({other_code_sql}, '$.coding') IS NOT NULL AND
+                             {self.dialect.json_type_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding')) = 'ARRAY' AND
+                             {self.dialect.json_array_length_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding')) > 0
+                        THEN
+                            -- Both are CodeableConcept - compare first codings
+                            CASE 
+                                WHEN {self.dialect.json_extract_function}({self.dialect.json_extract_function}({base_expr}, '$.coding'), '$[0].system') = 
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding'), '$[0].system') AND
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({base_expr}, '$.coding'), '$[0].code') = 
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding'), '$[0].code')
+                                THEN TRUE  -- Same code subsumes itself
+                                -- TODO: Add real subsumption logic with terminology service
+                                ELSE FALSE
+                            END
+                        ELSE FALSE
+                    END
+                
+                -- Handle base Coding object directly  
+                WHEN {self.dialect.json_extract_function}({base_expr}, '$.system') IS NOT NULL AND
+                     {self.dialect.json_extract_function}({base_expr}, '$.code') IS NOT NULL
+                THEN
+                    CASE 
+                        -- Other is also a Coding object
+                        WHEN {self.dialect.json_extract_function}({other_code_sql}, '$.system') IS NOT NULL AND
+                             {self.dialect.json_extract_function}({other_code_sql}, '$.code') IS NOT NULL
+                        THEN
+                            CASE 
+                                WHEN {self.dialect.json_extract_function}({base_expr}, '$.system') = 
+                                     {self.dialect.json_extract_function}({other_code_sql}, '$.system') AND
+                                     {self.dialect.json_extract_function}({base_expr}, '$.code') = 
+                                     {self.dialect.json_extract_function}({other_code_sql}, '$.code')
+                                THEN TRUE  -- Same code subsumes itself
+                                -- TODO: Add real subsumption logic with terminology service
+                                ELSE FALSE
+                            END
+                        -- Other is CodeableConcept
+                        WHEN {self.dialect.json_extract_function}({other_code_sql}, '$.coding') IS NOT NULL AND
+                             {self.dialect.json_type_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding')) = 'ARRAY' AND
+                             {self.dialect.json_array_length_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding')) > 0
+                        THEN
+                            CASE 
+                                WHEN {self.dialect.json_extract_function}({base_expr}, '$.system') = 
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding'), '$[0].system') AND
+                                     {self.dialect.json_extract_function}({base_expr}, '$.code') = 
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding'), '$[0].code')
+                                THEN TRUE  -- Same code subsumes itself
+                                -- TODO: Add real subsumption logic with terminology service
+                                ELSE FALSE
+                            END
+                        ELSE FALSE
+                    END
+                
+                ELSE FALSE
+            END
+            """
+        
+        elif func_name == 'subsumedby':
+            # subsumedBy(code) - tests if input code is subsumed by (is child/descendant of) parameter code
+            if len(func_node.args) != 1:
+                raise ValueError("subsumedBy() function takes exactly one argument")
+            
+            # Get the code to check subsumption against
+            other_code_arg = func_node.args[0]
+            other_code_sql = self.visit(other_code_arg)
+            
+            # Implementation of terminology subsumption testing (reverse of subsumes)
+            # This is a basic implementation - full subsumption would require terminology service
+            return f"""
+            CASE 
+                -- Both inputs must be Coding objects or CodeableConcept with coding
+                WHEN {base_expr} IS NULL OR {other_code_sql} IS NULL THEN NULL
+                
+                -- Handle base CodeableConcept (extract first coding)
+                WHEN {self.dialect.json_extract_function}({base_expr}, '$.coding') IS NOT NULL AND
+                     {self.dialect.json_type_function}({self.dialect.json_extract_function}({base_expr}, '$.coding')) = 'ARRAY' AND
+                     {self.dialect.json_array_length_function}({self.dialect.json_extract_function}({base_expr}, '$.coding')) > 0
+                THEN
+                    -- Extract first coding from base CodeableConcept
+                    CASE 
+                        WHEN {self.dialect.json_extract_function}({other_code_sql}, '$.coding') IS NOT NULL AND
+                             {self.dialect.json_type_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding')) = 'ARRAY' AND
+                             {self.dialect.json_array_length_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding')) > 0
+                        THEN
+                            -- Both are CodeableConcept - compare first codings (reverse logic)
+                            CASE 
+                                WHEN {self.dialect.json_extract_function}({self.dialect.json_extract_function}({base_expr}, '$.coding'), '$[0].system') = 
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding'), '$[0].system') AND
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({base_expr}, '$.coding'), '$[0].code') = 
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding'), '$[0].code')
+                                THEN TRUE  -- Same code is subsumed by itself
+                                -- TODO: Add real subsumption logic with terminology service
+                                ELSE FALSE
+                            END
+                        ELSE FALSE
+                    END
+                
+                -- Handle base Coding object directly  
+                WHEN {self.dialect.json_extract_function}({base_expr}, '$.system') IS NOT NULL AND
+                     {self.dialect.json_extract_function}({base_expr}, '$.code') IS NOT NULL
+                THEN
+                    CASE 
+                        -- Other is also a Coding object
+                        WHEN {self.dialect.json_extract_function}({other_code_sql}, '$.system') IS NOT NULL AND
+                             {self.dialect.json_extract_function}({other_code_sql}, '$.code') IS NOT NULL
+                        THEN
+                            CASE 
+                                WHEN {self.dialect.json_extract_function}({base_expr}, '$.system') = 
+                                     {self.dialect.json_extract_function}({other_code_sql}, '$.system') AND
+                                     {self.dialect.json_extract_function}({base_expr}, '$.code') = 
+                                     {self.dialect.json_extract_function}({other_code_sql}, '$.code')
+                                THEN TRUE  -- Same code is subsumed by itself
+                                -- TODO: Add real subsumption logic with terminology service
+                                ELSE FALSE
+                            END
+                        -- Other is CodeableConcept
+                        WHEN {self.dialect.json_extract_function}({other_code_sql}, '$.coding') IS NOT NULL AND
+                             {self.dialect.json_type_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding')) = 'ARRAY' AND
+                             {self.dialect.json_array_length_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding')) > 0
+                        THEN
+                            CASE 
+                                WHEN {self.dialect.json_extract_function}({base_expr}, '$.system') = 
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding'), '$[0].system') AND
+                                     {self.dialect.json_extract_function}({base_expr}, '$.code') = 
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding'), '$[0].code')
+                                THEN TRUE  -- Same code is subsumed by itself
+                                -- TODO: Add real subsumption logic with terminology service
+                                ELSE FALSE
+                            END
+                        ELSE FALSE
+                    END
+                
+                ELSE FALSE
+            END
+            """
+        
+        elif func_name == 'comparable':
+            # comparable(quantity) - tests if two quantities are comparable (have compatible units)
+            if len(func_node.args) != 1:
+                raise ValueError("comparable() function takes exactly one argument")
+            
+            # Get the quantity to compare against
+            other_quantity_arg = func_node.args[0]
+            other_quantity_sql = self.visit(other_quantity_arg)
+            
+            # Implementation of quantity comparison testing
+            # This is a basic implementation - full comparison would require UCUM service
+            return f"""
+            CASE 
+                -- Both inputs must be Quantity objects
+                WHEN {base_expr} IS NULL OR {other_quantity_sql} IS NULL THEN NULL
+                
+                -- Handle base Quantity object
+                WHEN {self.dialect.json_extract_function}({base_expr}, '$.value') IS NOT NULL AND
+                     {self.dialect.json_extract_function}({base_expr}, '$.unit') IS NOT NULL
+                THEN
+                    CASE 
+                        -- Other is also a Quantity object
+                        WHEN {self.dialect.json_extract_function}({other_quantity_sql}, '$.value') IS NOT NULL AND
+                             {self.dialect.json_extract_function}({other_quantity_sql}, '$.unit') IS NOT NULL
+                        THEN
+                            CASE 
+                                -- Same unit is always comparable
+                                WHEN {self.dialect.json_extract_function}({base_expr}, '$.unit') = 
+                                     {self.dialect.json_extract_function}({other_quantity_sql}, '$.unit')
+                                THEN TRUE
+                                -- Same system is generally comparable
+                                WHEN {self.dialect.json_extract_function}({base_expr}, '$.system') = 
+                                     {self.dialect.json_extract_function}({other_quantity_sql}, '$.system')
+                                THEN TRUE
+                                -- Basic unit compatibility checks (simplified)
+                                WHEN ({self.dialect.json_extract_function}({base_expr}, '$.unit') IN ('kg', 'g', 'mg', 'lb', 'oz') AND
+                                      {self.dialect.json_extract_function}({other_quantity_sql}, '$.unit') IN ('kg', 'g', 'mg', 'lb', 'oz'))
+                                THEN TRUE  -- Mass units
+                                WHEN ({self.dialect.json_extract_function}({base_expr}, '$.unit') IN ('m', 'cm', 'mm', 'km', 'in', 'ft') AND
+                                      {self.dialect.json_extract_function}({other_quantity_sql}, '$.unit') IN ('m', 'cm', 'mm', 'km', 'in', 'ft'))
+                                THEN TRUE  -- Length units
+                                WHEN ({self.dialect.json_extract_function}({base_expr}, '$.unit') IN ('s', 'min', 'h', 'd', 'wk', 'mo', 'a') AND
+                                      {self.dialect.json_extract_function}({other_quantity_sql}, '$.unit') IN ('s', 'min', 'h', 'd', 'wk', 'mo', 'a'))
+                                THEN TRUE  -- Time units
+                                WHEN ({self.dialect.json_extract_function}({base_expr}, '$.unit') IN ('L', 'mL', 'dL', 'cL') AND
+                                      {self.dialect.json_extract_function}({other_quantity_sql}, '$.unit') IN ('L', 'mL', 'dL', 'cL'))
+                                THEN TRUE  -- Volume units
+                                -- TODO: Add full UCUM compatibility logic
+                                ELSE FALSE
+                            END
+                        ELSE FALSE
+                    END
+                
+                ELSE FALSE
+            END
+            """
+        
+        elif func_name == 'elementdefinition':
+            # elementDefinition() - get element definition from structure definition
+            if len(func_node.args) != 0:
+                raise ValueError("elementDefinition() function takes no arguments")
+            
+            # Implementation of element definition retrieval
+            # This is a basic implementation - full implementation would require StructureDefinition processing
+            return f"""
+            CASE 
+                -- Check if input is a valid FHIR element
+                WHEN {base_expr} IS NULL THEN NULL
+                
+                -- TODO: Full StructureDefinition processing would be implemented here
+                -- For now, return a basic placeholder structure
+                ELSE {self.dialect.json_object_function}(
+                    'path', 'placeholder',
+                    'type', {self.dialect.json_array_function}(
+                        {self.dialect.json_object_function}('code', 'Element')
+                    ),
+                    'definition', 'Basic element definition placeholder',
+                    'min', 0,
+                    'max', '1'
+                )
+            END
+            """
+        
+        elif func_name == 'slice':
+            # slice(structure, name) - access specific slices in profiles
+            if len(func_node.args) != 2:
+                raise ValueError("slice() function takes exactly two arguments")
+            
+            # Get the structure and name arguments
+            structure_arg = func_node.args[0]
+            name_arg = func_node.args[1]
+            structure_sql = self.visit(structure_arg)
+            name_sql = self.visit(name_arg)
+            
+            # Implementation of slice access
+            # This is a basic implementation - full implementation would require profile processing
+            return f"""
+            CASE 
+                -- Check if inputs are valid
+                WHEN {base_expr} IS NULL OR {structure_sql} IS NULL OR {name_sql} IS NULL THEN NULL
+                
+                -- TODO: Full profile slicing would be implemented here
+                -- For now, return a basic placeholder
+                ELSE {self.dialect.json_object_function}(
+                    'sliceName', {name_sql},
+                    'structure', {structure_sql},
+                    'elements', {self.dialect.json_array_function}()
+                )
+            END
+            """
+        
+        elif func_name == 'checkmodifiers':
+            # checkModifiers(modifier) - check modifier extensions
+            if len(func_node.args) != 1:
+                raise ValueError("checkModifiers() function takes exactly one argument")
+            
+            # Get the modifier argument
+            modifier_arg = func_node.args[0]
+            modifier_sql = self.visit(modifier_arg)
+            
+            # Implementation of modifier extension checking
+            # This is a basic implementation - full implementation would require extension processing
+            return f"""
+            CASE 
+                -- Check if inputs are valid
+                WHEN {base_expr} IS NULL OR {modifier_sql} IS NULL THEN NULL
+                
+                -- Check if modifierExtension array exists and contains the specified modifier
+                WHEN {self.dialect.json_extract_function}({base_expr}, '$.modifierExtension') IS NOT NULL
+                THEN
+                    CASE 
+                        WHEN {self.dialect.json_type_function}({self.dialect.json_extract_function}({base_expr}, '$.modifierExtension')) = 'ARRAY'
+                        THEN
+                            (
+                                SELECT 
+                                    CASE 
+                                        WHEN COUNT(*) > 0 THEN TRUE
+                                        ELSE FALSE
+                                    END
+                                FROM {self.dialect.json_each_function}({self.dialect.json_extract_function}({base_expr}, '$.modifierExtension'))
+                                WHERE {self.dialect.json_extract_function}('value', '$.url') = {modifier_sql}
+                            )
+                        ELSE FALSE
+                    END
+                
+                ELSE FALSE
+            END
+            """
+        
         else:
             raise ValueError(f"Unknown function: {func_name}")
     
@@ -8090,5 +8485,684 @@ FROM {self.table_name}"""
         """Fallback handler for functions not yet fully extracted."""
         # This allows extracted handlers to delegate back to main generator
         # for functions that are partially implemented
-        raise ValueError(f"Function '{func_name}' is not yet fully implemented in extracted handlers")
+        
+        # Call the main generator's function handling logic directly, bypassing handler routing
+        # to avoid infinite recursion
+        return self._apply_function_direct(func_name, base_expr, func_node)
+    
+    def _apply_function_direct(self, func_name: str, base_expr: str, func_node) -> str:
+        """Apply function directly without going through handler routing system."""
+        func_name = func_name.lower()
+        
+        # This is a direct implementation of the function handling logic from apply_function_to_expression
+        # but bypasses the handler delegation to avoid recursion
+        
+        if func_name == 'single':
+            # Phase 1: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'single'):
+                try:
+                    return self._generate_single_with_cte(base_expr)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for single(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # single() returns the single element of a collection, or empty collection for error conditions
+            # FHIRPath specification: single() - returns the single element in a collection. Empty collection if empty or multiple elements
+            # Note: In FHIRPath, "errors" typically result in empty collections rather than exceptions
+            return f"""
+            CASE 
+                -- Check if the expression is null (empty collection)
+                WHEN {base_expr} IS NULL THEN NULL
+                -- Check if it's an array
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        -- Array is empty - return empty collection (NULL)
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        -- Array has exactly one element - return that element
+                        WHEN {self.get_json_array_length(base_expr)} = 1 THEN
+                            {self.extract_json_object(base_expr, '$[0]')}
+                        -- Array has more than one element - return empty collection (NULL) per FHIRPath error semantics
+                        ELSE NULL
+                    END
+                -- For non-arrays (single objects), return the object itself
+                ELSE {base_expr}
+            END
+            """
+        
+        elif func_name == 'alltrue':
+            # Disable CTE for allTrue function until window function issue is resolved
+            # if self.enable_cte and self._should_use_cte_unified(base_expr, 'alltrue'):
+            #     try:
+            #         return self._generate_alltrue_with_cte(base_expr)
+            #     except Exception as e:
+            #         # Fallback to original implementation if CTE generation fails
+            #         print(f"CTE generation failed for alltrue(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # allTrue() - returns true if all elements in the collection are true
+            if len(func_node.args) != 0:
+                raise ValueError(f"allTrue() requires no arguments, got {len(func_node.args)}")
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN NULL
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        ELSE (
+                            SELECT 
+                                CASE 
+                                    -- If any element is false, return false
+                                    WHEN COUNT(CASE WHEN 
+                                        (CASE 
+                                            WHEN {self.dialect.json_type_function}(value) = 'BOOLEAN' THEN CAST(value AS BOOLEAN)
+                                            WHEN CAST(value AS VARCHAR) = 'true' THEN true
+                                            WHEN CAST(value AS VARCHAR) = 'false' THEN false
+                                            ELSE NULL
+                                        END) = false 
+                                        THEN 1 END) > 0 THEN false
+                                    -- If any element is null/non-boolean, return false (strict evaluation)
+                                    WHEN COUNT(CASE WHEN 
+                                        (CASE 
+                                            WHEN {self.dialect.json_type_function}(value) = 'BOOLEAN' THEN CAST(value AS BOOLEAN)
+                                            WHEN CAST(value AS VARCHAR) = 'true' THEN true
+                                            WHEN CAST(value AS VARCHAR) = 'false' THEN false
+                                            ELSE NULL
+                                        END) IS NULL 
+                                        THEN 1 END) > 0 THEN false
+                                    -- If all elements are true, return true
+                                    ELSE true
+                                END
+                            FROM {self.iterate_json_elements_indexed(base_expr)}
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN {self.dialect.json_type_function}({base_expr}) = 'BOOLEAN' THEN CAST({base_expr} AS BOOLEAN)
+                        WHEN CAST({base_expr} AS VARCHAR) = 'true' THEN true
+                        WHEN CAST({base_expr} AS VARCHAR) = 'false' THEN false
+                        ELSE false  -- Non-boolean single values are treated as false
+                    END
+            END
+            """
+        
+        elif func_name == 'combine':
+            # Phase 1: CTE Implementation with Feature Flag
+            if self.enable_cte and self._should_use_cte_unified(base_expr, 'combine'):
+                try:
+                    return self._generate_combine_with_cte(base_expr, func_node)
+                except Exception as e:
+                    # Fallback to original implementation if CTE generation fails
+                    print(f"CTE generation failed for combine(), falling back to subqueries: {e}")
+            
+            # Original implementation (fallback)
+            # combine() - combine multiple collections into a single collection, preserving duplicates
+            if len(func_node.args) != 1:
+                raise ValueError(f"combine() requires exactly 1 argument, got {len(func_node.args)}")
+            
+            other_collection = self.visit(func_node.args[0])
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL AND {other_collection} IS NULL THEN {self.dialect.json_array_function}()
+                WHEN {base_expr} IS NULL THEN 
+                    CASE 
+                        WHEN {self.get_json_type(other_collection)} = 'ARRAY' THEN {other_collection}
+                        ELSE {self.dialect.json_array_function}({other_collection})
+                    END
+                WHEN {other_collection} IS NULL THEN 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN {base_expr}
+                        ELSE {self.dialect.json_array_function}({base_expr})
+                    END
+                ELSE (
+                    SELECT {self.dialect.json_array_agg_function('value')}
+                    FROM (
+                        SELECT CASE 
+                            WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN base_val.value
+                            ELSE {base_expr}
+                        END as value
+                        FROM {self.iterate_json_array(base_expr, '$')} base_val
+                        WHERE CASE 
+                            WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN true
+                            ELSE base_val.value = {base_expr}
+                        END
+                        
+                        UNION ALL
+                        
+                        SELECT CASE 
+                            WHEN {self.get_json_type(other_collection)} = 'ARRAY' THEN other_val.value
+                            ELSE {other_collection}
+                        END as value
+                        FROM {self.iterate_json_array(other_collection, '$')} other_val
+                        WHERE CASE 
+                            WHEN {self.get_json_type(other_collection)} = 'ARRAY' THEN true
+                            ELSE other_val.value = {other_collection}
+                        END
+                    ) combined
+                    WHERE value IS NOT NULL
+                )
+            END
+            """
+        
+        elif func_name == 'skip':
+            # skip(num) returns all elements after skipping the first num elements
+            if len(func_node.args) != 1:
+                raise ValueError("skip() function requires exactly one argument")
+            
+            skip_count_arg = func_node.args[0]
+            if hasattr(skip_count_arg, 'value'):
+                skip_count = skip_count_arg.value
+            else:
+                skip_count_sql = self.visit(skip_count_arg)
+                skip_count = f"({skip_count_sql})"
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN NULL
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {skip_count} IS NULL OR {skip_count} < 0 THEN {base_expr}
+                        WHEN {self.get_json_array_length(base_expr)} <= {skip_count} THEN NULL
+                        ELSE (
+                            SELECT {self.dialect.aggregate_to_json_array('value')}
+                            FROM (
+                                SELECT value
+                                FROM {self.iterate_json_elements_indexed(base_expr)}
+                                WHERE CAST(key AS INTEGER) >= {skip_count}
+                                ORDER BY CAST(key AS INTEGER)
+                            )
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN {skip_count} IS NULL OR {skip_count} <= 0 THEN {base_expr}
+                        ELSE NULL
+                    END
+            END
+            """
+        
+        elif func_name == 'tail':
+            # tail() returns all elements except the first one
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN NULL
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {self.get_json_array_length(base_expr)} <= 1 THEN NULL
+                        ELSE (
+                            SELECT {self.dialect.aggregate_to_json_array('value')}
+                            FROM (
+                                SELECT value
+                                FROM {self.iterate_json_elements_indexed(base_expr)}
+                                WHERE CAST(key AS INTEGER) > 0
+                                ORDER BY CAST(key AS INTEGER)
+                            )
+                        )
+                    END
+                ELSE NULL
+            END
+            """
+        
+        elif func_name == 'take':
+            # take(num) returns the first num elements
+            if len(func_node.args) != 1:
+                raise ValueError("take() function requires exactly one argument")
+            
+            take_count_arg = func_node.args[0]
+            if hasattr(take_count_arg, 'value'):
+                take_count = take_count_arg.value
+            else:
+                take_count_sql = self.visit(take_count_arg)
+                take_count = f"({take_count_sql})"
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN NULL
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {take_count} IS NULL OR {take_count} <= 0 THEN NULL
+                        WHEN {take_count} >= {self.get_json_array_length(base_expr)} THEN {base_expr}
+                        ELSE (
+                            SELECT {self.dialect.aggregate_to_json_array('value')}
+                            FROM (
+                                SELECT value
+                                FROM {self.iterate_json_elements_indexed(base_expr)}
+                                WHERE CAST(key AS INTEGER) < {take_count}
+                                ORDER BY CAST(key AS INTEGER)
+                            )
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN {take_count} IS NULL OR {take_count} <= 0 THEN NULL
+                        ELSE {base_expr}
+                    END
+            END
+            """
+        
+        elif func_name == 'union':
+            # union(collection) - set union with deduplication
+            if len(func_node.args) != 1:
+                raise ValueError(f"union() requires exactly 1 argument, got {len(func_node.args)}")
+            
+            other_collection_expr = self.visit(func_node.args[0])
+            
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL AND {other_collection_expr} IS NULL THEN NULL
+                WHEN {base_expr} IS NULL THEN 
+                    CASE 
+                        WHEN {self.get_json_type(other_collection_expr)} = 'ARRAY' THEN {other_collection_expr}
+                        ELSE {self.dialect.json_array_function}({other_collection_expr})
+                    END
+                WHEN {other_collection_expr} IS NULL THEN 
+                    CASE 
+                        WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN {base_expr}
+                        ELSE {self.dialect.json_array_function}({base_expr})
+                    END
+                ELSE (
+                    SELECT {self.dialect.json_array_agg_function('value')}
+                    FROM (
+                        SELECT CASE 
+                            WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN base_val.value
+                            ELSE {base_expr}
+                        END as value
+                        FROM {self.iterate_json_array(base_expr, '$')} base_val
+                        
+                        UNION
+                        
+                        SELECT CASE 
+                            WHEN {self.get_json_type(other_collection_expr)} = 'ARRAY' THEN other_val.value
+                            ELSE {other_collection_expr}
+                        END as value
+                        FROM {self.iterate_json_array(other_collection_expr, '$')} other_val
+                    ) combined
+                    WHERE value IS NOT NULL
+                )
+            END
+            """
+        
+        elif func_name == 'allfalse':
+            # allFalse() - returns true if all elements are false
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN NULL
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(*) = COUNT(CASE WHEN CAST(value AS BOOLEAN) = false THEN 1 END) THEN true
+                                ELSE false
+                            END
+                            FROM {self.iterate_json_array(base_expr, '$')}
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN CAST({base_expr} AS BOOLEAN) = false THEN true
+                        ELSE false
+                    END
+            END
+            """
+        
+        elif func_name == 'anytrue':
+            # anyTrue() - returns true if any element is true
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN NULL
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(CASE WHEN CAST(value AS BOOLEAN) = true THEN 1 END) > 0 THEN true
+                                ELSE false
+                            END
+                            FROM {self.iterate_json_array(base_expr, '$')}
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN CAST({base_expr} AS BOOLEAN) = true THEN true
+                        ELSE false
+                    END
+            END
+            """
+        
+        elif func_name == 'anyfalse':
+            # anyFalse() - returns true if any element is false
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN NULL
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN NULL
+                        ELSE (
+                            SELECT CASE 
+                                WHEN COUNT(CASE WHEN CAST(value AS BOOLEAN) = false THEN 1 END) > 0 THEN true
+                                ELSE false
+                            END
+                            FROM {self.iterate_json_array(base_expr, '$')}
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN CAST({base_expr} AS BOOLEAN) = false THEN true
+                        ELSE false
+                    END
+            END
+            """
+        
+        elif func_name == 'subsumes':
+            # subsumes(code) - tests if input code subsumes (is parent/ancestor of) parameter code
+            if len(func_node.args) != 1:
+                raise ValueError("subsumes() function takes exactly one argument")
+            
+            # Get the code to check subsumption against
+            other_code_arg = func_node.args[0]
+            other_code_sql = self.visit(other_code_arg)
+            
+            # Implementation of terminology subsumption testing
+            # This is a basic implementation - full subsumption would require terminology service
+            return f"""
+            CASE 
+                -- Both inputs must be Coding objects or CodeableConcept with coding
+                WHEN {base_expr} IS NULL OR {other_code_sql} IS NULL THEN NULL
+                
+                -- Handle base CodeableConcept (extract first coding)
+                WHEN {self.dialect.json_extract_function}({base_expr}, '$.coding') IS NOT NULL AND
+                     {self.dialect.json_type_function}({self.dialect.json_extract_function}({base_expr}, '$.coding')) = 'ARRAY' AND
+                     {self.dialect.json_array_length_function}({self.dialect.json_extract_function}({base_expr}, '$.coding')) > 0
+                THEN
+                    -- Extract first coding from base CodeableConcept
+                    CASE 
+                        WHEN {self.dialect.json_extract_function}({other_code_sql}, '$.coding') IS NOT NULL AND
+                             {self.dialect.json_type_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding')) = 'ARRAY' AND
+                             {self.dialect.json_array_length_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding')) > 0
+                        THEN
+                            -- Both are CodeableConcept - compare first codings
+                            CASE 
+                                WHEN {self.dialect.json_extract_function}({self.dialect.json_extract_function}({base_expr}, '$.coding'), '$[0].system') = 
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding'), '$[0].system') AND
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({base_expr}, '$.coding'), '$[0].code') = 
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding'), '$[0].code')
+                                THEN true  -- Same code subsumes itself
+                                -- TODO: Add real subsumption logic with terminology service
+                                ELSE false
+                            END
+                        ELSE false
+                    END
+                
+                -- Handle base Coding object directly  
+                WHEN {self.dialect.json_extract_function}({base_expr}, '$.system') IS NOT NULL AND
+                     {self.dialect.json_extract_function}({base_expr}, '$.code') IS NOT NULL
+                THEN
+                    CASE 
+                        -- Other is also a Coding object
+                        WHEN {self.dialect.json_extract_function}({other_code_sql}, '$.system') IS NOT NULL AND
+                             {self.dialect.json_extract_function}({other_code_sql}, '$.code') IS NOT NULL
+                        THEN
+                            CASE 
+                                WHEN {self.dialect.json_extract_function}({base_expr}, '$.system') = 
+                                     {self.dialect.json_extract_function}({other_code_sql}, '$.system') AND
+                                     {self.dialect.json_extract_function}({base_expr}, '$.code') = 
+                                     {self.dialect.json_extract_function}({other_code_sql}, '$.code')
+                                THEN true  -- Same code subsumes itself
+                                -- TODO: Add real subsumption logic with terminology service
+                                ELSE false
+                            END
+                        -- Other is CodeableConcept
+                        WHEN {self.dialect.json_extract_function}({other_code_sql}, '$.coding') IS NOT NULL AND
+                             {self.dialect.json_type_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding')) = 'ARRAY' AND
+                             {self.dialect.json_array_length_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding')) > 0
+                        THEN
+                            CASE 
+                                WHEN {self.dialect.json_extract_function}({base_expr}, '$.system') = 
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding'), '$[0].system') AND
+                                     {self.dialect.json_extract_function}({base_expr}, '$.code') = 
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding'), '$[0].code')
+                                THEN true  -- Same code subsumes itself
+                                -- TODO: Add real subsumption logic with terminology service
+                                ELSE false
+                            END
+                        ELSE false
+                    END
+                
+                ELSE false
+            END
+            """
+        
+        elif func_name == 'subsumedby':
+            # subsumedBy(code) - tests if input code is subsumed by (is child/descendant of) parameter code
+            if len(func_node.args) != 1:
+                raise ValueError("subsumedBy() function takes exactly one argument")
+            
+            # Get the code to check subsumption against
+            other_code_arg = func_node.args[0]
+            other_code_sql = self.visit(other_code_arg)
+            
+            # Implementation of terminology subsumption testing (reverse of subsumes)
+            # This is a basic implementation - full subsumption would require terminology service
+            return f"""
+            CASE 
+                -- Both inputs must be Coding objects or CodeableConcept with coding
+                WHEN {base_expr} IS NULL OR {other_code_sql} IS NULL THEN NULL
+                
+                -- Handle base CodeableConcept (extract first coding)
+                WHEN {self.dialect.json_extract_function}({base_expr}, '$.coding') IS NOT NULL AND
+                     {self.dialect.json_type_function}({self.dialect.json_extract_function}({base_expr}, '$.coding')) = 'ARRAY' AND
+                     {self.dialect.json_array_length_function}({self.dialect.json_extract_function}({base_expr}, '$.coding')) > 0
+                THEN
+                    -- Extract first coding from base CodeableConcept
+                    CASE 
+                        WHEN {self.dialect.json_extract_function}({other_code_sql}, '$.coding') IS NOT NULL AND
+                             {self.dialect.json_type_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding')) = 'ARRAY' AND
+                             {self.dialect.json_array_length_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding')) > 0
+                        THEN
+                            -- Both are CodeableConcept - compare first codings (reverse logic)
+                            CASE 
+                                WHEN {self.dialect.json_extract_function}({self.dialect.json_extract_function}({base_expr}, '$.coding'), '$[0].system') = 
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding'), '$[0].system') AND
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({base_expr}, '$.coding'), '$[0].code') = 
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding'), '$[0].code')
+                                THEN true  -- Same code is subsumed by itself
+                                -- TODO: Add real subsumption logic with terminology service
+                                ELSE false
+                            END
+                        ELSE false
+                    END
+                
+                -- Handle base Coding object directly  
+                WHEN {self.dialect.json_extract_function}({base_expr}, '$.system') IS NOT NULL AND
+                     {self.dialect.json_extract_function}({base_expr}, '$.code') IS NOT NULL
+                THEN
+                    CASE 
+                        -- Other is also a Coding object
+                        WHEN {self.dialect.json_extract_function}({other_code_sql}, '$.system') IS NOT NULL AND
+                             {self.dialect.json_extract_function}({other_code_sql}, '$.code') IS NOT NULL
+                        THEN
+                            CASE 
+                                WHEN {self.dialect.json_extract_function}({base_expr}, '$.system') = 
+                                     {self.dialect.json_extract_function}({other_code_sql}, '$.system') AND
+                                     {self.dialect.json_extract_function}({base_expr}, '$.code') = 
+                                     {self.dialect.json_extract_function}({other_code_sql}, '$.code')
+                                THEN true  -- Same code is subsumed by itself
+                                -- TODO: Add real subsumption logic with terminology service
+                                ELSE false
+                            END
+                        -- Other is CodeableConcept
+                        WHEN {self.dialect.json_extract_function}({other_code_sql}, '$.coding') IS NOT NULL AND
+                             {self.dialect.json_type_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding')) = 'ARRAY' AND
+                             {self.dialect.json_array_length_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding')) > 0
+                        THEN
+                            CASE 
+                                WHEN {self.dialect.json_extract_function}({base_expr}, '$.system') = 
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding'), '$[0].system') AND
+                                     {self.dialect.json_extract_function}({base_expr}, '$.code') = 
+                                     {self.dialect.json_extract_function}({self.dialect.json_extract_function}({other_code_sql}, '$.coding'), '$[0].code')
+                                THEN true  -- Same code is subsumed by itself
+                                -- TODO: Add real subsumption logic with terminology service
+                                ELSE false
+                            END
+                        ELSE false
+                    END
+                
+                ELSE false
+            END
+            """
+        
+        elif func_name == 'comparable':
+            # comparable(quantity) - tests if two quantities are comparable (have compatible units)
+            if len(func_node.args) != 1:
+                raise ValueError("comparable() function takes exactly one argument")
+            
+            # Get the quantity to compare against
+            other_quantity_arg = func_node.args[0]
+            other_quantity_sql = self.visit(other_quantity_arg)
+            
+            # Implementation of quantity comparison testing
+            # This is a basic implementation - full comparison would require UCUM service
+            return f"""
+            CASE 
+                -- Both inputs must be Quantity objects
+                WHEN {base_expr} IS NULL OR {other_quantity_sql} IS NULL THEN NULL
+                
+                -- Handle base Quantity object
+                WHEN {self.dialect.json_extract_function}({base_expr}, '$.value') IS NOT NULL AND
+                     {self.dialect.json_extract_function}({base_expr}, '$.unit') IS NOT NULL
+                THEN
+                    CASE 
+                        -- Other is also a Quantity object
+                        WHEN {self.dialect.json_extract_function}({other_quantity_sql}, '$.value') IS NOT NULL AND
+                             {self.dialect.json_extract_function}({other_quantity_sql}, '$.unit') IS NOT NULL
+                        THEN
+                            CASE 
+                                -- Same unit is always comparable
+                                WHEN {self.dialect.json_extract_function}({base_expr}, '$.unit') = 
+                                     {self.dialect.json_extract_function}({other_quantity_sql}, '$.unit')
+                                THEN true
+                                -- Same system is generally comparable
+                                WHEN {self.dialect.json_extract_function}({base_expr}, '$.system') = 
+                                     {self.dialect.json_extract_function}({other_quantity_sql}, '$.system')
+                                THEN true
+                                -- Basic unit compatibility checks (simplified)
+                                WHEN ({self.dialect.json_extract_function}({base_expr}, '$.unit') IN ('kg', 'g', 'mg', 'lb', 'oz') AND
+                                      {self.dialect.json_extract_function}({other_quantity_sql}, '$.unit') IN ('kg', 'g', 'mg', 'lb', 'oz'))
+                                THEN true  -- Mass units
+                                WHEN ({self.dialect.json_extract_function}({base_expr}, '$.unit') IN ('m', 'cm', 'mm', 'km', 'in', 'ft') AND
+                                      {self.dialect.json_extract_function}({other_quantity_sql}, '$.unit') IN ('m', 'cm', 'mm', 'km', 'in', 'ft'))
+                                THEN true  -- Length units
+                                WHEN ({self.dialect.json_extract_function}({base_expr}, '$.unit') IN ('s', 'min', 'h', 'd', 'wk', 'mo', 'a') AND
+                                      {self.dialect.json_extract_function}({other_quantity_sql}, '$.unit') IN ('s', 'min', 'h', 'd', 'wk', 'mo', 'a'))
+                                THEN true  -- Time units
+                                WHEN ({self.dialect.json_extract_function}({base_expr}, '$.unit') IN ('L', 'mL', 'dL', 'cL') AND
+                                      {self.dialect.json_extract_function}({other_quantity_sql}, '$.unit') IN ('L', 'mL', 'dL', 'cL'))
+                                THEN true  -- Volume units
+                                -- TODO: Add full UCUM compatibility logic
+                                ELSE false
+                            END
+                        ELSE false
+                    END
+                
+                ELSE false
+            END
+            """
+        
+        elif func_name == 'elementdefinition':
+            # elementDefinition() - get element definition from structure definition
+            if len(func_node.args) != 0:
+                raise ValueError("elementDefinition() function takes no arguments")
+            
+            # Implementation of element definition retrieval
+            # This is a basic implementation - full implementation would require StructureDefinition processing
+            return f"""
+            CASE 
+                -- Check if input is a valid FHIR element
+                WHEN {base_expr} IS NULL THEN NULL
+                
+                -- TODO: Full StructureDefinition processing would be implemented here
+                -- For now, return a basic placeholder structure
+                ELSE {self.dialect.json_object_function}(
+                    'path', 'placeholder',
+                    'type', {self.dialect.json_array_function}(
+                        {self.dialect.json_object_function}('code', 'Element')
+                    ),
+                    'definition', 'Basic element definition placeholder',
+                    'min', 0,
+                    'max', '1'
+                )
+            END
+            """
+        
+        elif func_name == 'slice':
+            # slice(structure, name) - access specific slices in profiles
+            if len(func_node.args) != 2:
+                raise ValueError("slice() function takes exactly two arguments")
+            
+            # Get the structure and name arguments
+            structure_arg = func_node.args[0]
+            name_arg = func_node.args[1]
+            structure_sql = self.visit(structure_arg)
+            name_sql = self.visit(name_arg)
+            
+            # Implementation of slice access
+            # This is a basic implementation - full implementation would require profile processing
+            return f"""
+            CASE 
+                -- Check if inputs are valid
+                WHEN {base_expr} IS NULL OR {structure_sql} IS NULL OR {name_sql} IS NULL THEN NULL
+                
+                -- TODO: Full profile slicing would be implemented here
+                -- For now, return a basic placeholder
+                ELSE {self.dialect.json_object_function}(
+                    'sliceName', {name_sql},
+                    'structure', {structure_sql},
+                    'elements', {self.dialect.json_array_function}()
+                )
+            END
+            """
+        
+        elif func_name == 'checkmodifiers':
+            # checkModifiers(modifier) - check modifier extensions
+            if len(func_node.args) != 1:
+                raise ValueError("checkModifiers() function takes exactly one argument")
+            
+            # Get the modifier argument
+            modifier_arg = func_node.args[0]
+            modifier_sql = self.visit(modifier_arg)
+            
+            # Implementation of modifier extension checking
+            # This is a basic implementation - full implementation would require extension processing
+            return f"""
+            CASE 
+                -- Check if inputs are valid
+                WHEN {base_expr} IS NULL OR {modifier_sql} IS NULL THEN NULL
+                
+                -- Check if modifierExtension array exists and contains the specified modifier
+                WHEN {self.dialect.json_extract_function}({base_expr}, '$.modifierExtension') IS NOT NULL
+                THEN
+                    CASE 
+                        WHEN {self.dialect.json_type_function}({self.dialect.json_extract_function}({base_expr}, '$.modifierExtension')) = 'ARRAY'
+                        THEN
+                            (
+                                SELECT 
+                                    CASE 
+                                        WHEN COUNT(*) > 0 THEN true
+                                        ELSE false
+                                    END
+                                FROM {self.dialect.json_each_function}({self.dialect.json_extract_function}({base_expr}, '$.modifierExtension'))
+                                WHERE {self.dialect.json_extract_function}('value', '$.url') = {modifier_sql}
+                            )
+                        ELSE false
+                    END
+                
+                ELSE false
+            END
+            """
+        
+        else:
+            # For functions not implemented in fallback, raise an error
+            raise ValueError(f"Function '{func_name}' is not implemented in direct fallback handler")
     

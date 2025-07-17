@@ -191,6 +191,10 @@ class DuckDBDialect(DatabaseDialect):
         """Aggregate values into a JSON array using DuckDB's json_group_array"""
         return f"json_group_array({expression})"
     
+    def json_array_agg_function(self, expression: str) -> str:
+        """JSON array aggregation function alias - same as aggregate_to_json_array"""
+        return f"json_group_array({expression})"
+    
     def coalesce_empty_array(self, expression: str) -> str:
         """COALESCE with empty array using DuckDB syntax"""
         return f"COALESCE({expression}, json_array())"
@@ -404,8 +408,17 @@ class DuckDBDialect(DatabaseDialect):
             ELSE json_extract({json_base}, '$.{identifier_name}') 
             END"""
         
+        # Handle missing properties by explicitly checking each array element
         return f"""CASE WHEN json_type(json_extract({json_base}, '{current_path}')) = 'ARRAY' 
-        THEN json_extract({json_base}, '{current_path}[*].{identifier_name}') 
+        THEN (
+            SELECT to_json(list(
+                CASE 
+                    WHEN json_extract(value, '$.{identifier_name}') IS NULL THEN NULL
+                    ELSE json_extract(value, '$.{identifier_name}')
+                END
+            ))
+            FROM json_each(json_extract({json_base}, '{current_path}'))
+        )
         ELSE json_extract({json_base}, '{new_path}') 
         END"""
     
@@ -464,3 +477,67 @@ class DuckDBDialect(DatabaseDialect):
     def base64_decode(self, expression: str) -> str:
         """Base64 decode string using DuckDB's from_base64 function"""
         return f"from_base64(CAST({expression} AS VARCHAR))"
+    
+    # Array manipulation functions for collection operations
+    def array_concat_function(self, array1: str, array2: str) -> str:
+        """Concatenate two JSON arrays or single values into a single JSON array."""
+        return f"""
+        to_json(list_concat(
+            CASE 
+                WHEN json_type({array1}) = 'ARRAY' THEN json_extract({array1}, '$[*]')
+                ELSE [{array1}]
+            END,
+            CASE 
+                WHEN json_type({array2}) = 'ARRAY' THEN json_extract({array2}, '$[*]')
+                ELSE [{array2}]
+            END
+        ))
+        """
+    
+    def array_slice_function(self, array: str, start_index: str, end_index: str) -> str:
+        """Slice a JSON array from start_index to end_index (1-based indexing)."""
+        return f"to_json(array_slice(json_extract({array}, '$[*]'), {start_index}, {end_index}))"
+    
+    def array_distinct_function(self, array: str) -> str:
+        """Remove duplicates from a JSON array."""
+        return f"to_json(list_distinct(json_extract({array}, '$[*]')))"
+    
+    def array_union_function(self, array1: str, array2: str) -> str:
+        """Union two JSON arrays or single values into a single JSON array (remove duplicates, preserve order)."""
+        # Use a more complex approach to preserve order while removing duplicates
+        # This manually concatenates and removes duplicates while preserving the order of first occurrence
+        return f"""
+        (
+            WITH 
+            arr1 AS (
+                SELECT unnest(
+                    CASE 
+                        WHEN json_type({array1}) = 'ARRAY' THEN json_extract({array1}, '$[*]')
+                        ELSE [{array1}]
+                    END
+                ) as value, 1 as source_order, ROW_NUMBER() OVER () as item_order
+            ),
+            arr2 AS (
+                SELECT unnest(
+                    CASE 
+                        WHEN json_type({array2}) = 'ARRAY' THEN json_extract({array2}, '$[*]')
+                        ELSE [{array2}]
+                    END
+                ) as value, 2 as source_order, ROW_NUMBER() OVER () as item_order
+            ),
+            combined AS (
+                SELECT value, source_order, item_order FROM arr1
+                UNION ALL
+                SELECT value, source_order, item_order FROM arr2
+            ),
+            distinct_ordered AS (
+                SELECT value, MIN(source_order) as first_source, MIN(
+                    CASE WHEN source_order = 1 THEN item_order ELSE 999999 + item_order END
+                ) as first_occurrence
+                FROM combined
+                GROUP BY value
+            )
+            SELECT to_json(list(value ORDER BY first_occurrence))
+            FROM distinct_ordered
+        )
+        """
