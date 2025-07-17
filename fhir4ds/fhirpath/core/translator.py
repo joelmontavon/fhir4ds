@@ -161,7 +161,8 @@ class FHIRPathToSQL:
             if master_generator.ctes:
                 final_query = master_generator._build_final_query_with_ctes(select_statement)
             else:
-                final_query = select_statement
+                # Even when there are no CTEs, we need to resolve optimized placeholders
+                final_query = master_generator._resolve_optimized_placeholders(select_statement)
             
         final_query += ";"
         return final_query
@@ -231,10 +232,13 @@ class FHIRPathToSQL:
                 # Generate the SQL expression (without CTEs)
                 expression_sql = generator.visit(ast)
                 
-                # Check for potential date parsing issues
-                self._check_for_date_parsing_issues(fhirpath_expression, expression_sql)
+                # Resolve any optimized placeholders that were created during generation
+                resolved_sql = generator._resolve_optimized_placeholders(expression_sql)
                 
-                return expression_sql
+                # Check for potential date parsing issues
+                self._check_for_date_parsing_issues(fhirpath_expression, resolved_sql)
+                
+                return resolved_sql
                 
             finally:
                 # Restore original CTE flag

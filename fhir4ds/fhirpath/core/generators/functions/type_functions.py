@@ -26,8 +26,9 @@ class TypeFunctionHandler:
         """Check if this handler can process the given function."""
         type_functions = {
             'toboolean', 'tostring', 'tointeger', 'todecimal', 'todate', 
-            'todatetime', 'totime', 'convertstoboolean', 'convertstodecimal',
-            'convertstointeger', 'convertstodate', 'convertstodatetime', 'convertstotime'
+            'todatetime', 'totime', 'toquantity', 'convertstoboolean', 'convertstodecimal',
+            'convertstointeger', 'convertstodate', 'convertstodatetime', 'convertstotime',
+            'convertsto'
         }
         return function_name.lower() in type_functions
     
@@ -59,6 +60,8 @@ class TypeFunctionHandler:
             return self._handle_todatetime(base_expr, func_node)
         elif func_name == 'totime':
             return self._handle_totime(base_expr, func_node)
+        elif func_name == 'toquantity':
+            return self._handle_toquantity(base_expr, func_node)
         elif func_name == 'convertstoboolean':
             return self._handle_convertstoboolean(base_expr, func_node)
         elif func_name == 'convertstodecimal':
@@ -71,6 +74,8 @@ class TypeFunctionHandler:
             return self._handle_convertstodatetime(base_expr, func_node)
         elif func_name == 'convertstotime':
             return self._handle_convertstotime(base_expr, func_node)
+        elif func_name == 'convertsto':
+            return self._handle_convertsto(base_expr, func_node)
         else:
             raise ValueError(f"Unsupported type conversion function: {func_name}")
     
@@ -624,3 +629,175 @@ class TypeFunctionHandler:
                 END
         END
         """
+    
+    def _handle_toquantity(self, base_expr: str, func_node) -> str:
+        """
+        Handle toQuantity() function - converts input to FHIR Quantity type.
+        
+        Args:
+            base_expr: SQL expression for the input value
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that converts input to Quantity
+        """
+        # Validate no arguments
+        if hasattr(func_node, 'args') and func_node.args:
+            raise ValueError("toQuantity() function takes no arguments")
+        
+        # Generate quantity conversion logic based on FHIR specification
+        if self.dialect.name == "POSTGRESQL":
+            return f"""
+            CASE 
+                -- Already a FHIR Quantity object (has both value and unit)
+                WHEN {base_expr} IS NOT NULL AND 
+                     jsonb_typeof({base_expr}) = 'object' AND
+                     ({base_expr} ? 'value') AND 
+                     ({base_expr} ? 'unit') THEN
+                    {base_expr}
+                
+                -- Simple numeric value  
+                WHEN {base_expr} IS NOT NULL AND jsonb_typeof({base_expr}) = 'number' THEN
+                    jsonb_build_object(
+                        'value', ({base_expr})::decimal,
+                        'system', 'http://unitsofmeasure.org',
+                        'code', '1',
+                        'unit', '1'
+                    )
+                
+                -- String with basic numeric parsing
+                WHEN {base_expr} IS NOT NULL AND 
+                     jsonb_typeof({base_expr}) = 'string' AND 
+                     ({base_expr}#>>'{{}}')::text ~ '^[0-9]+\\.?[0-9]*$' THEN
+                    jsonb_build_object(
+                        'value', (({base_expr}#>>'{{}}')::text)::decimal,
+                        'system', 'http://unitsofmeasure.org', 
+                        'code', '1',
+                        'unit', '1'
+                    )
+                
+                ELSE NULL
+            END
+            """
+        else:  # DuckDB
+            return f"""
+            CASE 
+                -- Already a FHIR Quantity object (has both value and unit)
+                WHEN {base_expr} IS NOT NULL AND 
+                     json_type({base_expr}) = 'OBJECT' AND
+                     json_extract({base_expr}, '$.value') IS NOT NULL AND 
+                     json_extract({base_expr}, '$.unit') IS NOT NULL THEN
+                    {base_expr}
+                
+                -- Simple numeric value
+                WHEN {base_expr} IS NOT NULL AND json_type({base_expr}) = 'NUMBER' THEN
+                    json_object(
+                        'value', CAST({base_expr} AS DECIMAL),
+                        'system', 'http://unitsofmeasure.org',
+                        'code', '1', 
+                        'unit', '1'
+                    )
+                
+                -- String with numeric parsing
+                WHEN {base_expr} IS NOT NULL AND 
+                     json_type({base_expr}) = 'STRING' AND 
+                     regexp_matches(json_extract_string({base_expr}, '$'), '^[0-9]+\\.?[0-9]*$') THEN
+                    json_object(
+                        'value', CAST(json_extract_string({base_expr}, '$') AS DECIMAL),
+                        'system', 'http://unitsofmeasure.org',
+                        'code', '1',
+                        'unit', '1'
+                    )
+                
+                ELSE NULL
+            END
+            """
+    
+    def _handle_convertsto(self, base_expr: str, func_node) -> str:
+        """
+        Handle convertsTo() function - generic type conversion checker.
+        
+        Args:
+            base_expr: SQL expression for the input value
+            func_node: AST node for the function call
+            
+        Returns:
+            SQL expression that tests if input can be converted to specified type
+        """
+        # convertsTo() takes exactly one argument (the type name)
+        if len(func_node.args) != 1:
+            raise ValueError(f"convertsTo() requires exactly one argument, got {len(func_node.args)}")
+        
+        # Get the type argument
+        type_arg = func_node.args[0]
+        
+        # The type should be a literal string
+        if hasattr(type_arg, 'value'):
+            target_type = type_arg.value.lower()
+        else:
+            raise ValueError("convertsTo() type argument must be a literal string")
+        
+        # Create a mock func_node with no args for specific convertsTo* functions
+        class MockFuncNode:
+            args = []
+        
+        mock_func_node = MockFuncNode()
+        
+        # Delegate to specific convertsTo* functions based on type
+        if target_type == 'boolean':
+            return self._handle_convertstoboolean(base_expr, mock_func_node)
+        elif target_type == 'integer':
+            return self._handle_convertstointeger(base_expr, mock_func_node)
+        elif target_type == 'decimal':
+            return self._handle_convertstodecimal(base_expr, mock_func_node)
+        elif target_type == 'date':
+            return self._handle_convertstodate(base_expr, mock_func_node)
+        elif target_type == 'datetime':
+            return self._handle_convertstodatetime(base_expr, mock_func_node)
+        elif target_type == 'time':
+            return self._handle_convertstotime(base_expr, mock_func_node)
+        elif target_type == 'string':
+            # Everything can be converted to string
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN false
+                ELSE true
+            END
+            """
+        elif target_type == 'quantity':
+            # Basic quantity conversion check
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN false
+                WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN
+                    CASE 
+                        WHEN {self.generator.get_json_array_length(base_expr)} = 0 THEN false
+                        ELSE (
+                            SELECT 
+                                CASE 
+                                    WHEN {self.generator.get_json_type('value')} = 'NUMBER' THEN true
+                                    WHEN {self.generator.get_json_type('value')} = 'STRING' AND 
+                                         CAST(value AS VARCHAR) REGEXP '^[0-9]+\\.?[0-9]*$' THEN true
+                                    ELSE false
+                                END
+                            FROM {self.generator.iterate_json_array(base_expr, '$')}
+                            LIMIT 1
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN {self.generator.get_json_type(base_expr)} = 'NUMBER' THEN true
+                        WHEN {self.generator.get_json_type(base_expr)} = 'STRING' AND 
+                             CAST({base_expr} AS VARCHAR) REGEXP '^[0-9]+\\.?[0-9]*$' THEN true
+                        ELSE false
+                    END
+            END
+            """
+        else:
+            # For unknown types, return false
+            return f"""
+            CASE 
+                WHEN {base_expr} IS NULL THEN false
+                ELSE false
+            END
+            """

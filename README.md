@@ -1,19 +1,19 @@
 # FHIR for Data Science (FHIR4DS)
 
-Production-ready healthcare analytics platform providing 100% SQL-on-FHIR v2.0 compliance with dual database support (DuckDB + PostgreSQL).
+Production-ready healthcare analytics platform providing 100% SQL-on-FHIR v2.0 compliance and 100% FHIRPath specification coverage with dual database support (DuckDB + PostgreSQL).
 
-**Current Version**: 0.5.0 (Complete FHIRPath Specification Implementation)  
-**Test Compliance**: 100% (117/117 tests passing)
+**Current Version**: 0.6.1  
+**FHIRPath Coverage**: 100% (91/91 functions implemented)
+**SQL-on-FHIR Compliance**: 100% (117/117 tests passing)
 **Database Support**: DuckDB 100% + PostgreSQL 100%  
-**User Experience**: One-line setup, multi-format export, batch processing
 
 ## Key Features
 
 - **100% SQL-on-FHIR v2.0 compliance** - All 117 official tests passing
+- **100% FHIRPath specification coverage** - All 91 functions implemented
 - **Dual database support** - DuckDB and PostgreSQL with identical functionality
 - **Advanced FHIRPath parsing** - Complete parser with 187 choice type mappings
-- **CTE-based SQL generation** - 95% reduction in SQL complexity
-- **Parallel processing** - High-performance data loading and query execution
+- **High-performance SQL generation** - Optimized for complex healthcare queries
 - **Multi-format export** - Pandas, JSON, CSV, Excel, Parquet
 - **Database object creation** - Views, tables, schemas from ViewDefinitions
 

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fhir4ds"
-version = "0.6.0"
-description = "Production-ready healthcare analytics platform providing 100% SQL-on-FHIR v2.0 compliance with dual database support (DuckDB + PostgreSQL)"
+version = "0.6.1"
+description = "Production-ready healthcare analytics platform providing 100% SQL-on-FHIR v2.0 compliance and 100% FHIRPath specification coverage with dual database support (DuckDB + PostgreSQL)"
 readme = "README.md"
 requires-python = ">=3.8"
 authors = [

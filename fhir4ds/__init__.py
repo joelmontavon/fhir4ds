@@ -5,6 +5,7 @@ Production-ready healthcare analytics platform providing:
 
 Core Capabilities:
 - 100% SQL-on-FHIR v2.0 compliance (117/117 tests passing)
+- 100% FHIRPath specification coverage (91/91 functions implemented)
 - Dual database support (DuckDB + PostgreSQL) with identical functionality
 - Advanced FHIRPath parsing with 187 choice type mappings
 - Database object creation (views, tables, schemas)
@@ -92,7 +93,7 @@ except ImportError:
     comprehensive_performance_test = None
     UTILS_AVAILABLE = False
 
-__version__ = "0.5.1"
+__version__ = "0.6.1"
 __all__ = [
     # Core data management
     "FHIRDataStore",

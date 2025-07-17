@@ -298,7 +298,12 @@ class TestResultFormatterIntegration:
             # Step 4: Test JSON export structure
             with tempfile.TemporaryDirectory() as temp_dir:
                 json_path = os.path.join(temp_dir, "query_result.json")
-                json_data = ResultFormatter.to_json(result, json_path)
+                # Save to file (returns None)
+                ResultFormatter.to_json(result, json_path)
+                assert_file_exists_and_not_empty(json_path)
+                
+                # Get JSON as string (no output_path)
+                json_data = ResultFormatter.to_json(result)
                 
                 # Parse JSON to validate structure
                 import json

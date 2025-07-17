@@ -177,14 +177,19 @@ class PostgreSQLDialect(DatabaseDialect):
             
             # Handle complex paths
             if '[' in field_path or '.' in field_path:
-                # Use jsonb_path_query for complex paths
-                return f"jsonb_path_query({column}, '{path}')"
+                # For array element access like $[0], use jsonb_path_query_first to avoid set-returning function issues
+                if field_path.startswith('[') and field_path.endswith(']'):
+                    # Direct array element access: $[0] -> jsonb_path_query_first
+                    return f"jsonb_path_query_first({column}, '{path}')"
+                else:
+                    # Use jsonb_path_query for complex paths
+                    return f"jsonb_path_query({column}, '{path}')"
             else:
                 # Simple field: $.telecom -> column -> 'telecom'
                 return f"{column} -> '{field_path}'"
         else:
-            # Complex JSONPath
-            return f"jsonb_path_query({column}, '{path}')"
+            # Complex JSONPath - use jsonb_path_query_first for single result expectations
+            return f"jsonb_path_query_first({column}, '{path}')"
     
     def iterate_json_array(self, column: str, path: str) -> str:
         """Iterate over JSON array elements using PostgreSQL JSONB functions"""
@@ -240,6 +245,10 @@ class PostgreSQLDialect(DatabaseDialect):
     
     def aggregate_to_json_array(self, expression: str) -> str:
         """Aggregate values into a JSON array using PostgreSQL's jsonb_agg"""
+        return f"jsonb_agg({expression})"
+    
+    def json_array_agg_function(self, expression: str) -> str:
+        """JSON array aggregation function alias - same as aggregate_to_json_array"""
         return f"jsonb_agg({expression})"
     
     def coalesce_empty_array(self, expression: str) -> str:
@@ -383,3 +392,83 @@ class PostgreSQLDialect(DatabaseDialect):
             expensive_count >= 2 or          # Multiple expensive operations
             'jsonb_agg' in cte_expr          # Always materialize aggregations
         )
+    
+    def iterate_json_elements_for_arrays(self, column: str) -> str:
+        """
+        Iterate over JSON array elements using jsonb_array_elements with ordinality.
+        This is specifically for arrays and provides proper key/value iteration.
+        """
+        return f"jsonb_array_elements({column}) WITH ORDINALITY AS t(value, key)"
+    
+    def json_each_safe(self, column: str) -> str:
+        """
+        Safe version of json_each that handles both arrays and objects.
+        For arrays, uses jsonb_array_elements with ordinality to provide key/value pairs.
+        For objects, uses jsonb_each directly.
+        """
+        return f"""
+        CASE 
+            WHEN jsonb_typeof({column}) = 'array' THEN (
+                SELECT (key-1)::text as key, value 
+                FROM jsonb_array_elements({column}) WITH ORDINALITY AS t(value, key)
+            )
+            ELSE (
+                SELECT key, value 
+                FROM jsonb_each({column})
+            )
+        END
+        """
+    
+    # Array manipulation functions for collection operations
+    def array_concat_function(self, array1: str, array2: str) -> str:
+        """Concatenate two JSON arrays into a single JSON array."""
+        return f"(({array1})::jsonb || ({array2})::jsonb)"
+    
+    def array_slice_function(self, array: str, start_index: str, end_index: str) -> str:
+        """Slice a JSON array from start_index to end_index (1-based indexing)."""
+        # PostgreSQL jsonb array slicing with proper null handling
+        return f"""
+        CASE 
+            WHEN ({array})::jsonb IS NULL OR jsonb_typeof(({array})::jsonb) != 'array' THEN NULL
+            WHEN jsonb_array_length(({array})::jsonb) = 0 THEN '[]'::jsonb
+            ELSE (
+                SELECT COALESCE(jsonb_agg(value), '[]'::jsonb)
+                FROM (
+                    SELECT value, row_number() OVER () as rn
+                    FROM jsonb_array_elements(({array})::jsonb) as value
+                ) indexed_array 
+                WHERE rn >= ({start_index}) AND rn <= ({end_index})
+            )
+        END
+        """
+    
+    def array_distinct_function(self, array: str) -> str:
+        """Remove duplicates from a JSON array."""
+        return f"""
+        CASE 
+            WHEN ({array})::jsonb IS NULL OR jsonb_typeof(({array})::jsonb) != 'array' THEN NULL
+            WHEN jsonb_array_length(({array})::jsonb) = 0 THEN '[]'::jsonb
+            ELSE (
+                SELECT COALESCE(jsonb_agg(DISTINCT value ORDER BY value), '[]'::jsonb)
+                FROM jsonb_array_elements(({array})::jsonb) as value
+            )
+        END
+        """
+    
+    def array_union_function(self, array1: str, array2: str) -> str:
+        """Union two JSON arrays (concatenate and remove duplicates)."""
+        return f"""
+        CASE 
+            WHEN ({array1})::jsonb IS NULL AND ({array2})::jsonb IS NULL THEN NULL
+            WHEN ({array1})::jsonb IS NULL THEN ({array2})::jsonb
+            WHEN ({array2})::jsonb IS NULL THEN ({array1})::jsonb
+            ELSE (
+                SELECT COALESCE(jsonb_agg(DISTINCT value ORDER BY value), '[]'::jsonb)
+                FROM (
+                    SELECT value FROM jsonb_array_elements(({array1})::jsonb) as value
+                    UNION 
+                    SELECT value FROM jsonb_array_elements(({array2})::jsonb) as value
+                ) combined
+            )
+        END
+        """
