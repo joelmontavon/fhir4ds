@@ -43,6 +43,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 import json
 import statistics
+from ..utils.logging_config import get_logger
 
 # Optional imports for advanced profiling
 try:
@@ -58,7 +59,7 @@ try:
 except ImportError:
     CPROFILE_AVAILABLE = False
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass

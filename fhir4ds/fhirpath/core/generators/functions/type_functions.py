@@ -7,21 +7,107 @@ convertsToInteger, convertsToDate, convertsToDateTime, convertsToTime.
 """
 
 from typing import List, Any, Optional
+from ..base_handler import BaseFunctionHandler
 
 
-class TypeFunctionHandler:
+class TypeFunctionHandler(BaseFunctionHandler):
     """Handles type conversion function processing for FHIRPath to SQL conversion."""
     
-    def __init__(self, generator):
+    def __init__(self, generator, cte_builder=None):
         """
         Initialize the type function handler.
         
         Args:
             generator: Reference to main SQLGenerator for complex operations
+            cte_builder: Optional CTEBuilder instance for CTE management
         """
+        super().__init__(generator, cte_builder)
         self.generator = generator
         self.dialect = generator.dialect
+    
+    def _generate_boolean_conversion_logic(self, value_expr: str, is_conversion: bool = True) -> str:
+        """
+        Generate shared boolean conversion logic.
         
+        Args:
+            value_expr: SQL expression for the value to convert/test
+            is_conversion: If True, return boolean values; if False, return test results
+            
+        Returns:
+            SQL CASE statement for boolean conversion/testing
+        """
+        if is_conversion:
+            # For toBoolean() - convert to actual boolean values
+            return f"""
+            CASE 
+                -- String 'true'/'false' case
+                WHEN LOWER(CAST({value_expr} AS VARCHAR)) = 'true' THEN true
+                WHEN LOWER(CAST({value_expr} AS VARCHAR)) = 'false' THEN false
+                -- Numeric 0/1 case 
+                WHEN CAST({value_expr} AS DOUBLE) = 1.0 THEN true
+                WHEN CAST({value_expr} AS DOUBLE) = 0.0 THEN false
+                ELSE NULL
+            END
+            """
+        else:
+            # For convertsToBoolean() - test if value can be converted
+            return f"""
+            CASE 
+                -- String 'true'/'false' case
+                WHEN LOWER(CAST({value_expr} AS VARCHAR)) IN ('true', 'false') THEN true
+                -- Numeric 0/1 case 
+                WHEN CAST({value_expr} AS DOUBLE) IN (1.0, 0.0) THEN true
+                ELSE false
+            END
+            """
+    
+    def _generate_boolean_array_logic(self, base_expr: str, is_conversion: bool = True) -> str:
+        """
+        Generate boolean logic for array values.
+        
+        Args:
+            base_expr: SQL expression for the array
+            is_conversion: If True, return boolean values; if False, return test results
+            
+        Returns:
+            SQL expression for handling boolean arrays
+        """
+        empty_return = "NULL" if is_conversion else "false"
+        
+        return f"""
+        CASE 
+            WHEN {self.generator.get_json_array_length(base_expr)} = 0 THEN {empty_return}
+            ELSE (
+                SELECT 
+                    {self._generate_boolean_conversion_logic('value', is_conversion)}
+                FROM {self.generator.iterate_json_array(base_expr, '$')}
+                LIMIT 1
+            )
+        END
+        """
+    
+    def _generate_boolean_single_logic(self, base_expr: str, is_conversion: bool = True) -> str:
+        """
+        Generate boolean logic for single values.
+        
+        Args:
+            base_expr: SQL expression for the single value
+            is_conversion: If True, return boolean values; if False, return test results
+            
+        Returns:
+            SQL expression for handling single boolean values
+        """
+        return self._generate_boolean_conversion_logic(base_expr, is_conversion)
+        
+    def get_supported_functions(self) -> List[str]:
+        """Return list of type function names this handler supports."""
+        return [
+            'toboolean', 'tostring', 'tointeger', 'todecimal', 'todate', 
+            'todatetime', 'totime', 'toquantity', 'convertstoboolean', 'convertstodecimal',
+            'convertstointeger', 'convertstodate', 'convertstodatetime', 'convertstotime',
+            'as', 'is', 'oftype'
+        ]
+
     def can_handle(self, function_name: str) -> bool:
         """Check if this handler can process the given function."""
         type_functions = {
@@ -102,34 +188,10 @@ class TypeFunctionHandler:
             WHEN {base_expr} IS NULL THEN NULL
             -- Handle array/collection case
             WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN
-                CASE 
-                    WHEN {self.generator.get_json_array_length(base_expr)} = 0 THEN NULL
-                    ELSE (
-                        SELECT 
-                            CASE 
-                                -- String 'true'/'false' case
-                                WHEN LOWER(CAST(value AS VARCHAR)) = 'true' THEN true
-                                WHEN LOWER(CAST(value AS VARCHAR)) = 'false' THEN false
-                                -- Numeric 0/1 case 
-                                WHEN CAST(value AS DOUBLE) = 1.0 THEN true
-                                WHEN CAST(value AS DOUBLE) = 0.0 THEN false
-                                ELSE NULL
-                            END
-                        FROM {self.generator.iterate_json_array(base_expr, '$')}
-                        LIMIT 1
-                    )
-                END
+                {self._generate_boolean_array_logic(base_expr, is_conversion=True)}
             -- Single value case (not array)
             ELSE 
-                CASE 
-                    -- String 'true'/'false' case
-                    WHEN LOWER(CAST({base_expr} AS VARCHAR)) = 'true' THEN true
-                    WHEN LOWER(CAST({base_expr} AS VARCHAR)) = 'false' THEN false
-                    -- Numeric 0/1 case
-                    WHEN CAST({base_expr} AS DOUBLE) = 1.0 THEN true
-                    WHEN CAST({base_expr} AS DOUBLE) = 0.0 THEN false
-                    ELSE NULL
-                END
+                {self._generate_boolean_single_logic(base_expr, is_conversion=True)}
         END
         """
     
@@ -388,30 +450,10 @@ class TypeFunctionHandler:
             WHEN {base_expr} IS NULL THEN false
             -- Handle array/collection case
             WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN
-                CASE 
-                    WHEN {self.generator.get_json_array_length(base_expr)} = 0 THEN false
-                    ELSE (
-                        SELECT 
-                            CASE 
-                                -- String 'true'/'false' case
-                                WHEN LOWER(CAST(value AS VARCHAR)) IN ('true', 'false') THEN true
-                                -- Numeric 0/1 case 
-                                WHEN CAST(value AS DOUBLE) IN (1.0, 0.0) THEN true
-                                ELSE false
-                            END
-                        FROM {self.generator.iterate_json_array(base_expr, '$')}
-                        LIMIT 1
-                    )
-                END
+                {self._generate_boolean_array_logic(base_expr, is_conversion=False)}
             -- Single value case (not array)
             ELSE 
-                CASE 
-                    -- String 'true'/'false' case
-                    WHEN LOWER(CAST({base_expr} AS VARCHAR)) IN ('true', 'false') THEN true
-                    -- Numeric 0/1 case
-                    WHEN CAST({base_expr} AS DOUBLE) IN (1.0, 0.0) THEN true
-                    ELSE false
-                END
+                {self._generate_boolean_single_logic(base_expr, is_conversion=False)}
         END
         """
     

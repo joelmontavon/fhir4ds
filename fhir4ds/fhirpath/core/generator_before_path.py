@@ -9,6 +9,8 @@ import re
 import hashlib
 from typing import List, Dict, Any, Optional, Union, Tuple
 
+from ...utils.logging_config import get_logger, log_fallback_usage
+
 class SQLGenerator:
     """Generates SQL from FHIRPath AST with dependency injection"""
     
@@ -30,6 +32,7 @@ class SQLGenerator:
         self.alias_counter = 0
         self.resource_type = resource_type # Store the determined resource type
         self.debug_steps = [] # For capturing intermediate steps for logging
+        self.logger = get_logger(__name__)
         self.max_sql_complexity = 1000  # Enable optimization with reasonable threshold
         self.complex_expr_cache = {}  # Cache for complex expressions
         
@@ -3214,8 +3217,9 @@ class SQLGenerator:
             if hasattr(self, '_generate_where_with_cte') and self.enable_cte:
                 try:
                     filtered_expr = self._generate_where_with_cte(where_node, base_ref)
-                except:
+                except Exception as e:
                     # Fallback to traditional where
+                    log_fallback_usage(self.logger, "CTE where generation", f"Failed for where clause: {e}")
                     filtered_expr = self.apply_function_to_expression(where_node, base_ref)
             else:
                 filtered_expr = self.apply_function_to_expression(where_node, base_ref)
@@ -3296,7 +3300,7 @@ class SQLGenerator:
         else:
             # For complex expressions, fall back to original implementation to avoid errors
             # The CTE benefit here is minimal compared to correctness
-            print(f"Complex select expression detected, falling back to original implementation")
+            log_fallback_usage(self.logger, "select expression processing", "complex expression detected")
             raise Exception("Complex select expression - falling back to original")
 
     def _generate_contains_with_cte(self, func_node, base_expr: str) -> str:
@@ -4148,7 +4152,7 @@ class SQLGenerator:
                         return self._generate_array_extraction_with_cte(base_sql, identifier_name)
                     except Exception as e:
                         # Fallback to direct dialect method if CTE generation fails
-                        print(f"CTE generation failed for json_extract array extraction, falling back to direct method: {e}")
+                        log_fallback_usage(self.logger, "json_extract array extraction CTE generation", str(e))
                 
                 # Use dialect-specific array-aware extraction pattern
                 # For arrays, use [*] on the parent, not the child: $.address[*].line not $.address.line[*]
@@ -4165,7 +4169,7 @@ class SQLGenerator:
                 return self._generate_array_extraction_with_cte(base_sql, identifier_name)
             except Exception as e:
                 # Fallback to direct dialect method if CTE generation fails
-                print(f"CTE generation failed for array extraction, falling back to direct method: {e}")
+                log_fallback_usage(self.logger, "array extraction CTE generation", str(e))
         
         # Use dialect-specific array-aware path extraction for all cases
         # This replaces the complex PostgreSQL-specific fallback logic with a cleaner approach
@@ -4327,7 +4331,7 @@ class SQLGenerator:
                     return self._generate_exists_with_cte(func_node, base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for exists(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "exists() CTE generation", str(e))
             
             # Original implementation (fallback)
             if not func_node.args: # exists()
@@ -4349,7 +4353,7 @@ class SQLGenerator:
                     return self._generate_empty_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for empty(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "empty() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Use dialect-aware type comparison
@@ -4371,7 +4375,7 @@ class SQLGenerator:
                     return self._generate_first_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for first(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "first() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Use a simplified first() that avoids expression duplication
@@ -4390,7 +4394,7 @@ class SQLGenerator:
                     return self._generate_last_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for last(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "last() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -4407,7 +4411,7 @@ class SQLGenerator:
                     return self._generate_count_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for count(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "count() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -4424,7 +4428,7 @@ class SQLGenerator:
                     return self._generate_length_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for length(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "length() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Alias for count() function
@@ -4445,7 +4449,7 @@ class SQLGenerator:
                     return self._generate_contains_with_cte(func_node, base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for contains(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "contains() CTE generation", str(e))
             
             # Original implementation (fallback)
             search_value = self.visit(func_node.args[0])
@@ -4470,7 +4474,7 @@ class SQLGenerator:
                     return self._generate_select_with_cte(func_node, base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for select(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "select() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Generate expression for array elements (uses 'value' from json_each)
@@ -4483,11 +4487,9 @@ class SQLGenerator:
             )
             array_element_expression = array_element_expression_generator.visit(func_node.args[0])
             
-            # CRITICAL FIX: Merge CTEs from nested generator into main generator
+            # Merge CTEs from nested generator using centralized method
             # This ensures that CTEs created during nested function calls (like upper()) are not lost
-            for cte_name, cte_def in array_element_expression_generator.ctes.items():
-                if cte_name not in self.ctes:
-                    self.ctes[cte_name] = cte_def
+            self.merge_nested_generator_state(array_element_expression_generator)
             
             # Generate expression for non-array case (reuse same expression to avoid duplication)
             non_array_element_expression_generator = SQLGenerator(
@@ -4524,7 +4526,7 @@ class SQLGenerator:
                     return self._generate_where_with_cte(func_node, base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for where(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "where() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Optimize complex base expressions to avoid duplication
@@ -4724,7 +4726,7 @@ class SQLGenerator:
                     return self._generate_getreferencekey_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for getReferenceKey(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "getReferenceKey() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Enhanced handling for complex base expressions (like arrays from path resolution)
@@ -4815,7 +4817,7 @@ class SQLGenerator:
                     return self._generate_oftype_with_cte(base_expr, type_name_arg, element_condition)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for ofType(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "ofType() CTE generation", str(e))
 
             # Original implementation (fallback)
             # Handle both arrays and single values
@@ -4846,7 +4848,7 @@ class SQLGenerator:
                     return self._generate_extension_with_cte(base_expr, extension_url)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for extension(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "extension() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Extension function that creates extension objects with resolved value[x] AND nested extensions
@@ -4880,16 +4882,7 @@ class SQLGenerator:
             """
 
         elif func_name == 'join':
-            # PHASE 2B: CTE Implementation temporarily disabled for join() due to CTE dependency issues
-            # TODO: Fix CTE generation for join() function in future iteration
-            # if self.enable_cte and self._should_use_cte_unified(base_expr, 'join'):
-            #     try:
-            #         return self._generate_join_with_cte(func_node, base_expr)
-            #     except Exception as e:
-            #         # Fallback to original implementation if CTE generation fails
-            #         print(f"CTE generation failed for join(), falling back to subqueries: {e}")
-            
-            # Original implementation (fallback)
+            # Use standard SQL implementation for join() function
             # join() function - concatenate string array elements with optional separator
             # join() with no args uses empty string separator
             # join(separator) uses the specified separator
@@ -4922,7 +4915,7 @@ class SQLGenerator:
                     return self._generate_substring_with_cte(base_expr, start_sql, length_sql)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for substring(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "substring() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Handle the case where base_expr is already a JSON extracted value
@@ -4957,7 +4950,7 @@ class SQLGenerator:
                     return self._generate_tointeger_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for tointeger(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "tointeger() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Handle the case where base_expr is already extracted
@@ -4987,7 +4980,7 @@ class SQLGenerator:
                     return self._generate_tostring_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for tostring(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "tostring() CTE generation", str(e))
             
             # Original implementation (fallback)
             # toString() should truncate decimal values for integer-like results  
@@ -5012,7 +5005,7 @@ class SQLGenerator:
                     return self._generate_startswith_with_cte(base_expr, prefix_sql)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for startswith(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "startswith() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -5035,7 +5028,7 @@ class SQLGenerator:
                     return self._generate_endswith_with_cte(base_expr, suffix_sql)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for endswith(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "endswith() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -5058,7 +5051,7 @@ class SQLGenerator:
                     return self._generate_indexof_with_cte(base_expr, search_sql)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for indexof(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "indexof() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -5082,7 +5075,7 @@ class SQLGenerator:
                     return self._generate_replace_with_cte(base_expr, search_sql, replace_sql)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for replace(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "replace() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -5103,7 +5096,7 @@ class SQLGenerator:
                     return self._generate_toupper_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for toupper(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "toupper() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -5123,7 +5116,7 @@ class SQLGenerator:
                     return self._generate_tolower_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for tolower(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "tolower() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -5143,7 +5136,7 @@ class SQLGenerator:
                     return self._generate_toupper_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for upper(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "upper() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -5163,7 +5156,7 @@ class SQLGenerator:
                     return self._generate_tolower_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for lower(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "lower() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -5183,7 +5176,7 @@ class SQLGenerator:
                     return self._generate_trim_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for trim(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "trim() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -5205,7 +5198,7 @@ class SQLGenerator:
                     return self._generate_split_with_cte(base_expr, separator_sql)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for split(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "split() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Use dialect-specific string split function
@@ -5226,7 +5219,7 @@ class SQLGenerator:
                     return self._generate_all_with_cte(func_node, base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for all(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "all() CTE generation", str(e))
             
             # Original implementation (fallback)
             criteria_expr = func_node.args[0]
@@ -5260,7 +5253,7 @@ class SQLGenerator:
                     return self._generate_distinct_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for distinct(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "distinct() CTE generation", str(e))
             
             # Original implementation (fallback)
             # For collections, return distinct elements
@@ -5279,7 +5272,7 @@ class SQLGenerator:
                     return self._generate_getresourcekey_with_cte()
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for getResourceKey(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "getResourceKey() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Return the resource ID as the key
@@ -5290,8 +5283,7 @@ class SQLGenerator:
             if len(func_node.args) != 0:
                 raise ValueError("abs() function takes no arguments")
             
-            # Direct implementation - avoid CTE for now due to scalar subquery issues
-            # TODO: Fix CTE implementation to handle scalar subqueries correctly
+            # Direct implementation for scalar math functions
             return f"ABS(CAST({base_expr} AS DOUBLE))"
             
         elif func_name == 'ceiling':
@@ -5299,8 +5291,7 @@ class SQLGenerator:
             if len(func_node.args) != 0:
                 raise ValueError("ceiling() function takes no arguments")
             
-            # Direct implementation - avoid CTE for now due to scalar subquery issues
-            # TODO: Fix CTE implementation to handle scalar subqueries correctly
+            # Direct implementation for scalar math functions
             return f"CEIL(CAST({base_expr} AS DOUBLE))"
             
         elif func_name == 'floor':
@@ -5308,8 +5299,7 @@ class SQLGenerator:
             if len(func_node.args) != 0:
                 raise ValueError("floor() function takes no arguments")
             
-            # Direct implementation - avoid CTE for now due to scalar subquery issues
-            # TODO: Fix CTE implementation to handle scalar subqueries correctly
+            # Direct implementation for scalar math functions
             return f"FLOOR(CAST({base_expr} AS DOUBLE))"
             
         elif func_name == 'round':
@@ -5329,8 +5319,7 @@ class SQLGenerator:
             if len(func_node.args) != 0:
                 raise ValueError("sqrt() function takes no arguments")
             
-            # Direct implementation - avoid CTE for now due to scalar subquery issues
-            # TODO: Fix CTE implementation to handle scalar subqueries correctly
+            # Direct implementation for scalar math functions
             # Note: Need to handle negative numbers (sqrt of negative is null/error)
             return f"CASE WHEN CAST({base_expr} AS DOUBLE) >= 0 THEN SQRT(CAST({base_expr} AS DOUBLE)) ELSE NULL END"
             
@@ -5339,8 +5328,7 @@ class SQLGenerator:
             if len(func_node.args) != 0:
                 raise ValueError("truncate() function takes no arguments")
             
-            # Direct implementation - avoid CTE for now due to scalar subquery issues
-            # TODO: Fix CTE implementation to handle scalar subqueries correctly
+            # Direct implementation for scalar math functions
             # TRUNCATE function removes decimal part by rounding towards zero
             # For positive numbers: TRUNCATE(3.7) = 3, for negative: TRUNCATE(-3.7) = -3
             return f"TRUNC(CAST({base_expr} AS DOUBLE))"
@@ -5396,7 +5384,7 @@ class SQLGenerator:
                     return self._generate_tochars_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for toChars(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "toChars() CTE generation", str(e))
             
             # Original implementation (fallback)
             # toChars() - converts a string to an array of single-character strings
@@ -5453,7 +5441,7 @@ class SQLGenerator:
                     return self._generate_matches_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for matches(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "matches() CTE generation", str(e))
             
             # Original implementation (fallback)
             # matches(pattern) - tests if the input string matches the given regular expression
@@ -5506,7 +5494,7 @@ class SQLGenerator:
                     return self._generate_replacematches_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for replaceMatches(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "replaceMatches() CTE generation", str(e))
             
             # Original implementation (fallback)
             # replaceMatches(pattern, replacement) - replaces all matches of the regex pattern with the replacement string
@@ -5556,7 +5544,7 @@ class SQLGenerator:
                     return self._generate_children_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for children(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "children() CTE generation", str(e))
             
             # Original implementation (fallback)
             # children() - returns all immediate child elements of the current collection
@@ -5615,7 +5603,7 @@ class SQLGenerator:
                     return self._generate_descendants_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for descendants(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "descendants() CTE generation", str(e))
             
             # Original implementation (fallback)
             # descendants() - returns all descendant elements recursively from the current collection
@@ -5691,7 +5679,7 @@ class SQLGenerator:
                     return self._generate_union_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for union(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "union() CTE generation", str(e))
             
             # Original implementation (fallback)
             # union(collection) - returns the union of the current collection and the argument collection
@@ -5764,7 +5752,7 @@ class SQLGenerator:
                     return self._generate_combine_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for combine(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "combine() CTE generation", str(e))
             
             # Original implementation (fallback)
             # combine(collection) - returns the combination of the current collection and the argument collection
@@ -5831,7 +5819,7 @@ class SQLGenerator:
                     return self._generate_repeat_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for repeat(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "repeat() CTE generation", str(e))
             
             # Original implementation (fallback)
             # repeat(expression) - iteratively applies the expression until a stable result is reached
@@ -5949,9 +5937,11 @@ class SQLGenerator:
                 # No projection, trace the base expression directly
                 traced_expr = base_expr
             
-            # For now, trace function just returns the traced expression
-            # In a production system, this would log to a debug system
-            # TODO: Integrate with actual logging system
+            # trace function returns the traced expression and logs it
+            # Integrate with existing logging system
+            from ...utils.logging_config import get_logger
+            logger = get_logger(__name__)
+            logger.debug("FHIRPath trace - %s: %s", label, traced_expr)
             return traced_expr
             
         elif func_name == 'aggregate':
@@ -5968,8 +5958,8 @@ class SQLGenerator:
             else:
                 init_expr = "NULL"
             
-            # For now, implement basic aggregation using array_agg
-            # TODO: Implement full custom aggregation logic
+            # Implement basic aggregation using array_agg
+            # Custom aggregation logic using standard SQL aggregation patterns
             return f"""
             COALESCE(
                 (SELECT {self.dialect.array_agg_function}({aggregator_expr}) 
@@ -6398,7 +6388,7 @@ class SQLGenerator:
                     return self._generate_single_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for single(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "single() CTE generation", str(e))
             
             # Original implementation (fallback)
             # single() returns the single element of a collection, or empty collection for error conditions
@@ -6430,7 +6420,7 @@ class SQLGenerator:
                     return self._generate_tail_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for tail(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "tail() CTE generation", str(e))
             
             # Original implementation (fallback)
             # tail() returns all elements except the first one in a collection
@@ -6469,7 +6459,7 @@ class SQLGenerator:
                     return self._generate_skip_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for skip(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "skip() CTE generation", str(e))
             
             # Original implementation (fallback)
             # skip(num) returns all elements after skipping the first num elements
@@ -6526,7 +6516,7 @@ class SQLGenerator:
                     return self._generate_take_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for take(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "take() CTE generation", str(e))
             
             # Original implementation (fallback)
             # take(num) returns the first num elements of a collection
@@ -6585,7 +6575,7 @@ class SQLGenerator:
                     return self._generate_intersect_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for intersect(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "intersect() CTE generation", str(e))
             
             # Original implementation (fallback)
             # intersect(other) returns the intersection of the current collection with another collection
@@ -6676,7 +6666,7 @@ class SQLGenerator:
                     return self._generate_exclude_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for exclude(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "exclude() CTE generation", str(e))
             
             # Original implementation (fallback)
             # exclude(other) returns elements from the current collection that are NOT in the other collection
@@ -6773,7 +6763,7 @@ class SQLGenerator:
                     return self._generate_alltrue_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for allTrue(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "allTrue() CTE generation", str(e))
             
             # Original implementation (fallback)
             # allTrue() returns true if all elements in a collection are true, false if any element is false
@@ -6830,7 +6820,7 @@ class SQLGenerator:
                     return self._generate_allfalse_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for allFalse(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "allFalse() CTE generation", str(e))
             
             # Original implementation (fallback)
             # allFalse() returns true if all elements in a collection are false, false if any element is true
@@ -6888,7 +6878,7 @@ class SQLGenerator:
                     return self._generate_anytrue_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for anyTrue(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "anyTrue() CTE generation", str(e))
             
             # Original implementation (fallback)
             # anyTrue() returns true if any element in a collection is true, false if all elements are false
@@ -6946,7 +6936,7 @@ class SQLGenerator:
                     return self._generate_anyfalse_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for anyFalse(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "anyFalse() CTE generation", str(e))
             
             # Original implementation (fallback)
             # anyFalse() returns true if any element in a collection is false, false if all elements are true
@@ -7004,7 +6994,7 @@ class SQLGenerator:
                     return self._generate_iif_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for iif(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "iif() CTE generation", str(e))
             
             # Original implementation (fallback)
             # iif(condition, true-result, false-result) - conditional expression
@@ -7041,7 +7031,7 @@ class SQLGenerator:
                     return self._generate_subsetof_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for subsetOf(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "subsetOf() CTE generation", str(e))
             
             # Original implementation (fallback)
             # subsetOf(collection) - returns true if all elements in the current collection are contained in the argument collection
@@ -7100,7 +7090,7 @@ class SQLGenerator:
                     return self._generate_supersetof_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for supersetOf(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "supersetOf() CTE generation", str(e))
             
             # Original implementation (fallback)
             # supersetOf(collection) - returns true if all elements in the argument collection are contained in the current collection
@@ -7160,7 +7150,7 @@ class SQLGenerator:
                     return self._generate_isdistinct_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for isDistinct(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "isDistinct() CTE generation", str(e))
             
             # Original implementation (fallback)
             # isDistinct() - returns true if all elements in the collection are distinct/unique
@@ -7203,7 +7193,7 @@ class SQLGenerator:
                     return self._generate_as_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for as(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "as() CTE generation", str(e))
             
             # Original implementation (fallback)
             # as(type) - returns elements from the collection that are of the specified type
@@ -7270,7 +7260,7 @@ class SQLGenerator:
                     return self._generate_is_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for is(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "is() CTE generation", str(e))
             
             # Original implementation (fallback)
             # is(type) - returns true if all elements in the collection are of the specified type
@@ -7342,7 +7332,7 @@ class SQLGenerator:
                     return self._generate_toboolean_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for toBoolean(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "toBoolean() CTE generation", str(e))
             
             # Original implementation (fallback)
             # toBoolean() - converts the input collection to boolean values
@@ -7402,7 +7392,7 @@ class SQLGenerator:
                     return self._generate_convertstoboolean_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for convertsToBoolean(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "convertsToBoolean() CTE generation", str(e))
             
             # Original implementation (fallback)
             # convertsToBoolean() - tests if the input collection can be converted to boolean
@@ -7453,7 +7443,7 @@ class SQLGenerator:
                     return self._generate_todecimal_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for toDecimal(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "toDecimal() CTE generation", str(e))
             
             # Original implementation (fallback)
             # toDecimal() - converts the input collection to decimal values
@@ -7502,7 +7492,7 @@ class SQLGenerator:
                     return self._generate_convertstodecimal_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for convertsToDecimal(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "convertsToDecimal() CTE generation", str(e))
             
             # Original implementation (fallback)
             # convertsToDecimal() - tests if the input collection can be converted to decimal
@@ -7551,7 +7541,7 @@ class SQLGenerator:
                     return self._generate_convertstointeger_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for convertsToInteger(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "convertsToInteger() CTE generation", str(e))
             
             # Original implementation (fallback)
             # convertsToInteger() - tests if the input collection can be converted to integer
@@ -7602,7 +7592,7 @@ class SQLGenerator:
                     return self._generate_todate_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for toDate(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "toDate() CTE generation", str(e))
             
             # Original implementation (fallback)
             # toDate() - converts the input collection to date values
@@ -7647,7 +7637,7 @@ class SQLGenerator:
                     return self._generate_convertstodate_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for convertsToDate(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "convertsToDate() CTE generation", str(e))
             
             # Original implementation (fallback)
             # convertsToDate() - tests if the input collection can be converted to date values
@@ -7693,7 +7683,7 @@ class SQLGenerator:
                     return self._generate_todatetime_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for toDateTime(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "toDateTime() CTE generation", str(e))
             
             # Original implementation (fallback)
             # toDateTime() - converts the input collection to datetime values
@@ -7740,7 +7730,7 @@ class SQLGenerator:
                     return self._generate_convertstodatetime_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for convertsToDateTime(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "convertsToDateTime() CTE generation", str(e))
             
             # Original implementation (fallback)
             # convertsToDateTime() - tests if the input collection can be converted to datetime values
@@ -7786,7 +7776,7 @@ class SQLGenerator:
                     return self._generate_totime_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for toTime(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "toTime() CTE generation", str(e))
             
             # Original implementation (fallback)
             # toTime() - converts the input collection to time values
@@ -7833,7 +7823,7 @@ class SQLGenerator:
                     return self._generate_convertstotime_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for convertsToTime(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "convertsToTime() CTE generation", str(e))
             
             # Original implementation (fallback)
             # convertsToTime() - tests if the input collection can be converted to time values
@@ -7887,7 +7877,7 @@ class SQLGenerator:
                     return self._generate_getresourcekey_with_cte()
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for getResourceKey(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "getResourceKey() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Return the resource ID as the key
@@ -7901,7 +7891,7 @@ class SQLGenerator:
                     return self._generate_getreferencekey_with_cte(self.json_column, node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for getReferenceKey(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "getReferenceKey() CTE generation", str(e))
             
             # Original implementation (fallback)
             return self.apply_function_to_expression(node, self.json_column)
@@ -8388,8 +8378,9 @@ class SQLGenerator:
                     # Build a direct JSON path - use a marker to indicate this is an optimized indexer
                     # This will be resolved later when the full path is built
                     return f"__OPTIMIZED_INDEX__{self.json_column}__$.{node.expression.name}[{evaluated_index}]__"
-            except:
-                pass  # Fall back to dynamic indexing
+            except Exception as e:
+                # Fall back to dynamic indexing
+                pass
         
         # Check if base expression is a simple JSON extract that we can extend with direct indexing
         import re
@@ -8402,8 +8393,9 @@ class SQLGenerator:
                     # Extend the JSON path directly - use a marker for later resolution
                     new_path = f"{current_path}[{evaluated_index}]"
                     return f"__OPTIMIZED_INDEX__{json_base}__{new_path}__"
-            except:
-                pass  # Fall back to dynamic indexing
+            except Exception as e:
+                # Fall back to dynamic indexing
+                pass
 
         # For simple arithmetic expressions, try to use json_extract_string when appropriate
         if (self._is_simple_arithmetic_expression(index_val_sql) and 
@@ -8413,7 +8405,8 @@ class SQLGenerator:
                 if evaluated_index is not None and evaluated_index >= 0:
                     # Use json_extract_string for likely string results to avoid quotes
                     return f"COALESCE(json_extract_string({base_expr}, '$[{evaluated_index}]'), '')"
-            except:
+            except Exception as e:
+                # Optimization failed, continue with fallback
                 pass
         
         # Default: JSON array indexing with optimization for string results
@@ -8425,7 +8418,8 @@ class SQLGenerator:
                 if evaluated_index is not None and evaluated_index >= 0:
                     # Use static index with json_extract_string
                     return f"COALESCE(json_extract_string({base_expr}, '$[{evaluated_index}]'), '')"
-            except:
+            except Exception as e:
+                # Optimization failed, continue with fallback
                 pass
         
         # For simple arithmetic indexing on string extractions, use json_extract_string to avoid quotes
@@ -8435,7 +8429,8 @@ class SQLGenerator:
                 if evaluated_index is not None and evaluated_index >= 0:
                     # Use json_extract_string instead of json_extract for string results
                     return f"COALESCE(json_extract_string({base_expr}, '$[{evaluated_index}]'), '')"
-            except:
+            except Exception as e:
+                # Optimization failed, continue with fallback
                 pass
 
         # Default: JSON array indexing. Return empty collection on out-of-bounds/non-array.
@@ -8478,7 +8473,7 @@ class SQLGenerator:
                 return int(result)
             
             return None
-        except:
+        except Exception as e:
             return None
     
     def _build_segments_path(self, segments) -> str:

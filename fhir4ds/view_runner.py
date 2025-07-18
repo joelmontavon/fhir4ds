@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Dict, List, Any, Optional, Union
+from .utils.logging_config import get_logger, log_fallback_usage
 
 # Optional imports for DataFrame functionality
 try:
@@ -73,6 +74,7 @@ class ViewRunner:
         self.dialect = datastore.dialect
             
         self.enable_enhanced_sql_generation = enable_enhanced_sql_generation
+        self.logger = get_logger(__name__)
         
         # Performance tracking
         self.execution_stats = {
@@ -1074,7 +1076,7 @@ class ViewRunner:
                 
         except Exception as e:
             # If FHIRPath translation fails, fall back to simple expression generation
-            print(f"Warning: FHIRPath translation failed for '{path}': {e}")
+            log_fallback_usage(self.logger, "FHIRPath translation", f"Failed for '{path}': {e}")
             return self._generate_typed_json_extraction(path, column_type)
     
     def _generate_mathematical_expression(self, path: str, column_type: str) -> QueryItem:
@@ -1415,6 +1417,31 @@ class ViewRunner:
         
         return False
     
+    def _propagate_foreach_context(self, target_select: Dict[str, Any], outer_foreach_path: str, 
+                                  outer_is_foreach_or_null: bool) -> None:
+        """
+        Centralized method to propagate forEach context from outer scope to target select structure.
+        
+        This method handles the architectural pattern for forEach context propagation that was
+        previously scattered as 'CRITICAL FIX' workarounds throughout the codebase.
+        
+        Args:
+            target_select: The target select structure to receive the forEach context
+            outer_foreach_path: The outer forEach path to propagate
+            outer_is_foreach_or_null: Whether the outer forEach is forEachOrNull (True) or forEach (False)
+        """
+        if not outer_foreach_path:
+            return
+            
+        if 'forEach' in target_select or 'forEachOrNull' in target_select:
+            # Target has its own forEach - create nested forEach scenario
+            target_select['outerForEach'] = outer_foreach_path
+            target_select['outerIsForEachOrNull'] = outer_is_foreach_or_null
+        else:
+            # Target doesn't have forEach - it inherits the outer forEach
+            branch_key = 'forEachOrNull' if outer_is_foreach_or_null else 'forEach'
+            target_select[branch_key] = outer_foreach_path
+    
     def _generate_unionall_sql(self, view_def: Dict[str, Any]) -> str:
         """Generate SQL with unionAll operations, respecting outer forEach context"""
         union_queries = []
@@ -1462,17 +1489,12 @@ class ViewRunner:
                     if 'where' in view_def:
                         branch_view_def['where'] = view_def['where']
                     
-                    # CRITICAL FIX: If there's an outer forEach, propagate it to the branch
-                    if outer_foreach_path:
-                        if 'forEach' in union_branch or 'forEachOrNull' in union_branch:
-                            # Branch has its own forEach - this creates a nested forEach scenario
-                            # Keep the outer forEach and the branch's inner forEach
-                            branch_view_def['select'][0]['outerForEach'] = outer_foreach_path
-                            branch_view_def['select'][0]['outerIsForEachOrNull'] = outer_is_foreach_or_null
-                        else:
-                            # Branch doesn't have forEach - it inherits the outer forEach
-                            branch_key = 'forEachOrNull' if outer_is_foreach_or_null else 'forEach'
-                            branch_view_def['select'][0][branch_key] = outer_foreach_path
+                    # Propagate outer forEach context to the branch using centralized method
+                    self._propagate_foreach_context(
+                        branch_view_def['select'][0], 
+                        outer_foreach_path, 
+                        outer_is_foreach_or_null
+                    )
                     
                     # Ensure the branch has a column list
                     if 'column' not in branch_view_def['select'][0]:
@@ -1506,7 +1528,7 @@ class ViewRunner:
                         branch_view_def['select'][0]['column'] = merged_columns
                     
                     # Add any nested select structures from the same select item
-                    # CRITICAL FIX: Preserve forEach contexts instead of flattening columns
+                    # Preserve forEach contexts instead of flattening columns
                     if 'select' in select_item:
                         # Copy the entire nested select structures to preserve forEach contexts
                         if 'select' not in branch_view_def['select'][0]:
@@ -1540,16 +1562,12 @@ class ViewRunner:
                             if 'where' in view_def:
                                 nested_branch_view_def['where'] = view_def['where']
                             
-                            # CRITICAL FIX: Propagate outer forEach context
-                            if outer_foreach_path:
-                                if 'forEach' in nested_branch or 'forEachOrNull' in nested_branch:
-                                    # Nested branch has its own forEach - this creates a nested forEach scenario
-                                    nested_branch_view_def['select'][0]['outerForEach'] = outer_foreach_path
-                                    nested_branch_view_def['select'][0]['outerIsForEachOrNull'] = outer_is_foreach_or_null
-                                else:
-                                    # Nested branch doesn't have forEach - it inherits the outer forEach
-                                    branch_key = 'forEachOrNull' if outer_is_foreach_or_null else 'forEach'
-                                    nested_branch_view_def['select'][0][branch_key] = outer_foreach_path
+                            # Propagate outer forEach context using centralized method
+                            self._propagate_foreach_context(
+                                nested_branch_view_def['select'][0],
+                                outer_foreach_path,
+                                outer_is_foreach_or_null
+                            )
                             
                             # Ensure the nested branch has a column list
                             if 'column' not in nested_branch_view_def['select'][0]:
@@ -1653,7 +1671,7 @@ class ViewRunner:
                     return f"EXISTS (SELECT 1 WHERE ({clean_sql}) = true)"
                 
             except Exception as e:
-                print(f"Warning: FHIRPath translator failed for where condition '{path}': {e}")
+                log_fallback_usage(self.logger, "FHIRPath translator", f"Failed for where condition '{path}': {e}")
                 # Fall back to smart processing
         
         # First try smart array-aware processing for simple patterns

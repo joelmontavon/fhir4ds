@@ -15,8 +15,8 @@ from pathlib import Path
 
 # Import FHIR4DS components
 from ..datastore import FHIRDataStore
-from ..view_runner import ViewRunner
 from ..fhirpath import FHIRPath
+from .logging_config import get_logger, log_execution_time
 
 
 @dataclass
@@ -58,6 +58,7 @@ class PerformanceTester:
         if output_dir != ".":
             self.output_dir.mkdir(exist_ok=True)
         self.results: List[PerformanceMetrics] = []
+        self.logger = get_logger(__name__)
         
     def measure_time(self, operation_name: str):
         """Context manager for measuring operation time"""
@@ -75,14 +76,14 @@ class PerformanceTester:
         Returns:
             PerformanceMetrics: Loading performance results
         """
-        print(f"🔍 Benchmarking dataset loading: {dataset_path}")
+        self.logger.info("Benchmarking dataset loading: %s", dataset_path)
         
         # Get dataset files
         json_files = list(Path(dataset_path).glob("*.json"))
         if sample_size:
             json_files = json_files[:sample_size]
             
-        print(f"   Processing {len(json_files)} files...")
+        self.logger.info("Processing %d files...", len(json_files))
         
         # Create datastore and measure loading
         datastore = FHIRDataStore.with_duckdb()
@@ -101,7 +102,7 @@ class PerformanceTester:
                             data = json.load(f)
                             # Simulate loading - in real implementation would use datastore.load_resource()
                     except Exception as e:
-                        print(f"   Warning: Skipped {file_path}: {e}")
+                        self.logger.warning("Skipped %s: %s", file_path, e)
         
         # Calculate throughput
         duration_sec = timer.duration_ms / 1000
@@ -120,7 +121,8 @@ class PerformanceTester:
         )
         
         self.results.append(metrics)
-        print(f"   ✅ Loaded {len(json_files)} files in {timer.duration_ms:.1f}ms ({throughput:.1f} files/sec)")
+        self.logger.info("Loaded %d files in %.1fms (%.1f files/sec)", 
+                        len(json_files), timer.duration_ms, throughput)
         return metrics
     
     def benchmark_viewdefinition_execution(self, view_definition: Dict[str, Any],
@@ -136,8 +138,10 @@ class PerformanceTester:
             PerformanceMetrics: Execution performance results
         """
         view_name = view_definition.get("name", "unnamed_view")
-        print(f"🔍 Benchmarking ViewDefinition: {view_name}")
+        self.logger.info("Benchmarking ViewDefinition: %s", view_name)
         
+        # Import ViewRunner locally to avoid circular import
+        from ..view_runner import ViewRunner
         runner = ViewRunner(datastore=datastore)
         
         with self.measure_time(f"viewdef_execution_{view_name}") as timer:
@@ -146,7 +150,7 @@ class PerformanceTester:
                 rows = result.fetchall() if hasattr(result, 'fetchall') else []
                 row_count = len(rows) if rows else 0
             except Exception as e:
-                print(f"   ❌ ViewDefinition execution failed: {e}")
+                self.logger.error("ViewDefinition execution failed: %s", e)
                 row_count = 0
         
         metrics = PerformanceMetrics(
@@ -160,7 +164,8 @@ class PerformanceTester:
         )
         
         self.results.append(metrics)
-        print(f"   ✅ Executed ViewDefinition in {timer.duration_ms:.1f}ms, returned {row_count} rows")
+        self.logger.info("Executed ViewDefinition in %.1fms, returned %d rows", 
+                        timer.duration_ms, row_count)
         return metrics
     
     def benchmark_fhirpath_operations(self, expressions: List[str]) -> List[PerformanceMetrics]:
@@ -173,13 +178,13 @@ class PerformanceTester:
         Returns:
             List of PerformanceMetrics for each operation
         """
-        print(f"🔍 Benchmarking FHIRPath operations: {len(expressions)} expressions")
+        self.logger.info("Benchmarking FHIRPath operations: %d expressions", len(expressions))
         
         fp = FHIRPath()
         results = []
         
         for i, expression in enumerate(expressions):
-            print(f"   Testing expression {i+1}/{len(expressions)}: {expression}")
+            self.logger.debug("Testing expression %d/%d: %s", i+1, len(expressions), expression)
             
             # Benchmark parsing
             with self.measure_time(f"fhirpath_parse_{i}") as timer:
@@ -187,7 +192,7 @@ class PerformanceTester:
                     ast = fp.parse(expression)
                     parse_success = True
                 except Exception as e:
-                    print(f"     ❌ Parse failed: {e}")
+                    self.logger.error("Parse failed: %s", e)
                     parse_success = False
             
             parse_metrics = PerformanceMetrics(
@@ -208,7 +213,7 @@ class PerformanceTester:
                         sql = fp.to_sql(expression, "Patient", "p")
                         sql_success = True
                     except Exception as e:
-                        print(f"     ❌ SQL generation failed: {e}")
+                        self.logger.error("SQL generation failed: %s", e)
                         sql_success = False
                 
                 sql_metrics = PerformanceMetrics(
@@ -228,9 +233,11 @@ class PerformanceTester:
         sql_times = [r.duration_ms for r in results if r.operation == "fhirpath_sql_generation"]
         
         if parse_times:
-            print(f"   ✅ Parse times - avg: {statistics.mean(parse_times):.2f}ms, median: {statistics.median(parse_times):.2f}ms")
+            self.logger.info("Parse times - avg: %.2fms, median: %.2fms", 
+                           statistics.mean(parse_times), statistics.median(parse_times))
         if sql_times:
-            print(f"   ✅ SQL gen times - avg: {statistics.mean(sql_times):.2f}ms, median: {statistics.median(sql_times):.2f}ms")
+            self.logger.info("SQL gen times - avg: %.2fms, median: %.2fms", 
+                           statistics.mean(sql_times), statistics.median(sql_times))
         
         return results
     
@@ -246,18 +253,18 @@ class PerformanceTester:
         Returns:
             DatasetStats: Dataset characteristics
         """
-        print(f"🔍 Analyzing dataset: {dataset_path}")
+        self.logger.info("Analyzing dataset: %s", dataset_path)
         
         dataset_dir = Path(dataset_path)
         json_files = list(dataset_dir.glob("*.json"))
         
         if not json_files:
-            print(f"   ❌ No JSON files found in {dataset_path}")
+            self.logger.warning("No JSON files found in %s", dataset_path)
             return DatasetStats(0, 0, {}, 0, 0)
         
         # Sample files for analysis
         sample_files = json_files[:sample_size] if sample_size else json_files
-        print(f"   Analyzing {len(sample_files)} files (sample of {len(json_files)} total)")
+        self.logger.info("Analyzing %d files (sample of %d total)", len(sample_files), len(json_files))
         
         total_size = 0
         resource_types = {}
@@ -286,7 +293,7 @@ class PerformanceTester:
                             patients.add(patient_ref[8:])  # Remove "Patient/" prefix
                             
             except Exception as e:
-                print(f"   Warning: Skipped {file_path}: {e}")
+                self.logger.warning("Skipped %s: %s", file_path, e)
         
         # Calculate statistics
         total_size_mb = total_size / (1024 * 1024)
@@ -300,12 +307,12 @@ class PerformanceTester:
             patient_count=len(patients)
         )
         
-        print(f"   ✅ Dataset analysis complete:")
-        print(f"     - Total files: {stats.total_files}")
-        print(f"     - Total size: {stats.total_size_mb:.1f}MB")
-        print(f"     - Avg file size: {stats.avg_file_size_kb:.1f}KB")
-        print(f"     - Unique patients: {stats.patient_count}")
-        print(f"     - Resource types: {dict(list(stats.resource_types.items())[:5])}...")
+        self.logger.info("Dataset analysis complete:")
+        self.logger.info("  - Total files: %d", stats.total_files)
+        self.logger.info("  - Total size: %.1fMB", stats.total_size_mb)
+        self.logger.info("  - Avg file size: %.1fKB", stats.avg_file_size_kb)
+        self.logger.info("  - Unique patients: %d", stats.patient_count)
+        self.logger.info("  - Resource types: %s...", dict(list(stats.resource_types.items())[:5]))
         
         return stats
     
@@ -320,10 +327,10 @@ class PerformanceTester:
             Dict containing performance analysis
         """
         if not self.results:
-            print("❌ No performance results to report")
+            self.logger.warning("No performance results to report")
             return {}
         
-        print(f"📊 Generating performance report from {len(self.results)} measurements")
+        self.logger.info("Generating performance report from %d measurements", len(self.results))
         
         # Group results by operation type
         by_operation = {}
@@ -385,14 +392,14 @@ class PerformanceTester:
             report_path = self.output_dir / output_file
             with open(report_path, 'w') as f:
                 json.dump(report, f, indent=2)
-            print(f"📄 Performance report saved to: {report_path}")
+            self.logger.info("Performance report saved to: %s", report_path)
         
         # Print summary
-        print("📊 Performance Summary:")
+        self.logger.info("Performance Summary:")
         for op_type, stats in report["operations"].items():
             mean_time = stats["duration_ms"]["mean"]
             count = stats["count"]
-            print(f"   {op_type}: {mean_time:.1f}ms avg ({count} measurements)")
+            self.logger.info("  %s: %.1fms avg (%d measurements)", op_type, mean_time, count)
         
         return report
 
@@ -427,8 +434,9 @@ def quick_performance_test(dataset_path: str, sample_size: int = 50) -> Dict[str
     Returns:
         Performance report dictionary
     """
-    print("🚀 Running Quick Performance Test Suite")
-    print("=" * 50)
+    logger = get_logger(__name__)
+    logger.info("Running Quick Performance Test Suite")
+    logger.info("=" * 50)
     
     tester = PerformanceTester()
     
@@ -462,8 +470,9 @@ def comprehensive_performance_test(dataset_path: str) -> Dict[str, Any]:
     Returns:
         Performance report dictionary
     """
-    print("🚀 Running Comprehensive Performance Test Suite")
-    print("=" * 60)
+    logger = get_logger(__name__)
+    logger.info("Running Comprehensive Performance Test Suite")
+    logger.info("=" * 60)
     
     tester = PerformanceTester()
     
