@@ -1,0 +1,62 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+venv/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Development tools
+.claude/
+uv.lock
+
+# Project-specific exclusions
+archive/
+datasets/
+@work/
+work/
+models/
+tests/
+CLAUDE.md
+*PROJECT_PLAN*.md
+*PARKING_LOT*.md
+*RESULTS*.md
+
+# Backup files
+*.backup
+*.bak
+*_old.*
+*.tmp
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Other
+.py*
+.dockerignore
+.gitignore
+build*
+test*
+debug*

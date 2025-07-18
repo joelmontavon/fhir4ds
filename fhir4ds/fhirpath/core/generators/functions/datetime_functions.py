@@ -6,21 +6,28 @@ These functions return current timestamp, date, and time respectively.
 """
 
 from typing import List, Any, Optional
+from ..base_handler import BaseFunctionHandler
 
 
-class DateTimeFunctionHandler:
+class DateTimeFunctionHandler(BaseFunctionHandler):
     """Handles datetime function processing for FHIRPath to SQL conversion."""
     
-    def __init__(self, generator):
+    def __init__(self, generator, cte_builder=None):
         """
         Initialize the datetime function handler.
         
         Args:
             generator: Reference to main SQLGenerator for complex operations
+            cte_builder: Optional CTEBuilder instance for CTE management
         """
+        super().__init__(generator, cte_builder)
         self.generator = generator
         self.dialect = generator.dialect
         
+    def get_supported_functions(self) -> List[str]:
+        """Return list of datetime function names this handler supports."""
+        return ['now', 'today', 'timeofday']
+
     def can_handle(self, function_name: str) -> bool:
         """Check if this handler can process the given function."""
         datetime_functions = {

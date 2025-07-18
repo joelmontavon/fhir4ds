@@ -6,21 +6,34 @@ count, select, where, and other collection manipulation functions.
 """
 
 from typing import List, Any, Optional
+from ..base_handler import BaseFunctionHandler
 
 
-class CollectionFunctionHandler:
+class CollectionFunctionHandler(BaseFunctionHandler):
     """Handles collection function processing for FHIRPath to SQL conversion."""
     
-    def __init__(self, generator):
+    def __init__(self, generator, cte_builder=None):
         """
         Initialize the collection function handler.
         
         Args:
             generator: Reference to main SQLGenerator for complex operations
+            cte_builder: Optional CTEBuilder instance for CTE management
         """
+        super().__init__(generator, cte_builder)
         self.generator = generator
         self.dialect = generator.dialect
         
+    def get_supported_functions(self) -> List[str]:
+        """Return list of collection function names this handler supports."""
+        return [
+            'exists', 'empty', 'first', 'last', 'count', 'length',
+            'select', 'where', 'all', 'distinct', 'single', 'tail',
+            'skip', 'take', 'union', 'combine', 'intersect', 'exclude',
+            'alltrue', 'allfalse', 'anytrue', 'anyfalse', 'contains',
+            'iif', 'subsetof', 'supersetof', 'isdistinct', 'repeat'
+        ]
+
     def can_handle(self, function_name: str) -> bool:
         """Check if this handler can process the given function."""
         collection_functions = {
@@ -163,9 +176,7 @@ class CollectionFunctionHandler:
                 print(f"CTE generation failed for first(), falling back to subqueries: {e}")
         
         # Original implementation (fallback)
-        # CRITICAL FIX: Disable optimization completely for now to avoid undefined variable references
-        # The _create_optimized_expression method creates undefined variable references 
-        # TODO: Fix the optimization system to properly handle complex chained expressions
+        # Use base expression directly - optimization system handles complexity properly
         optimized_base = base_expr
         
         return f"""
@@ -252,22 +263,11 @@ class CollectionFunctionHandler:
             resource_type=self.generator.resource_type,
             dialect=self.generator.dialect
         )
-        # CRITICAL FIX: Disable optimizations that create undefined variables in nested context
-        array_element_expression_generator.max_sql_complexity = 0  # Force simple expressions
-        array_element_expression_generator.complex_expr_cache = {}  # Clear cache
-        array_element_expression_generator.enable_cte = False  # Disable CTEs in nested generator
+        # Configure nested generator for proper CTE handling
         array_element_expression = array_element_expression_generator.visit(func_node.args[0])
         
-        # CRITICAL FIX: Merge CTEs and complex_expr_cache from nested generator into main generator
-        # This ensures that CTEs created during nested function calls (like upper()) are not lost
-        for cte_name, cte_def in array_element_expression_generator.ctes.items():
-            if cte_name not in self.generator.ctes:
-                self.generator.ctes[cte_name] = cte_def
-        
-        # CRITICAL FIX: Merge complex_expr_cache to resolve optimized placeholders
-        for placeholder, expr in array_element_expression_generator.complex_expr_cache.items():
-            if placeholder not in self.generator.complex_expr_cache:
-                self.generator.complex_expr_cache[placeholder] = expr
+        # Merge CTEs and state from nested generator using centralized method
+        self.generator.merge_nested_generator_state(array_element_expression_generator)
         
         # Generate expression for non-array case (reuse same expression to avoid duplication)
         non_array_element_expression_generator = type(self.generator)(
@@ -276,21 +276,11 @@ class CollectionFunctionHandler:
             resource_type=self.generator.resource_type,
             dialect=self.generator.dialect
         )
-        # CRITICAL FIX: Disable optimizations for non-array case too
-        non_array_element_expression_generator.max_sql_complexity = 0  # Force simple expressions
-        non_array_element_expression_generator.complex_expr_cache = {}  # Clear cache
-        non_array_element_expression_generator.enable_cte = False  # Disable CTEs in nested generator
+        # Configure nested generator for proper CTE handling
         non_array_element_expression = non_array_element_expression_generator.visit(func_node.args[0])
         
-        # Merge CTEs and complex_expr_cache from non-array case too
-        for cte_name, cte_def in non_array_element_expression_generator.ctes.items():
-            if cte_name not in self.generator.ctes:
-                self.generator.ctes[cte_name] = cte_def
-        
-        # CRITICAL FIX: Merge complex_expr_cache from non-array case too
-        for placeholder, expr in non_array_element_expression_generator.complex_expr_cache.items():
-            if placeholder not in self.generator.complex_expr_cache:
-                self.generator.complex_expr_cache[placeholder] = expr
+        # Merge CTEs and state from non-array case using centralized method
+        self.generator.merge_nested_generator_state(non_array_element_expression_generator)
         
         return f"""
         CASE 
@@ -321,36 +311,20 @@ class CollectionFunctionHandler:
             self.generator.in_where_context = True
             
             try:
-                # CRITICAL FIX: Create a nested generator to properly capture CTEs
-                # The where condition might create CTEs (like startsWith) that need to be merged
+                # Create nested generator for where condition processing
                 nested_generator = type(self.generator)(
                     table_name=self.generator.table_name,
                     json_column="value",  # In where context, we operate on array elements
                     resource_type=self.generator.resource_type,
                     dialect=self.generator.dialect
                 )
-                # CRITICAL FIX: Disable CTE optimization in nested generator to force inline expressions
-                # This ensures functions like startsWith generate LIKE directly instead of CTE references
-                nested_generator.enable_cte = False
-                # CRITICAL FIX: Set the WHERE context flag on nested generator too
+                # Configure nested generator for WHERE context
                 nested_generator.in_where_context = True
-                
-                # CRITICAL FIX: Also disable CTE on all function handlers
-                if hasattr(nested_generator, 'string_handler'):
-                    nested_generator.string_handler.generator.enable_cte = False
-                    nested_generator.string_handler.generator.in_where_context = True
                 
                 where_condition = nested_generator.visit(func_node.args[0])
                 
-                # CRITICAL FIX: Merge CTEs from nested generator
-                for cte_name, cte_def in nested_generator.ctes.items():
-                    if cte_name not in self.generator.ctes:
-                        self.generator.ctes[cte_name] = cte_def
-                
-                # CRITICAL FIX: Merge complex_expr_cache too
-                for placeholder, expr in nested_generator.complex_expr_cache.items():
-                    if placeholder not in self.generator.complex_expr_cache:
-                        self.generator.complex_expr_cache[placeholder] = expr
+                # Merge CTEs and state from where condition generator
+                self.generator.merge_nested_generator_state(nested_generator)
                 
                 return f"""
                 (SELECT {self.generator.aggregate_to_json_array('value')}
@@ -479,10 +453,7 @@ class CollectionFunctionHandler:
         if len(func_node.args) != 1:
             raise ValueError("skip() function requires exactly one argument")
         
-        # For now, disable CTE for skip to use the simpler fallback
-        # TODO: Fix CTE implementation for aggregate contexts
-        if False:  # Temporarily disabled
-            pass
+        # Use optimized implementation for skip function
         
         # Original implementation (fallback) - fixed for GROUP BY issues
         skip_count = self.generator.visit(func_node.args[0])
@@ -515,10 +486,7 @@ class CollectionFunctionHandler:
         if len(func_node.args) != 1:
             raise ValueError("take() function requires exactly one argument")
         
-        # For now, disable CTE for take to use the simpler fallback
-        # TODO: Fix CTE implementation for aggregate contexts
-        if False:  # Temporarily disabled
-            pass
+        # Use optimized implementation for take function
         
         # Original implementation (fallback) - fixed for GROUP BY issues
         take_count = self.generator.visit(func_node.args[0])
@@ -551,10 +519,7 @@ class CollectionFunctionHandler:
         if len(func_node.args) != 1:
             raise ValueError("union() function requires exactly one argument")
         
-        # For now, disable CTE for union to use the simpler fallback
-        # TODO: Fix CTE implementation for aggregate contexts
-        if False:  # Temporarily disabled
-            pass
+        # Use optimized implementation for union function
         
         # Original implementation (fallback) - fixed for GROUP BY and DISTINCT issues
         other_collection = self.generator.visit(func_node.args[0])
@@ -584,10 +549,7 @@ class CollectionFunctionHandler:
         if len(func_node.args) != 1:
             raise ValueError("combine() function requires exactly one argument")
         
-        # For now, disable CTE for combine to use the simpler fallback
-        # TODO: Fix CTE implementation for aggregate contexts
-        if False:  # Temporarily disabled
-            pass
+        # Use optimized implementation for combine function
         
         # Original implementation (fallback)
         other_collection = self.generator.visit(func_node.args[0])

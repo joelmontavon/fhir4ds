@@ -24,23 +24,7 @@ class FHIRPathToSQL:
         self.json_column = json_column
         self.dialect = dialect
         
-        # CTEBuilder system support
-        self.use_new_cte_system = False  # Default to legacy system
-    
-    def enable_new_cte_system(self) -> None:
-        """
-        Enable the new CTEBuilder system for CTE management.
-        
-        This switches from the legacy scattered CTE system to the new
-        centralized CTEBuilder architecture.
-        """
-        self.use_new_cte_system = True
-    
-    def disable_new_cte_system(self) -> None:
-        """
-        Disable the new CTEBuilder system and use legacy CTE system.
-        """
-        self.use_new_cte_system = False
+        # CTE system standardized on legacy implementation
     
     def translate(
         self,
@@ -72,8 +56,7 @@ class FHIRPathToSQL:
             self.table_name, 
             self.json_column, 
             resource_type=resource_type_context, 
-            dialect=self.dialect,
-            use_new_cte_system=self.use_new_cte_system
+            dialect=self.dialect
         )
 
         if isinstance(expressions, str):
@@ -152,17 +135,12 @@ class FHIRPathToSQL:
             
         select_statement = f"SELECT\n    {select_clauses_str}\nFROM {self.table_name}\n{final_where_clause}".strip()
         
-        # Build final query with all accumulated CTEs
-        if self.use_new_cte_system:
-            # Use CTEBuilder system
-            final_query = master_generator.build_final_query_with_cte_builder(select_statement)
+        # Build final query with all accumulated CTEs using legacy system
+        if master_generator.ctes:
+            final_query = master_generator._build_final_query_with_ctes(select_statement)
         else:
-            # Use legacy CTE system
-            if master_generator.ctes:
-                final_query = master_generator._build_final_query_with_ctes(select_statement)
-            else:
-                # Even when there are no CTEs, we need to resolve optimized placeholders
-                final_query = master_generator._resolve_optimized_placeholders(select_statement)
+            # Even when there are no CTEs, we need to resolve optimized placeholders
+            final_query = master_generator._resolve_optimized_placeholders(select_statement)
             
         final_query += ";"
         return final_query
@@ -187,8 +165,7 @@ class FHIRPathToSQL:
             self.table_name, 
             self.json_column, 
             resource_type=resource_type_context, 
-            dialect=self.dialect,
-            use_new_cte_system=self.use_new_cte_system
+            dialect=self.dialect
         )
         return self.translate_to_parts_with_generator(fhirpath_expression, resource_type_context, generator)
     
@@ -212,8 +189,7 @@ class FHIRPathToSQL:
                 self.table_name, 
                 self.json_column, 
                 resource_type=resource_type_context, 
-                dialect=self.dialect,
-                use_new_cte_system=False  # Always disable CTEs for expression-only
+                dialect=self.dialect
             )
             
             # Temporarily disable all CTE features to force simple expression generation

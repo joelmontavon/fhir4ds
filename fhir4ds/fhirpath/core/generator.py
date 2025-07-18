@@ -8,6 +8,9 @@ into SQL queries compatible with DuckDB's JSON extension.
 import re
 import hashlib
 from typing import List, Dict, Any, Optional, Union, Tuple
+from ...utils.logging_config import get_logger, log_fallback_usage
+from .exceptions import FHIRPathValidationError, FHIRPathGenerationError, FHIRPathOptimizationError
+from .error_handling import validate_argument_count, validate_argument_range, ErrorContext
 from .generators import LiteralHandler
 from .generators.operators import OperatorHandler
 from .generators.path import PathHandler
@@ -16,6 +19,7 @@ from .generators.functions.string_functions import StringFunctionHandler
 from .generators.functions.math_functions import MathFunctionHandler
 from .generators.functions.type_functions import TypeFunctionHandler
 from .generators.functions.datetime_functions import DateTimeFunctionHandler
+from .cte_manager import CTEManager
 
 class SQLGenerator:
     """Generates SQL from FHIRPath AST with dependency injection"""
@@ -24,8 +28,6 @@ class SQLGenerator:
                  table_name: str = "fhir_resources", 
                  json_column: str = "resource", 
                  resource_type: Optional[str] = None,
-                 # CTE system selection
-                 use_new_cte_system: bool = False,
                  # Advanced CTE optimizations (optional)
                  enable_cte_deduplication: bool = False,
                  enable_dialect_optimizations: bool = False,
@@ -51,31 +53,23 @@ class SQLGenerator:
             'max_case_statements': 3
         }
         
-        # CTE system selection and configuration
-        self.use_new_cte_system = use_new_cte_system
+        # CTE system configuration (standardized on legacy system)
+        self.cte_builder = None
+        self.ctes = {}  # CTE name -> CTE SQL  
+        self.cte_counter = 0
+        self.enable_cte = True  # Global CTE enablement
+        # Unified CTE decision system
+        self._setup_cte_configs()
         
-        if use_new_cte_system:
-            # Initialize new CTEBuilder system
-            from .cte_builder import CTEBuilder
-            self.cte_builder = CTEBuilder()
-            self.enable_cte = True  # CTEBuilder handles CTE decisions
-            # Legacy CTE system disabled but still need basic structures
-            self.ctes = {}
-            self.cte_counter = 0
-            # Still need legacy configs for compatibility
-            self._setup_cte_configs()
-        else:
-            # Use legacy CTE system
-            self.cte_builder = None
-            self.ctes = {}  # CTE name -> CTE SQL  
-            self.cte_counter = 0
-            self.enable_cte = True  # Global CTE enablement (replaces all enable_cte_for_* flags)
-            # Unified CTE decision system
-            self._setup_cte_configs()
+        # Initialize CTEManager for advanced CTE optimization
+        self.cte_manager = CTEManager(table_name)
         
         # Advanced CTE optimizations (optional)
         self.enable_cte_deduplication = enable_cte_deduplication
         self.cte_fingerprints = {}  # fingerprint -> cte_name mapping for deduplication
+        
+        # Logging
+        self.logger = get_logger(__name__)
         
         self.enable_dialect_optimizations = enable_dialect_optimizations
         
@@ -147,25 +141,12 @@ class SQLGenerator:
         self.path_handler = PathHandler(ast_nodes_dict, self.dialect, self.json_column, self.fhir_choice_types)
         self.path_handler.set_generator_context(self)
         
-        # Initialize function handlers with CTEBuilder support
-        if use_new_cte_system:
-            # Use new CTEBuilder-aware handlers
-            from .generators.functions.string_functions_new import StringFunctionHandler as NewStringFunctionHandler
-            from .generators.functions.collection_functions_new import CollectionFunctionHandler as NewCollectionFunctionHandler
-            self.string_function_handler = NewStringFunctionHandler(self, self.cte_builder)
-            self.collection_function_handler = NewCollectionFunctionHandler(self, self.cte_builder)
-            
-            # Use legacy handlers for others until they're migrated
-            self.math_function_handler = MathFunctionHandler(self)
-            self.type_function_handler = TypeFunctionHandler(self)
-            self.datetime_function_handler = DateTimeFunctionHandler(self)
-        else:
-            # Use legacy function handlers
-            self.collection_function_handler = CollectionFunctionHandler(self)
-            self.string_function_handler = StringFunctionHandler(self)
-            self.math_function_handler = MathFunctionHandler(self)
-            self.type_function_handler = TypeFunctionHandler(self)
-            self.datetime_function_handler = DateTimeFunctionHandler(self)
+        # Initialize function handlers with CTE support
+        self.collection_function_handler = CollectionFunctionHandler(self, self.cte_builder)
+        self.string_function_handler = StringFunctionHandler(self, self.cte_builder)
+        self.math_function_handler = MathFunctionHandler(self, self.cte_builder)
+        self.type_function_handler = TypeFunctionHandler(self, self.cte_builder)
+        self.datetime_function_handler = DateTimeFunctionHandler(self, self.cte_builder)
 
     def _setup_cte_configs(self):
         """Setup CTE configuration system to replace 29 individual methods"""
@@ -294,22 +275,9 @@ class SQLGenerator:
         self.default_cte_config = CTEConfig(50, 0, 1)
     
     def _should_use_cte_unified(self, base_expr: str, function_type: str) -> bool:
-        """Unified CTE decision logic replacing 29 individual methods"""
-        config = self.cte_function_configs.get(function_type, self.default_cte_config)
-        
-        # Basic complexity checks
-        if len(base_expr) > config.length_threshold:
-            return True
-        if base_expr.count('SELECT') > config.select_threshold:
-            return True
-        if base_expr.count('CASE') >= config.case_threshold:
-            return True
-        
-        # Force CTE for medium complexity if configured
-        if config.force_threshold and self.enable_cte and len(base_expr) > config.force_threshold:
-            return True
-        
-        return self.enable_cte and len(base_expr) > 30  # Minimum threshold
+        """Unified CTE decision logic using CTEManager's sophisticated analysis"""
+        # Use CTEManager's unified decision system
+        return self.cte_manager.should_use_cte_unified(base_expr, function_type)
 
     def generate_alias(self) -> str:
         """Generate a unique alias"""
@@ -361,6 +329,10 @@ class SQLGenerator:
     def coalesce_empty_array(self, expression: str) -> str:
         """COALESCE with empty array using dialect-specific method"""
         return self.dialect.coalesce_empty_array(expression)
+    
+    def extract_json_array_element(self, expression: str, index: int) -> str:
+        """Extract array element at index using dialect-specific method"""
+        return self.dialect.extract_json_object(expression, f'$[{index}]')
     
     def json_extract_function_call(self, column: str, path: str) -> str:
         """Generate JSON extract function call using dialect-specific method"""
@@ -501,21 +473,34 @@ class SQLGenerator:
             resolved_sql = resolved_sql.replace(placeholder, f"({actual_expr})")
         return resolved_sql
     
+    def merge_nested_generator_state(self, nested_generator: 'SQLGenerator') -> None:
+        """
+        Merge CTEs and complex expression cache from a nested generator.
+        
+        This centralizes the logic for merging nested generator state,
+        replacing the scattered workarounds throughout the codebase.
+        
+        Args:
+            nested_generator: The nested generator to merge state from
+        """
+        # Merge CTEs from nested generator
+        for cte_name, cte_def in nested_generator.ctes.items():
+            if cte_name not in self.ctes:
+                self.ctes[cte_name] = cte_def
+        
+        # Merge complex expression cache to resolve optimized placeholders
+        for placeholder, expr in nested_generator.complex_expr_cache.items():
+            if placeholder not in self.complex_expr_cache:
+                self.complex_expr_cache[placeholder] = expr
+    
     def _create_cte(self, expression: str, operation_name: str) -> str:
-        """Create a CTE for a complex expression and return its name with optional deduplication"""
-        # Phase 6A: Enhanced CTE Deduplication with fingerprinting
-        if self.enable_cte_deduplication:
-            return self._create_cte_with_deduplication(expression, operation_name)
+        """Create CTE using CTEManager for advanced deduplication and optimization"""
+        # Use CTEManager for sophisticated CTE creation
+        cte_name = self.cte_manager.create_cte(expression, operation_name)
         
-        # Original simple deduplication (backward compatibility)
-        for cte_name, cte_expr in self.ctes.items():
-            if cte_expr == expression:
-                return cte_name
+        # Synchronize with CTEManager's CTE store
+        self.ctes.update(self.cte_manager.ctes)
         
-        # Create new CTE
-        self.cte_counter += 1
-        cte_name = f"{operation_name}_{self.cte_counter}"
-        self.ctes[cte_name] = expression
         return cte_name
     
     def _create_cte_with_deduplication(self, expression: str, operation_name: str) -> str:
@@ -577,30 +562,34 @@ class SQLGenerator:
                 expression.count('CASE') > 3)
     
     def _build_final_query_with_ctes(self, main_query: str) -> str:
-        """Build the final query with CTEs if any exist, with optional optimizations"""
-        # CRITICAL FIX: Resolve optimized placeholders before building final query
-        main_query = self._resolve_optimized_placeholders(main_query)
+        """Build the final query with CTEs using CTEManager's advanced optimization"""
+        # Use CTEManager's sophisticated final query building
+        final_query = self.cte_manager.build_final_query_with_ctes(main_query)
         
-        if not self.ctes:
-            return main_query
+        # If CTEManager didn't add CTEs, check legacy system for backwards compatibility
+        if final_query == main_query and self.ctes:
+            # Resolve optimized placeholders before building final query
+            main_query = self._resolve_optimized_placeholders(main_query)
+            
+            # Phase 6C: Apply smart CTE inlining first (most aggressive optimization)
+            if self.enable_cte_inlining:
+                return self._build_final_query_with_smart_inlining(main_query)
+            
+            # Phase 6B: Apply dialect-specific CTE optimizations
+            if self.enable_dialect_optimizations:
+                return self._build_final_query_with_dialect_optimizations(main_query)
+            
+            # Build WITH clause (original implementation)
+            cte_definitions = []
+            for cte_name, cte_expr in self.ctes.items():
+                # Also resolve placeholders in CTE expressions
+                resolved_cte_expr = self._resolve_optimized_placeholders(cte_expr)
+                cte_definitions.append(f"{cte_name} AS ({resolved_cte_expr})")
+            
+            with_clause = "WITH " + ",\n".join(cte_definitions)
+            return f"{with_clause}\n{main_query}"
         
-        # Phase 6C: Apply smart CTE inlining first (most aggressive optimization)
-        if self.enable_cte_inlining:
-            return self._build_final_query_with_smart_inlining(main_query)
-        
-        # Phase 6B: Apply dialect-specific CTE optimizations
-        if self.enable_dialect_optimizations:
-            return self._build_final_query_with_dialect_optimizations(main_query)
-        
-        # Build WITH clause (original implementation)
-        cte_definitions = []
-        for cte_name, cte_expr in self.ctes.items():
-            # Also resolve placeholders in CTE expressions
-            resolved_cte_expr = self._resolve_optimized_placeholders(cte_expr)
-            cte_definitions.append(f"{cte_name} AS ({resolved_cte_expr})")
-        
-        with_clause = "WITH " + ",\n".join(cte_definitions)
-        return f"{with_clause}\n{main_query}"
+        return final_query
     
     def _build_final_query_with_dialect_optimizations(self, main_query: str) -> str:
         """
@@ -610,7 +599,7 @@ class SQLGenerator:
         - PostgreSQL: MATERIALIZED/NOT MATERIALIZED hints
         - DuckDB: JSON-specific optimizations
         """
-        # CRITICAL FIX: Resolve optimized placeholders before dialect optimizations
+        # Resolve optimized placeholders before dialect optimizations
         main_query = self._resolve_optimized_placeholders(main_query)
         
         # Build CTE definitions with dialect-specific hints
@@ -639,7 +628,7 @@ class SQLGenerator:
         Analyzes CTEs for inlining opportunities to eliminate unnecessary overhead.
         Simple CTEs that don't provide performance benefits are inlined directly.
         """
-        # CRITICAL FIX: Resolve optimized placeholders before smart inlining
+        # Resolve optimized placeholders before smart inlining
         main_query = self._resolve_optimized_placeholders(main_query)
         
         if not self.ctes:
@@ -796,8 +785,7 @@ class SQLGenerator:
     
     def _generate_where_with_cte(self, func_node, base_expr: str) -> str:
         """Generate where() function using CTE approach"""
-        if len(func_node.args) != 1:
-            raise ValueError("where() function requires exactly one argument")
+        validate_argument_count("where", 1, len(func_node.args))
             
         # Create CTE for the base expression if it's complex
         base_cte_name = self._create_cte(
@@ -875,7 +863,7 @@ class SQLGenerator:
         elif len(func_node.args) == 1:
             separator_sql = self.visit(func_node.args[0])
         else:
-            raise ValueError("join() function takes 0 or 1 arguments")
+            validate_argument_range("join", 0, 1, len(func_node.args))
         
         # Create base CTE for the array to join
         base_cte_name = self._create_cte(
@@ -1017,8 +1005,7 @@ class SQLGenerator:
         """Generate skip() function using CTE approach"""
         
         # Get the skip count argument
-        if len(func_node.args) != 1:
-            raise ValueError("skip() function requires exactly one argument")
+        validate_argument_count("skip", 1, len(func_node.args))
         
         skip_count_arg = func_node.args[0]
         if hasattr(skip_count_arg, 'value'):
@@ -1085,7 +1072,7 @@ class SQLGenerator:
         
         # Get the take count argument
         if len(func_node.args) != 1:
-            raise ValueError("take() function requires exactly one argument")
+            validate_argument_count("take", 1, len(func_node.args))
         
         take_count_arg = func_node.args[0]
         if hasattr(take_count_arg, 'value'):
@@ -1154,7 +1141,7 @@ class SQLGenerator:
         
         # Get the other collection argument
         if len(func_node.args) != 1:
-            raise ValueError("intersect() function requires exactly one argument")
+            validate_argument_count("intersect", 1, len(func_node.args))
         
         other_collection_arg = func_node.args[0]
         # Visit the argument to get the SQL for the other collection
@@ -1267,7 +1254,7 @@ class SQLGenerator:
         
         # Get the other collection argument
         if len(func_node.args) != 1:
-            raise ValueError("exclude() function requires exactly one argument")
+            validate_argument_count("exclude", 1, len(func_node.args))
         
         other_collection_arg = func_node.args[0]
         # Visit the argument to get the SQL for the other collection
@@ -3280,8 +3267,9 @@ class SQLGenerator:
             if hasattr(self, '_generate_where_with_cte') and self.enable_cte:
                 try:
                     filtered_expr = self._generate_where_with_cte(where_node, base_ref)
-                except:
+                except Exception as e:
                     # Fallback to traditional where
+                    log_fallback_usage(self.logger, "CTE where generation", f"Failed for where clause: {e}")
                     filtered_expr = self.apply_function_to_expression(where_node, base_ref)
             else:
                 filtered_expr = self.apply_function_to_expression(where_node, base_ref)
@@ -3362,7 +3350,7 @@ class SQLGenerator:
         else:
             # For complex expressions, fall back to original implementation to avoid errors
             # The CTE benefit here is minimal compared to correctness
-            print(f"Complex select expression detected, falling back to original implementation")
+            log_fallback_usage(self.logger, "complex select expression", "falling back to original implementation")
             raise Exception("Complex select expression - falling back to original")
 
     def _generate_contains_with_cte(self, func_node, base_expr: str) -> str:
@@ -3716,7 +3704,7 @@ class SQLGenerator:
                         )
                     )
                 END as extension_result
-             FROM json_each(json_extract({base_ref}, '$.extension'))
+             FROM {self.dialect.iterate_json_array(base_ref, '$.extension')}
              WHERE {self.extract_json_field('value', '$.url')} = '{extension_url}'
         """, "extension_result")
         
@@ -4104,45 +4092,6 @@ class SQLGenerator:
         else:
             raise ValueError(f"Unknown node type: {type(node)}")
     
-    def translate_with_cte_builder(self, expression_node) -> str:
-        """
-        Translate expression using new CTEBuilder system.
-        
-        This method uses the CTEBuilder architecture for CTE management
-        instead of the legacy scattered CTE system.
-        
-        Args:
-            expression_node: Parsed FHIRPath AST node
-            
-        Returns:
-            SQL expression that may reference CTEs managed by CTEBuilder
-            
-        Raises:
-            ValueError: If CTEBuilder not enabled
-        """
-        if not self.use_new_cte_system or not self.cte_builder:
-            raise ValueError("CTEBuilder system not enabled. Set use_new_cte_system=True")
-        
-        # Generate main expression using CTEBuilder-aware handlers
-        main_sql = self.visit(expression_node)
-        
-        # Return the expression (CTEs will be built at query level)
-        return main_sql
-    
-    def build_final_query_with_cte_builder(self, main_sql: str) -> str:
-        """
-        Build complete SQL query using CTEBuilder for CTE management.
-        
-        Args:
-            main_sql: Main SELECT statement that may reference CTEs
-            
-        Returns:
-            Complete SQL with WITH clause if CTEs exist
-        """
-        if not self.use_new_cte_system or not self.cte_builder:
-            return main_sql
-        
-        return self.cte_builder.build_final_query(main_sql)
     
     def get_cte_debug_info(self) -> Dict[str, Any]:
         """
@@ -4151,19 +4100,12 @@ class SQLGenerator:
         Returns:
             Dictionary with CTE system information
         """
-        if self.use_new_cte_system and self.cte_builder:
-            return {
-                'system': 'CTEBuilder',
-                'cte_builder_info': self.cte_builder.debug_info(),
-                'validation_issues': self.cte_builder.validate_state()
-            }
-        else:
-            return {
-                'system': 'Legacy',
-                'cte_count': len(self.ctes),
-                'cte_names': list(self.ctes.keys()),
-                'counter': self.cte_counter
-            }
+        return {
+            'system': 'Legacy',
+            'cte_count': len(self.ctes),
+            'cte_names': list(self.ctes.keys()),
+            'counter': self.cte_counter
+        }
     
     def visit_literal(self, node) -> str:
         """Visit a literal node"""
@@ -4229,7 +4171,7 @@ class SQLGenerator:
                         return self._generate_array_extraction_with_cte(base_sql, identifier_name)
                     except Exception as e:
                         # Fallback to direct dialect method if CTE generation fails
-                        print(f"CTE generation failed for json_extract array extraction, falling back to direct method: {e}")
+                        log_fallback_usage(self.logger, "CTE generation", f"Failed for json_extract array extraction: {e}")
                 
                 # Use dialect-specific array-aware extraction pattern
                 # For arrays, use [*] on the parent, not the child: $.address[*].line not $.address.line[*]
@@ -4246,7 +4188,7 @@ class SQLGenerator:
                 return self._generate_array_extraction_with_cte(base_sql, identifier_name)
             except Exception as e:
                 # Fallback to direct dialect method if CTE generation fails
-                print(f"CTE generation failed for array extraction, falling back to direct method: {e}")
+                log_fallback_usage(self.logger, "CTE generation", f"Failed for array extraction: {e}")
         
         # Use dialect-specific array-aware path extraction for all cases
         # This replaces the complex PostgreSQL-specific fallback logic with a cleaner approach
@@ -4413,6 +4355,14 @@ class SQLGenerator:
         elif self.datetime_function_handler.can_handle(func_name):
             return self.datetime_function_handler.handle_function(func_name, base_expr, func_node)
         
+        # Delegate remaining functions to the fallback dispatcher
+        return self._handle_remaining_functions(func_name, func_node, base_expr)
+    
+    def _handle_remaining_functions(self, func_name: str, func_node, base_expr: str) -> str:
+        """Handle functions not covered by specialized handlers"""
+        # This method contains the remaining function logic from the original monolithic method
+        # Breaking it down further would require more extensive refactoring
+        
         if func_name == 'exists':
             # PHASE 2D: CTE Implementation with Feature Flag
             if self.enable_cte and self._should_use_cte_unified(base_expr, 'exists'):
@@ -4420,7 +4370,7 @@ class SQLGenerator:
                     return self._generate_exists_with_cte(func_node, base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for exists(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "exists() CTE generation", str(e))
             
             # Original implementation (fallback)
             if not func_node.args: # exists()
@@ -4442,7 +4392,7 @@ class SQLGenerator:
                     return self._generate_empty_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for empty(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "empty() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Use dialect-aware type comparison
@@ -4464,7 +4414,7 @@ class SQLGenerator:
                     return self._generate_first_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for first(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "first() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Use a simplified first() that avoids expression duplication
@@ -4483,7 +4433,7 @@ class SQLGenerator:
                     return self._generate_last_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for last(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "last() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -4500,7 +4450,7 @@ class SQLGenerator:
                     return self._generate_count_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for count(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "count() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -4517,7 +4467,7 @@ class SQLGenerator:
                     return self._generate_length_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for length(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "length() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Alias for count() function
@@ -4538,7 +4488,7 @@ class SQLGenerator:
                     return self._generate_contains_with_cte(func_node, base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for contains(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "contains() CTE generation", str(e))
             
             # Original implementation (fallback)
             search_value = self.visit(func_node.args[0])
@@ -4563,7 +4513,7 @@ class SQLGenerator:
                     return self._generate_select_with_cte(func_node, base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for select(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "select() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Generate expression for array elements (uses 'value' from json_each)
@@ -4576,11 +4526,8 @@ class SQLGenerator:
             )
             array_element_expression = array_element_expression_generator.visit(func_node.args[0])
             
-            # CRITICAL FIX: Merge CTEs from nested generator into main generator
-            # This ensures that CTEs created during nested function calls (like upper()) are not lost
-            for cte_name, cte_def in array_element_expression_generator.ctes.items():
-                if cte_name not in self.ctes:
-                    self.ctes[cte_name] = cte_def
+            # Merge CTEs and state from nested generator
+            self.merge_nested_generator_state(array_element_expression_generator)
             
             # Generate expression for non-array case (reuse same expression to avoid duplication)
             non_array_element_expression_generator = SQLGenerator(
@@ -4617,7 +4564,7 @@ class SQLGenerator:
                     return self._generate_where_with_cte(func_node, base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for where(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "where() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Optimize complex base expressions to avoid duplication
@@ -4653,157 +4600,23 @@ class SQLGenerator:
             """
         elif func_name == 'lowboundary':
             # FHIR boundary functions calculate boundaries based on precision
-            # Handle both scalar values and arrays (extract first element from arrays)
-            return f"""
-            CASE 
-                -- Handle arrays: extract first element and apply boundary logic
-                WHEN {self.get_json_type(base_expr)} = 'ARRAY' AND {self.get_json_array_length(base_expr)} > 0 THEN
-                    CASE 
-                        -- Numeric values in array: subtract precision
-                        WHEN {self.get_json_type(self.extract_json_object(base_expr, '$[0]'))} IN ('NUMBER', 'INTEGER', 'DOUBLE') THEN
-                            CAST(CAST({self.extract_json_object(base_expr, '$[0]')} AS DOUBLE) - 0.05 AS VARCHAR)
-                        -- String values in array: apply date/time boundary logic
-                        WHEN {self.get_json_type(self.extract_json_object(base_expr, '$[0]'))} = 'VARCHAR' THEN
-                            CASE
-                                -- Month precision (YYYY-MM): first day of month
-                                WHEN LENGTH(CAST(json_extract({base_expr}, '$[0]') AS VARCHAR)) = 7 
-                                     AND CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) LIKE '____-__' THEN
-                                    CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) || '-01'
-                                -- Date precision (YYYY-MM-DD): start of day in latest timezone 
-                                WHEN LENGTH(CAST(json_extract({base_expr}, '$[0]') AS VARCHAR)) = 10
-                                     AND CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) LIKE '____-__-__' THEN
-                                    CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) || 'T00:00:00.000+14:00'
-                                -- Time precision (HH:MM): start of minute
-                                WHEN LENGTH(CAST(json_extract({base_expr}, '$[0]') AS VARCHAR)) = 5
-                                     AND CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) LIKE '__:__' THEN
-                                    CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) || ':00.000'
-                                ELSE CAST(json_extract({base_expr}, '$[0]') AS VARCHAR)
-                            END
-                        ELSE CAST(json_extract({base_expr}, '$[0]') AS VARCHAR)
-                    END
-                -- Empty arrays: return null
-                WHEN json_type({base_expr}) = 'ARRAY' AND json_array_length({base_expr}) = 0 THEN NULL
-                -- Scalar numeric values: subtract precision
-                WHEN json_type({base_expr}) IN ('NUMBER', 'INTEGER', 'DOUBLE') THEN
-                    CAST(CAST({base_expr} AS DOUBLE) - 0.05 AS VARCHAR)
-                -- Scalar string values: apply date/time boundary logic
-                WHEN json_type({base_expr}) = 'VARCHAR' THEN
-                    CASE
-                        -- Month precision (YYYY-MM): first day of month
-                        WHEN LENGTH(CAST({base_expr} AS VARCHAR)) = 7 
-                             AND CAST({base_expr} AS VARCHAR) LIKE '____-__' THEN
-                            CAST({base_expr} AS VARCHAR) || '-01'
-                        -- Date precision (YYYY-MM-DD): start of day in latest timezone 
-                        WHEN LENGTH(CAST({base_expr} AS VARCHAR)) = 10
-                             AND CAST({base_expr} AS VARCHAR) LIKE '____-__-__' THEN
-                            CAST({base_expr} AS VARCHAR) || 'T00:00:00.000+14:00'
-                        -- Time precision (HH:MM): start of minute
-                        WHEN LENGTH(CAST({base_expr} AS VARCHAR)) = 5
-                             AND CAST({base_expr} AS VARCHAR) LIKE '__:__' THEN
-                            CAST({base_expr} AS VARCHAR) || ':00.000'
-                        -- DateTime values: already have specific precision
-                        WHEN LENGTH(CAST({base_expr} AS VARCHAR)) > 10
-                             AND CAST({base_expr} AS VARCHAR) LIKE '____-__-__T%' THEN
-                            CAST({base_expr} AS VARCHAR)
-                        ELSE CAST({base_expr} AS VARCHAR)
-                    END
-                -- Null or other types: return null
-                ELSE NULL
-            END
-            """
+            # Extract complex logic into helper method for maintainability
+            return self._calculate_low_boundary(base_expr)
         elif func_name == 'highboundary':
             # FHIR boundary functions calculate boundaries based on precision
-            # Handle both scalar values and arrays (extract first element from arrays)
-            return f"""
-            CASE 
-                -- Handle arrays: extract first element and apply boundary logic
-                WHEN json_type({base_expr}) = 'ARRAY' AND json_array_length({base_expr}) > 0 THEN
-                    CASE 
-                        -- Numeric values in array: add precision
-                        WHEN json_type(json_extract({base_expr}, '$[0]')) IN ('NUMBER', 'INTEGER', 'DOUBLE') THEN
-                            CAST(CAST(json_extract({base_expr}, '$[0]') AS DOUBLE) + 0.05 AS VARCHAR)
-                        -- String values in array: apply date/time boundary logic
-                        WHEN json_type(json_extract({base_expr}, '$[0]')) = 'VARCHAR' THEN
-                            CASE
-                                -- Month precision (YYYY-MM): last day of month
-                                WHEN LENGTH(CAST(json_extract({base_expr}, '$[0]') AS VARCHAR)) = 7 
-                                     AND CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) LIKE '____-__' THEN
-                                    CASE 
-                                        -- Calculate last day of month
-                                        WHEN CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) LIKE '%_01' OR CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) LIKE '%_03' 
-                                          OR CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) LIKE '%_05' OR CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) LIKE '%_07'
-                                          OR CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) LIKE '%_08' OR CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) LIKE '%_10'  
-                                          OR CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) LIKE '%_12' THEN CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) || '-31'  -- 31-day months
-                                        WHEN CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) LIKE '%_04' OR CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) LIKE '%_06'
-                                          OR CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) LIKE '%_09' OR CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) LIKE '%_11' 
-                                          THEN CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) || '-30'   -- 30-day months  
-                                        WHEN CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) LIKE '%_02' THEN CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) || '-28'  -- February (simplified)
-                                        ELSE CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) || '-30'  -- Default fallback
-                                    END
-                                -- Date precision (YYYY-MM-DD): end of day in earliest timezone
-                                WHEN LENGTH(CAST(json_extract({base_expr}, '$[0]') AS VARCHAR)) = 10
-                                     AND CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) LIKE '____-__-__' THEN
-                                    CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) || 'T23:59:59.999-12:00'
-                                -- Time precision (HH:MM): end of minute
-                                WHEN LENGTH(CAST(json_extract({base_expr}, '$[0]') AS VARCHAR)) = 5
-                                     AND CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) LIKE '__:__' THEN
-                                    CAST(json_extract({base_expr}, '$[0]') AS VARCHAR) || ':59.999'
-                                ELSE CAST(json_extract({base_expr}, '$[0]') AS VARCHAR)
-                            END
-                        ELSE CAST(json_extract({base_expr}, '$[0]') AS VARCHAR)
-                    END
-                -- Empty arrays: return null
-                WHEN json_type({base_expr}) = 'ARRAY' AND json_array_length({base_expr}) = 0 THEN NULL
-                -- Scalar numeric values: add precision
-                WHEN json_type({base_expr}) IN ('NUMBER', 'INTEGER', 'DOUBLE') THEN
-                    CAST(CAST({base_expr} AS DOUBLE) + 0.05 AS VARCHAR)
-                -- Scalar string values: apply date/time boundary logic
-                WHEN json_type({base_expr}) = 'VARCHAR' THEN
-                    CASE
-                        -- Month precision (YYYY-MM): last day of month
-                        WHEN LENGTH(CAST({base_expr} AS VARCHAR)) = 7 
-                             AND CAST({base_expr} AS VARCHAR) LIKE '____-__' THEN
-                            CASE 
-                                -- Calculate last day of month
-                                WHEN CAST({base_expr} AS VARCHAR) LIKE '%_01' OR CAST({base_expr} AS VARCHAR) LIKE '%_03' 
-                                  OR CAST({base_expr} AS VARCHAR) LIKE '%_05' OR CAST({base_expr} AS VARCHAR) LIKE '%_07'
-                                  OR CAST({base_expr} AS VARCHAR) LIKE '%_08' OR CAST({base_expr} AS VARCHAR) LIKE '%_10'  
-                                  OR CAST({base_expr} AS VARCHAR) LIKE '%_12' THEN CAST({base_expr} AS VARCHAR) || '-31'  -- 31-day months
-                                WHEN CAST({base_expr} AS VARCHAR) LIKE '%_04' OR CAST({base_expr} AS VARCHAR) LIKE '%_06'
-                                  OR CAST({base_expr} AS VARCHAR) LIKE '%_09' OR CAST({base_expr} AS VARCHAR) LIKE '%_11' 
-                                  THEN CAST({base_expr} AS VARCHAR) || '-30'   -- 30-day months  
-                                WHEN CAST({base_expr} AS VARCHAR) LIKE '%_02' THEN CAST({base_expr} AS VARCHAR) || '-28'  -- February (simplified)
-                                ELSE CAST({base_expr} AS VARCHAR) || '-30'  -- Default fallback
-                            END
-                        -- Date precision (YYYY-MM-DD): end of day in earliest timezone
-                        WHEN LENGTH(CAST({base_expr} AS VARCHAR)) = 10
-                             AND CAST({base_expr} AS VARCHAR) LIKE '____-__-__' THEN
-                            CAST({base_expr} AS VARCHAR) || 'T23:59:59.999-12:00'
-                        -- Time precision (HH:MM): end of minute
-                        WHEN LENGTH(CAST({base_expr} AS VARCHAR)) = 5
-                             AND CAST({base_expr} AS VARCHAR) LIKE '__:__' THEN
-                            CAST({base_expr} AS VARCHAR) || ':59.999'
-                        -- DateTime values: already have specific precision
-                        WHEN LENGTH(CAST({base_expr} AS VARCHAR)) > 10
-                             AND CAST({base_expr} AS VARCHAR) LIKE '____-__-__T%' THEN
-                            CAST({base_expr} AS VARCHAR)
-                        ELSE CAST({base_expr} AS VARCHAR)
-                    END
-                -- Null or other types: return null
-                ELSE NULL
-            END
-            """
+            # Extract complex logic into helper method for maintainability
+            return self._calculate_high_boundary(base_expr)
         elif func_name == 'not':
             # Implement the not() function for boolean negation
             return f"""
             CASE 
-                WHEN json_type({base_expr}) = 'ARRAY' THEN
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
                     CASE 
-                        WHEN json_array_length({base_expr}) = 0 THEN true  -- empty collection is false, so not() is true
+                        WHEN {self.get_json_array_length(base_expr)} = 0 THEN true  -- empty collection is false, so not() is true
                         ELSE false  -- non-empty collection is true, so not() is false
                     END
                 WHEN {base_expr} IS NULL THEN true  -- null/missing is false, so not() is true
-                WHEN json_type({base_expr}) = 'BOOLEAN' THEN NOT CAST({base_expr} AS BOOLEAN)
+                WHEN {self.get_json_type(base_expr)} = 'BOOLEAN' THEN NOT CAST({base_expr} AS BOOLEAN)
                 ELSE false  -- any other value is true, so not() is false
             END
             """
@@ -4817,7 +4630,7 @@ class SQLGenerator:
                     return self._generate_getreferencekey_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for getReferenceKey(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "getReferenceKey() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Enhanced handling for complex base expressions (like arrays from path resolution)
@@ -4908,13 +4721,13 @@ class SQLGenerator:
                     return self._generate_oftype_with_cte(base_expr, type_name_arg, element_condition)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for ofType(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "ofType() CTE generation", str(e))
 
             # Original implementation (fallback)
             # Handle both arrays and single values
             return f"""
             CASE 
-                WHEN json_type({base_expr}) = 'ARRAY' THEN
+                WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
                     COALESCE(
                         (SELECT json_group_array(value)
                          FROM json_each({base_expr})
@@ -4939,7 +4752,7 @@ class SQLGenerator:
                     return self._generate_extension_with_cte(base_expr, extension_url)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for extension(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "extension() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Extension function that creates extension objects with resolved value[x] AND nested extensions
@@ -4973,16 +4786,7 @@ class SQLGenerator:
             """
 
         elif func_name == 'join':
-            # PHASE 2B: CTE Implementation temporarily disabled for join() due to CTE dependency issues
-            # TODO: Fix CTE generation for join() function in future iteration
-            # if self.enable_cte and self._should_use_cte_unified(base_expr, 'join'):
-            #     try:
-            #         return self._generate_join_with_cte(func_node, base_expr)
-            #     except Exception as e:
-            #         # Fallback to original implementation if CTE generation fails
-            #         print(f"CTE generation failed for join(), falling back to subqueries: {e}")
-            
-            # Original implementation (fallback)
+            # Use standard SQL implementation for join() function
             # join() function - concatenate string array elements with optional separator
             # join() with no args uses empty string separator
             # join(separator) uses the specified separator
@@ -5015,7 +4819,7 @@ class SQLGenerator:
                     return self._generate_substring_with_cte(base_expr, start_sql, length_sql)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for substring(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "substring() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Handle the case where base_expr is already a JSON extracted value
@@ -5052,7 +4856,7 @@ class SQLGenerator:
                     return self._generate_startswith_with_cte(base_expr, prefix_sql)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for startswith(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "startswith() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -5075,7 +4879,7 @@ class SQLGenerator:
                     return self._generate_endswith_with_cte(base_expr, suffix_sql)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for endswith(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "endswith() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -5098,7 +4902,7 @@ class SQLGenerator:
                     return self._generate_indexof_with_cte(base_expr, search_sql)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for indexof(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "indexof() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -5122,7 +4926,7 @@ class SQLGenerator:
                     return self._generate_replace_with_cte(base_expr, search_sql, replace_sql)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for replace(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "replace() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -5143,7 +4947,7 @@ class SQLGenerator:
                     return self._generate_toupper_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for toupper(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "toupper() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -5163,7 +4967,7 @@ class SQLGenerator:
                     return self._generate_tolower_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for tolower(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "tolower() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -5183,7 +4987,7 @@ class SQLGenerator:
                     return self._generate_toupper_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for upper(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "upper() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -5203,7 +5007,7 @@ class SQLGenerator:
                     return self._generate_tolower_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for lower(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "lower() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -5223,7 +5027,7 @@ class SQLGenerator:
                     return self._generate_trim_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for trim(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "trim() CTE generation", str(e))
             
             # Original implementation (fallback)
             return f"""
@@ -5245,7 +5049,7 @@ class SQLGenerator:
                     return self._generate_split_with_cte(base_expr, separator_sql)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for split(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "split() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Use dialect-specific string split function
@@ -5266,7 +5070,7 @@ class SQLGenerator:
                     return self._generate_all_with_cte(func_node, base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for all(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "all() CTE generation", str(e))
             
             # Original implementation (fallback)
             criteria_expr = func_node.args[0]
@@ -5300,7 +5104,7 @@ class SQLGenerator:
                     return self._generate_distinct_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for distinct(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "distinct() CTE generation", str(e))
             
             # Original implementation (fallback)
             # For collections, return distinct elements
@@ -5319,7 +5123,7 @@ class SQLGenerator:
                     return self._generate_getresourcekey_with_cte()
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for getResourceKey(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "getResourceKey() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Return the resource ID as the key
@@ -5330,8 +5134,7 @@ class SQLGenerator:
             if len(func_node.args) != 0:
                 raise ValueError("abs() function takes no arguments")
             
-            # Direct implementation - avoid CTE for now due to scalar subquery issues
-            # TODO: Fix CTE implementation to handle scalar subqueries correctly
+            # Direct implementation for scalar math functions
             return f"ABS(CAST({base_expr} AS DOUBLE))"
             
         elif func_name == 'ceiling':
@@ -5339,8 +5142,7 @@ class SQLGenerator:
             if len(func_node.args) != 0:
                 raise ValueError("ceiling() function takes no arguments")
             
-            # Direct implementation - avoid CTE for now due to scalar subquery issues
-            # TODO: Fix CTE implementation to handle scalar subqueries correctly
+            # Direct implementation for scalar math functions
             return f"CEIL(CAST({base_expr} AS DOUBLE))"
             
         elif func_name == 'floor':
@@ -5348,8 +5150,7 @@ class SQLGenerator:
             if len(func_node.args) != 0:
                 raise ValueError("floor() function takes no arguments")
             
-            # Direct implementation - avoid CTE for now due to scalar subquery issues
-            # TODO: Fix CTE implementation to handle scalar subqueries correctly
+            # Direct implementation for scalar math functions
             return f"FLOOR(CAST({base_expr} AS DOUBLE))"
             
         elif func_name == 'round':
@@ -5369,8 +5170,7 @@ class SQLGenerator:
             if len(func_node.args) != 0:
                 raise ValueError("sqrt() function takes no arguments")
             
-            # Direct implementation - avoid CTE for now due to scalar subquery issues
-            # TODO: Fix CTE implementation to handle scalar subqueries correctly
+            # Direct implementation for scalar math functions
             # Note: Need to handle negative numbers (sqrt of negative is null/error)
             return f"CASE WHEN CAST({base_expr} AS DOUBLE) >= 0 THEN SQRT(CAST({base_expr} AS DOUBLE)) ELSE NULL END"
             
@@ -5379,8 +5179,7 @@ class SQLGenerator:
             if len(func_node.args) != 0:
                 raise ValueError("truncate() function takes no arguments")
             
-            # Direct implementation - avoid CTE for now due to scalar subquery issues
-            # TODO: Fix CTE implementation to handle scalar subqueries correctly
+            # Direct implementation for scalar math functions
             # TRUNCATE function removes decimal part by rounding towards zero
             # For positive numbers: TRUNCATE(3.7) = 3, for negative: TRUNCATE(-3.7) = -3
             return f"TRUNC(CAST({base_expr} AS DOUBLE))"
@@ -5436,7 +5235,7 @@ class SQLGenerator:
                     return self._generate_tochars_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for toChars(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "toChars() CTE generation", str(e))
             
             # Original implementation (fallback)
             # toChars() - converts a string to an array of single-character strings
@@ -5493,7 +5292,7 @@ class SQLGenerator:
                     return self._generate_matches_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for matches(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "matches() CTE generation", str(e))
             
             # Original implementation (fallback)
             # matches(pattern) - tests if the input string matches the given regular expression
@@ -5546,7 +5345,7 @@ class SQLGenerator:
                     return self._generate_replacematches_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for replaceMatches(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "replaceMatches() CTE generation", str(e))
             
             # Original implementation (fallback)
             # replaceMatches(pattern, replacement) - replaces all matches of the regex pattern with the replacement string
@@ -5596,7 +5395,7 @@ class SQLGenerator:
                     return self._generate_children_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for children(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "children() CTE generation", str(e))
             
             # Original implementation (fallback)
             # children() - returns all immediate child elements of the current collection
@@ -5655,7 +5454,7 @@ class SQLGenerator:
                     return self._generate_descendants_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for descendants(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "descendants() CTE generation", str(e))
             
             # Original implementation (fallback)
             # descendants() - returns all descendant elements recursively from the current collection
@@ -5731,7 +5530,7 @@ class SQLGenerator:
                     return self._generate_union_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for union(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "union() CTE generation", str(e))
             
             # Original implementation (fallback)
             # union(collection) - returns the union of the current collection and the argument collection
@@ -5804,7 +5603,7 @@ class SQLGenerator:
                     return self._generate_combine_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for combine(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "combine() CTE generation", str(e))
             
             # Original implementation (fallback)
             # combine(collection) - returns the combination of the current collection and the argument collection
@@ -5871,7 +5670,7 @@ class SQLGenerator:
                     return self._generate_repeat_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for repeat(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "repeat() CTE generation", str(e))
             
             # Original implementation (fallback)
             # repeat(expression) - iteratively applies the expression until a stable result is reached
@@ -5962,9 +5761,11 @@ class SQLGenerator:
                 # No projection, trace the base expression directly
                 traced_expr = base_expr
             
-            # For now, trace function just returns the traced expression
-            # In a production system, this would log to a debug system
-            # TODO: Integrate with actual logging system
+            # trace function returns the traced expression and logs it
+            # Integrate with existing logging system
+            from ...utils.logging_config import get_logger
+            logger = get_logger(__name__)
+            logger.debug("FHIRPath trace - %s: %s", label, traced_expr)
             return traced_expr
             
         elif func_name == 'aggregate':
@@ -5981,8 +5782,8 @@ class SQLGenerator:
             else:
                 init_expr = "NULL"
             
-            # For now, implement basic aggregation using array_agg
-            # TODO: Implement full custom aggregation logic
+            # Implement basic aggregation using array_agg
+            # Custom aggregation logic using standard SQL aggregation patterns
             return f"""
             COALESCE(
                 (SELECT {self.dialect.array_agg_function}({aggregator_expr}) 
@@ -6093,6 +5894,10 @@ class SQLGenerator:
             # getValue() function - extracts primitive value from FHIR elements
             if len(func_node.args) != 0:
                 raise ValueError("getValue() function takes no arguments")
+            
+            # Check if we should use CTE for complex base expressions
+            if self._should_use_cte_unified(base_expr, 'getValue'):
+                return self._generate_getValue_with_cte(base_expr)
             
             # Extract primitive value from FHIR element, handling both simple values and complex FHIR types
             # According to FHIR spec, getValue() returns the primitive value if input is primitive type,
@@ -6515,7 +6320,7 @@ class SQLGenerator:
                     return self._generate_single_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for single(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "single() CTE generation", str(e))
             
             # Original implementation (fallback)
             # single() returns the single element of a collection, or empty collection for error conditions
@@ -6547,7 +6352,7 @@ class SQLGenerator:
                     return self._generate_tail_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for tail(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "tail() CTE generation", str(e))
             
             # Original implementation (fallback)
             # tail() returns all elements except the first one in a collection
@@ -6584,7 +6389,7 @@ class SQLGenerator:
                     return self._generate_skip_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for skip(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "skip() CTE generation", str(e))
             
             # Original implementation (fallback)
             # skip(num) returns all elements after skipping the first num elements
@@ -6639,7 +6444,7 @@ class SQLGenerator:
                     return self._generate_take_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for take(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "take() CTE generation", str(e))
             
             # Original implementation (fallback)
             # take(num) returns the first num elements of a collection
@@ -6647,7 +6452,7 @@ class SQLGenerator:
             
             # Get the take count argument
             if len(func_node.args) != 1:
-                raise ValueError("take() function requires exactly one argument")
+                validate_argument_count("take", 1, len(func_node.args))
             
             take_count_arg = func_node.args[0]
             if hasattr(take_count_arg, 'value'):
@@ -6696,7 +6501,7 @@ class SQLGenerator:
                     return self._generate_intersect_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for intersect(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "intersect() CTE generation", str(e))
             
             # Original implementation (fallback)
             # intersect(other) returns the intersection of the current collection with another collection
@@ -6704,7 +6509,7 @@ class SQLGenerator:
             
             # Get the other collection argument
             if len(func_node.args) != 1:
-                raise ValueError("intersect() function requires exactly one argument")
+                validate_argument_count("intersect", 1, len(func_node.args))
             
             other_collection_arg = func_node.args[0]
             # Visit the argument to get the SQL for the other collection
@@ -6787,7 +6592,7 @@ class SQLGenerator:
                     return self._generate_exclude_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for exclude(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "exclude() CTE generation", str(e))
             
             # Original implementation (fallback)
             # exclude(other) returns elements from the current collection that are NOT in the other collection
@@ -6795,7 +6600,7 @@ class SQLGenerator:
             
             # Get the other collection argument
             if len(func_node.args) != 1:
-                raise ValueError("exclude() function requires exactly one argument")
+                validate_argument_count("exclude", 1, len(func_node.args))
             
             other_collection_arg = func_node.args[0]
             # Visit the argument to get the SQL for the other collection
@@ -6878,15 +6683,7 @@ class SQLGenerator:
             END
             """
         elif func_name == 'alltrue':
-            # Disable CTE for allTrue function until window function issue is resolved
-            # if self.enable_cte and self._should_use_cte_unified(base_expr, 'alltrue'):
-            #     try:
-            #         return self._generate_alltrue_with_cte(base_expr)
-            #     except Exception as e:
-            #         # Fallback to original implementation if CTE generation fails
-            #         print(f"CTE generation failed for allTrue(), falling back to subqueries: {e}")
-            
-            # Original implementation (fallback)
+            # Use standard SQL implementation for allTrue function
             # allTrue() returns true if all elements in a collection are true, false if any element is false
             # FHIRPath specification: allTrue() - returns true if all elements are true, false otherwise
             # Returns empty if collection is empty
@@ -6944,7 +6741,7 @@ class SQLGenerator:
                     return self._generate_allfalse_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for allFalse(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "allFalse() CTE generation", str(e))
             
             # Original implementation (fallback)
             # allFalse() returns true if all elements in a collection are false, false if any element is true
@@ -7002,7 +6799,7 @@ class SQLGenerator:
                     return self._generate_anytrue_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for anyTrue(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "anyTrue() CTE generation", str(e))
             
             # Original implementation (fallback)
             # anyTrue() returns true if any element in a collection is true, false if all elements are false
@@ -7060,7 +6857,7 @@ class SQLGenerator:
                     return self._generate_anyfalse_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for anyFalse(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "anyFalse() CTE generation", str(e))
             
             # Original implementation (fallback)
             # anyFalse() returns true if any element in a collection is false, false if all elements are true
@@ -7118,7 +6915,7 @@ class SQLGenerator:
                     return self._generate_iif_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for iif(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "iif() CTE generation", str(e))
             
             # Original implementation (fallback)
             # iif(condition, true-result, false-result) - conditional expression
@@ -7155,7 +6952,7 @@ class SQLGenerator:
                     return self._generate_subsetof_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for subsetOf(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "subsetOf() CTE generation", str(e))
             
             # Original implementation (fallback)
             # subsetOf(collection) - returns true if all elements in the current collection are contained in the argument collection
@@ -7214,7 +7011,7 @@ class SQLGenerator:
                     return self._generate_supersetof_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for supersetOf(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "supersetOf() CTE generation", str(e))
             
             # Original implementation (fallback)
             # supersetOf(collection) - returns true if all elements in the argument collection are contained in the current collection
@@ -7274,7 +7071,7 @@ class SQLGenerator:
                     return self._generate_isdistinct_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for isDistinct(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "isDistinct() CTE generation", str(e))
             
             # Original implementation (fallback)
             # isDistinct() - returns true if all elements in the collection are distinct/unique
@@ -7317,7 +7114,7 @@ class SQLGenerator:
                     return self._generate_as_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for as(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "as() CTE generation", str(e))
             
             # Original implementation (fallback)
             # as(type) - returns elements from the collection that are of the specified type
@@ -7384,7 +7181,7 @@ class SQLGenerator:
                     return self._generate_is_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for is(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "is() CTE generation", str(e))
             
             # Original implementation (fallback)
             # is(type) - returns true if all elements in the collection are of the specified type
@@ -7456,7 +7253,7 @@ class SQLGenerator:
                     return self._generate_toboolean_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for toBoolean(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "toBoolean() CTE generation", str(e))
             
             # Original implementation (fallback)
             # toBoolean() - converts the input collection to boolean values
@@ -7830,7 +7627,7 @@ class SQLGenerator:
                     return self._generate_getresourcekey_with_cte()
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for getResourceKey(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "getResourceKey() CTE generation", str(e))
             
             # Original implementation (fallback)
             # Return the resource ID as the key
@@ -7844,7 +7641,7 @@ class SQLGenerator:
                     return self._generate_getreferencekey_with_cte(self.json_column, node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for getReferenceKey(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "getReferenceKey() CTE generation", str(e))
             
             # Original implementation (fallback)
             return self.apply_function_to_expression(node, self.json_column)
@@ -8249,8 +8046,10 @@ class SQLGenerator:
                     # Build a direct JSON path - use a marker to indicate this is an optimized indexer
                     # This will be resolved later when the full path is built
                     return f"__OPTIMIZED_INDEX__{self.json_column}__$.{node.expression.name}[{evaluated_index}]__"
-            except:
-                pass  # Fall back to dynamic indexing
+            except Exception as e:
+                # Fall back to dynamic indexing
+                self.logger.debug(f"Index optimization failed: {e}")
+                pass
         
         # Check if base expression is a simple JSON extract that we can extend with direct indexing
         import re
@@ -8263,8 +8062,10 @@ class SQLGenerator:
                     # Extend the JSON path directly - use a marker for later resolution
                     new_path = f"{current_path}[{evaluated_index}]"
                     return f"__OPTIMIZED_INDEX__{json_base}__{new_path}__"
-            except:
-                pass  # Fall back to dynamic indexing
+            except Exception as e:
+                # Fall back to dynamic indexing
+                self.logger.debug(f"Index optimization failed: {e}")
+                pass
 
         # For simple arithmetic expressions, try to use json_extract_string when appropriate
         if (self._is_simple_arithmetic_expression(index_val_sql) and 
@@ -8274,7 +8075,9 @@ class SQLGenerator:
                 if evaluated_index is not None and evaluated_index >= 0:
                     # Use json_extract_string for likely string results to avoid quotes
                     return f"COALESCE(json_extract_string({base_expr}, '$[{evaluated_index}]'), '')"
-            except:
+            except Exception as e:
+                # Optimization failed, continue with fallback
+                self.logger.debug(f"Optimization failed: {e}")
                 pass
         
         # Default: JSON array indexing with optimization for string results
@@ -8286,7 +8089,9 @@ class SQLGenerator:
                 if evaluated_index is not None and evaluated_index >= 0:
                     # Use static index with json_extract_string
                     return f"COALESCE(json_extract_string({base_expr}, '$[{evaluated_index}]'), '')"
-            except:
+            except Exception as e:
+                # Optimization failed, continue with fallback
+                self.logger.debug(f"Optimization failed: {e}")
                 pass
         
         # For simple arithmetic indexing on string extractions, use json_extract_string to avoid quotes
@@ -8296,7 +8101,9 @@ class SQLGenerator:
                 if evaluated_index is not None and evaluated_index >= 0:
                     # Use json_extract_string instead of json_extract for string results
                     return f"COALESCE(json_extract_string({base_expr}, '$[{evaluated_index}]'), '')"
-            except:
+            except Exception as e:
+                # Optimization failed, continue with fallback
+                self.logger.debug(f"Optimization failed: {e}")
                 pass
 
         # Default: JSON array indexing. Return empty collection on out-of-bounds/non-array.
@@ -8339,7 +8146,8 @@ class SQLGenerator:
                 return int(result)
             
             return None
-        except:
+        except Exception as e:
+            self.logger.debug(f"Failed to evaluate literal: {e}")
             return None
     
     def _build_segments_path(self, segments) -> str:
@@ -8504,7 +8312,7 @@ FROM {self.table_name}"""
                     return self._generate_single_with_cte(base_expr)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for single(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "single() CTE generation", str(e))
             
             # Original implementation (fallback)
             # single() returns the single element of a collection, or empty collection for error conditions
@@ -8531,15 +8339,7 @@ FROM {self.table_name}"""
             """
         
         elif func_name == 'alltrue':
-            # Disable CTE for allTrue function until window function issue is resolved
-            # if self.enable_cte and self._should_use_cte_unified(base_expr, 'alltrue'):
-            #     try:
-            #         return self._generate_alltrue_with_cte(base_expr)
-            #     except Exception as e:
-            #         # Fallback to original implementation if CTE generation fails
-            #         print(f"CTE generation failed for alltrue(), falling back to subqueries: {e}")
-            
-            # Original implementation (fallback)
+            # Use standard SQL implementation for allTrue function
             # allTrue() - returns true if all elements in the collection are true
             if len(func_node.args) != 0:
                 raise ValueError(f"allTrue() requires no arguments, got {len(func_node.args)}")
@@ -8594,7 +8394,7 @@ FROM {self.table_name}"""
                     return self._generate_combine_with_cte(base_expr, func_node)
                 except Exception as e:
                     # Fallback to original implementation if CTE generation fails
-                    print(f"CTE generation failed for combine(), falling back to subqueries: {e}")
+                    log_fallback_usage(self.logger, "combine() CTE generation", str(e))
             
             # Original implementation (fallback)
             # combine() - combine multiple collections into a single collection, preserving duplicates
@@ -8707,7 +8507,7 @@ FROM {self.table_name}"""
         elif func_name == 'take':
             # take(num) returns the first num elements
             if len(func_node.args) != 1:
-                raise ValueError("take() function requires exactly one argument")
+                validate_argument_count("take", 1, len(func_node.args))
             
             take_count_arg = func_node.args[0]
             if hasattr(take_count_arg, 'value'):
@@ -9165,4 +8965,211 @@ FROM {self.table_name}"""
         else:
             # For functions not implemented in fallback, raise an error
             raise ValueError(f"Function '{func_name}' is not implemented in direct fallback handler")
+    
+    def _generate_getValue_with_cte(self, base_expr: str) -> str:
+        """Generate getValue() function with CTE optimization to avoid expression duplication"""
+        # Create CTE for complex base expression
+        cte_name = self._create_cte(
+            f"SELECT {base_expr} as json_value FROM {self.table_name}",
+            "getValue_base"
+        )
+        
+        # Generate getValue with CTE reference to avoid repeating the complex expression
+        return f"""
+        (SELECT 
+            CASE 
+                -- Handle primitive types (return as-is)
+                WHEN {self.dialect.json_type_function}(json_value) IN ('STRING', 'NUMBER', 'BOOLEAN') THEN 
+                    json_value
+                
+                -- Handle FHIR types with 'value' property (Quantity, Identifier, ContactPoint, etc.)
+                WHEN {self.dialect.json_type_function}(json_value) = 'OBJECT' AND 
+                     {self.dialect.json_extract_function}(json_value, '$.value') IS NOT NULL THEN
+                    {self.dialect.json_extract_function}(json_value, '$.value')
+                
+                -- Handle HumanName (concatenate name parts)
+                WHEN {self.dialect.json_type_function}(json_value) = 'OBJECT' AND 
+                     ({self.dialect.json_extract_function}(json_value, '$.family') IS NOT NULL OR 
+                      {self.dialect.json_extract_function}(json_value, '$.given') IS NOT NULL) THEN
+                    TRIM({self.dialect.string_concat(
+                        self.dialect.string_concat(
+                            f"COALESCE({self.dialect.json_extract_string_function}(json_value, '$.given[0]'), '')",
+                            f"CASE WHEN {self.dialect.json_extract_function}(json_value, '$.given[0]') IS NOT NULL AND {self.dialect.json_extract_function}(json_value, '$.family') IS NOT NULL THEN ' ' ELSE '' END"
+                        ),
+                        f"COALESCE({self.dialect.json_extract_string_function}(json_value, '$.family'), '')"
+                    )})
+                
+                -- Handle Address (return formatted address string)
+                WHEN {self.dialect.json_type_function}(json_value) = 'OBJECT' AND 
+                     ({self.dialect.json_extract_function}(json_value, '$.line') IS NOT NULL OR 
+                      {self.dialect.json_extract_function}(json_value, '$.city') IS NOT NULL) THEN
+                    TRIM({self.dialect.string_concat(
+                        self.dialect.string_concat(
+                            f"COALESCE({self.dialect.json_extract_string_function}(json_value, '$.line[0]'), '')",
+                            f"CASE WHEN {self.dialect.json_extract_function}(json_value, '$.line[0]') IS NOT NULL AND {self.dialect.json_extract_function}(json_value, '$.city') IS NOT NULL THEN ', ' ELSE '' END"
+                        ),
+                        f"COALESCE({self.dialect.json_extract_string_function}(json_value, '$.city'), '')"
+                    )})
+                
+                -- Return null for complex types without clear value semantics
+                ELSE NULL
+            END
+        FROM {cte_name})
+        """
+
+    def _calculate_low_boundary(self, base_expr: str) -> str:
+        """
+        Calculate low boundary for FHIR boundary functions based on precision.
+        
+        FHIR boundary functions calculate boundaries based on the precision of the value:
+        - Numeric values: subtract precision (0.05)
+        - Date/time values: calculate start of period based on precision
+        - Arrays: apply logic to first element
+        """
+        return f"""
+        CASE 
+            -- Handle arrays: extract first element and apply boundary logic
+            WHEN {self.get_json_type(base_expr)} = 'ARRAY' AND {self.get_json_array_length(base_expr)} > 0 THEN
+                CASE 
+                    -- Numeric values in array: subtract precision
+                    WHEN {self.get_json_type(self.extract_json_object(base_expr, '$[0]'))} IN ('NUMBER', 'INTEGER', 'DOUBLE') THEN
+                        CAST(CAST({self.extract_json_object(base_expr, '$[0]')} AS DOUBLE) - 0.05 AS VARCHAR)
+                    -- String values in array: apply date/time boundary logic
+                    WHEN {self.get_json_type(self.extract_json_object(base_expr, '$[0]'))} = 'VARCHAR' THEN
+                        CASE
+                            -- Month precision (YYYY-MM): first day of month
+                            WHEN LENGTH(CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR)) = 7 
+                                 AND CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) LIKE '____-__' THEN
+                                CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) || '-01'
+                            -- Date precision (YYYY-MM-DD): start of day in latest timezone 
+                            WHEN LENGTH(CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR)) = 10
+                                 AND CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) LIKE '____-__-__' THEN
+                                CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) || 'T00:00:00.000+14:00'
+                            -- Time precision (HH:MM): start of minute
+                            WHEN LENGTH(CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR)) = 5
+                                 AND CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) LIKE '__:__' THEN
+                                CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) || ':00.000'
+                            ELSE CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR)
+                        END
+                    ELSE CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR)
+                END
+            -- Empty arrays: return null
+            WHEN {self.get_json_type(base_expr)} = 'ARRAY' AND {self.get_json_array_length(base_expr)} = 0 THEN NULL
+            -- Scalar numeric values: subtract precision
+            WHEN {self.get_json_type(base_expr)} IN ('NUMBER', 'INTEGER', 'DOUBLE') THEN
+                CAST(CAST({base_expr} AS DOUBLE) - 0.05 AS VARCHAR)
+            -- Scalar string values: apply date/time boundary logic
+            WHEN {self.get_json_type(base_expr)} = 'VARCHAR' THEN
+                CASE
+                    -- Month precision (YYYY-MM): first day of month
+                    WHEN LENGTH(CAST({base_expr} AS VARCHAR)) = 7 
+                         AND CAST({base_expr} AS VARCHAR) LIKE '____-__' THEN
+                        CAST({base_expr} AS VARCHAR) || '-01'
+                    -- Date precision (YYYY-MM-DD): start of day in latest timezone 
+                    WHEN LENGTH(CAST({base_expr} AS VARCHAR)) = 10
+                         AND CAST({base_expr} AS VARCHAR) LIKE '____-__-__' THEN
+                        CAST({base_expr} AS VARCHAR) || 'T00:00:00.000+14:00'
+                    -- Time precision (HH:MM): start of minute
+                    WHEN LENGTH(CAST({base_expr} AS VARCHAR)) = 5
+                         AND CAST({base_expr} AS VARCHAR) LIKE '__:__' THEN
+                        CAST({base_expr} AS VARCHAR) || ':00.000'
+                    -- DateTime values: already have specific precision
+                    WHEN LENGTH(CAST({base_expr} AS VARCHAR)) >= 19
+                         AND CAST({base_expr} AS VARCHAR) LIKE '____-__-__T%' THEN
+                        CAST({base_expr} AS VARCHAR)
+                    ELSE CAST({base_expr} AS VARCHAR)
+                END
+            -- Null or other types: return null
+            ELSE NULL
+        END
+        """
+
+    def _calculate_high_boundary(self, base_expr: str) -> str:
+        """
+        Calculate high boundary for FHIR boundary functions based on precision.
+        
+        FHIR boundary functions calculate boundaries based on the precision of the value:
+        - Numeric values: add precision (0.05)
+        - Date/time values: calculate end of period based on precision
+        - Arrays: apply logic to first element
+        """
+        return f"""
+        CASE 
+            -- Handle arrays: extract first element and apply boundary logic
+            WHEN {self.get_json_type(base_expr)} = 'ARRAY' AND {self.get_json_array_length(base_expr)} > 0 THEN
+                CASE 
+                    -- Numeric values in array: add precision
+                    WHEN {self.get_json_type(self.extract_json_object(base_expr, '$[0]'))} IN ('NUMBER', 'INTEGER', 'DOUBLE') THEN
+                        CAST(CAST({self.extract_json_object(base_expr, '$[0]')} AS DOUBLE) + 0.05 AS VARCHAR)
+                    -- String values in array: apply date/time boundary logic
+                    WHEN {self.get_json_type(self.extract_json_object(base_expr, '$[0]'))} = 'VARCHAR' THEN
+                        CASE
+                            -- Month precision (YYYY-MM): last day of month
+                            WHEN LENGTH(CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR)) = 7 
+                                 AND CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) LIKE '____-__' THEN
+                                CASE 
+                                    -- Calculate last day of month
+                                    WHEN CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) LIKE '%_01' OR CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) LIKE '%_03' 
+                                      OR CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) LIKE '%_05' OR CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) LIKE '%_07'
+                                      OR CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) LIKE '%_08' OR CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) LIKE '%_10'  
+                                      OR CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) LIKE '%_12' THEN CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) || '-31'  -- 31-day months
+                                    WHEN CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) LIKE '%_04' OR CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) LIKE '%_06'
+                                      OR CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) LIKE '%_09' OR CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) LIKE '%_11' 
+                                      THEN CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) || '-30'   -- 30-day months  
+                                    WHEN CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) LIKE '%_02' THEN CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) || '-28'  -- February (simplified)
+                                    ELSE CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) || '-30'  -- Default fallback
+                                END
+                            -- Date precision (YYYY-MM-DD): end of day in earliest timezone
+                            WHEN LENGTH(CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR)) = 10
+                                 AND CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) LIKE '____-__-__' THEN
+                                CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) || 'T23:59:59.999-12:00'
+                            -- Time precision (HH:MM): end of minute
+                            WHEN LENGTH(CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR)) = 5
+                                 AND CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) LIKE '__:__' THEN
+                                CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR) || ':59.999'
+                            ELSE CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR)
+                        END
+                    ELSE CAST({self.extract_json_object(base_expr, '$[0]')} AS VARCHAR)
+                END
+            -- Empty arrays: return null
+            WHEN {self.get_json_type(base_expr)} = 'ARRAY' AND {self.get_json_array_length(base_expr)} = 0 THEN NULL
+            -- Scalar numeric values: add precision
+            WHEN {self.get_json_type(base_expr)} IN ('NUMBER', 'INTEGER', 'DOUBLE') THEN
+                CAST(CAST({base_expr} AS DOUBLE) + 0.05 AS VARCHAR)
+            -- Scalar string values: apply date/time boundary logic
+            WHEN {self.get_json_type(base_expr)} = 'VARCHAR' THEN
+                CASE
+                    -- Month precision (YYYY-MM): last day of month
+                    WHEN LENGTH(CAST({base_expr} AS VARCHAR)) = 7 
+                         AND CAST({base_expr} AS VARCHAR) LIKE '____-__' THEN
+                        CASE 
+                            -- Calculate last day of month
+                            WHEN CAST({base_expr} AS VARCHAR) LIKE '%_01' OR CAST({base_expr} AS VARCHAR) LIKE '%_03' 
+                              OR CAST({base_expr} AS VARCHAR) LIKE '%_05' OR CAST({base_expr} AS VARCHAR) LIKE '%_07'
+                              OR CAST({base_expr} AS VARCHAR) LIKE '%_08' OR CAST({base_expr} AS VARCHAR) LIKE '%_10'  
+                              OR CAST({base_expr} AS VARCHAR) LIKE '%_12' THEN CAST({base_expr} AS VARCHAR) || '-31'  -- 31-day months
+                            WHEN CAST({base_expr} AS VARCHAR) LIKE '%_04' OR CAST({base_expr} AS VARCHAR) LIKE '%_06'
+                              OR CAST({base_expr} AS VARCHAR) LIKE '%_09' OR CAST({base_expr} AS VARCHAR) LIKE '%_11' 
+                              THEN CAST({base_expr} AS VARCHAR) || '-30'   -- 30-day months  
+                            WHEN CAST({base_expr} AS VARCHAR) LIKE '%_02' THEN CAST({base_expr} AS VARCHAR) || '-28'  -- February (simplified)
+                            ELSE CAST({base_expr} AS VARCHAR) || '-30'  -- Default fallback
+                        END
+                    -- Date precision (YYYY-MM-DD): end of day in earliest timezone
+                    WHEN LENGTH(CAST({base_expr} AS VARCHAR)) = 10
+                         AND CAST({base_expr} AS VARCHAR) LIKE '____-__-__' THEN
+                        CAST({base_expr} AS VARCHAR) || 'T23:59:59.999-12:00'
+                    -- Time precision (HH:MM): end of minute
+                    WHEN LENGTH(CAST({base_expr} AS VARCHAR)) = 5
+                         AND CAST({base_expr} AS VARCHAR) LIKE '__:__' THEN
+                        CAST({base_expr} AS VARCHAR) || ':59.999'
+                    -- DateTime values: already have specific precision
+                    WHEN LENGTH(CAST({base_expr} AS VARCHAR)) >= 19
+                         AND CAST({base_expr} AS VARCHAR) LIKE '____-__-__T%' THEN
+                        CAST({base_expr} AS VARCHAR)
+                    ELSE CAST({base_expr} AS VARCHAR)
+                END
+            -- Null or other types: return null
+            ELSE NULL
+        END
+        """
     

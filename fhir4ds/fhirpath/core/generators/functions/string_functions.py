@@ -6,21 +6,32 @@ endswith, replace, upper/lower case transformations, and other string functions.
 """
 
 from typing import List, Any, Optional
+from ..base_handler import BaseFunctionHandler
 
 
-class StringFunctionHandler:
+class StringFunctionHandler(BaseFunctionHandler):
     """Handles string function processing for FHIRPath to SQL conversion."""
     
-    def __init__(self, generator):
+    def __init__(self, generator, cte_builder=None):
         """
         Initialize the string function handler.
         
         Args:
             generator: Reference to main SQLGenerator for complex operations
+            cte_builder: Optional CTEBuilder instance for CTE management
         """
+        super().__init__(generator, cte_builder)
         self.generator = generator
         self.dialect = generator.dialect
         
+    def get_supported_functions(self) -> List[str]:
+        """Return list of string function names this handler supports."""
+        return [
+            'substring', 'startswith', 'endswith', 'indexof', 
+            'replace', 'toupper', 'tolower', 'upper', 'lower', 'trim', 
+            'split', 'tochars', 'matches', 'replacematches'
+        ]
+
     def can_handle(self, function_name: str) -> bool:
         """Check if this handler can process the given function."""
         string_functions = {

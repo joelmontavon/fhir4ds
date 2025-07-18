@@ -6,21 +6,31 @@ sqrt, truncate, exp, ln, log, power, and other numerical functions.
 """
 
 from typing import List, Any, Optional
+from ..base_handler import BaseFunctionHandler
 
 
-class MathFunctionHandler:
+class MathFunctionHandler(BaseFunctionHandler):
     """Handles mathematical function processing for FHIRPath to SQL conversion."""
     
-    def __init__(self, generator):
+    def __init__(self, generator, cte_builder=None):
         """
         Initialize the math function handler.
         
         Args:
             generator: Reference to main SQLGenerator for complex operations
+            cte_builder: Optional CTEBuilder instance for CTE management
         """
+        super().__init__(generator, cte_builder)
         self.generator = generator
         self.dialect = generator.dialect
         
+    def get_supported_functions(self) -> List[str]:
+        """Return list of math function names this handler supports."""
+        return [
+            'abs', 'ceiling', 'floor', 'round', 'sqrt', 'truncate',
+            'exp', 'ln', 'log', 'power'
+        ]
+
     def can_handle(self, function_name: str) -> bool:
         """Check if this handler can process the given function."""
         math_functions = {
@@ -71,8 +81,7 @@ class MathFunctionHandler:
         if len(func_node.args) != 0:
             raise ValueError("abs() function takes no arguments")
         
-        # Direct implementation - avoid CTE for now due to scalar subquery issues
-        # TODO: Fix CTE implementation to handle scalar subqueries correctly
+        # Direct implementation for scalar math functions
         return f"ABS(CAST({base_expr} AS DOUBLE))"
     
     def _handle_ceiling(self, base_expr: str, func_node) -> str:
@@ -80,8 +89,7 @@ class MathFunctionHandler:
         if len(func_node.args) != 0:
             raise ValueError("ceiling() function takes no arguments")
         
-        # Direct implementation - avoid CTE for now due to scalar subquery issues
-        # TODO: Fix CTE implementation to handle scalar subqueries correctly
+        # Direct implementation for scalar math functions
         return f"CEIL(CAST({base_expr} AS DOUBLE))"
     
     def _handle_floor(self, base_expr: str, func_node) -> str:
@@ -89,8 +97,7 @@ class MathFunctionHandler:
         if len(func_node.args) != 0:
             raise ValueError("floor() function takes no arguments")
         
-        # Direct implementation - avoid CTE for now due to scalar subquery issues
-        # TODO: Fix CTE implementation to handle scalar subqueries correctly
+        # Direct implementation for scalar math functions
         return f"FLOOR(CAST({base_expr} AS DOUBLE))"
     
     def _handle_round(self, base_expr: str, func_node) -> str:
@@ -110,8 +117,7 @@ class MathFunctionHandler:
         if len(func_node.args) != 0:
             raise ValueError("sqrt() function takes no arguments")
         
-        # Direct implementation - avoid CTE for now due to scalar subquery issues
-        # TODO: Fix CTE implementation to handle scalar subqueries correctly
+        # Direct implementation for scalar math functions
         # Note: Need to handle negative numbers (sqrt of negative is null/error)
         return f"CASE WHEN CAST({base_expr} AS DOUBLE) >= 0 THEN SQRT(CAST({base_expr} AS DOUBLE)) ELSE NULL END"
     
@@ -120,8 +126,7 @@ class MathFunctionHandler:
         if len(func_node.args) != 0:
             raise ValueError("truncate() function takes no arguments")
         
-        # Direct implementation - avoid CTE for now due to scalar subquery issues
-        # TODO: Fix CTE implementation to handle scalar subqueries correctly
+        # Direct implementation for scalar math functions
         # TRUNCATE function removes decimal part by rounding towards zero
         # For positive numbers: TRUNCATE(3.7) = 3, for negative: TRUNCATE(-3.7) = -3
         return f"TRUNC(CAST({base_expr} AS DOUBLE))"
