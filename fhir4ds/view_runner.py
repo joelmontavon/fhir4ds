@@ -1040,8 +1040,8 @@ class ViewRunner:
         if re.search(array_index_pattern, path):
             return True
             
-        # Enable join(), where(), first(), and exists() - all are working properly
-        if any(func in path for func in ['join(', 'where(', 'first(', 'exists(']):
+        # Only enable join() for now - where(), first(), exists() cause SQL syntax errors
+        if 'join(' in path and not any(prob in path for prob in ['where(', 'first(', 'exists(']):
             return True
             
         # Enable collection functions - these are now working and needed for tests
