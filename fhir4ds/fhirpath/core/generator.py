@@ -276,6 +276,10 @@ class SQLGenerator:
     
     def _should_use_cte_unified(self, base_expr: str, function_type: str) -> bool:
         """Unified CTE decision logic using CTEManager's sophisticated analysis"""
+        # CRITICAL: Never use CTEs in WHERE context - they can't be properly referenced
+        if self.in_where_context:
+            return False
+            
         # Use CTEManager's unified decision system
         return self.cte_manager.should_use_cte_unified(base_expr, function_type)
 
@@ -7915,6 +7919,16 @@ class SQLGenerator:
                         final_left_sql = f"""(
                             SELECT COUNT(*) > 0 
                             FROM json_each(COALESCE({left_sql}, json_array()))
+                            WHERE json_extract_string(value, '$') = {right_sql}
+                        )"""
+                        final_right_sql = "true"
+                    # Special handling for to_json(list(...)) array expressions - FHIRPath collection promotion
+                    elif 'to_json(list(' in left_sql and 'json_each(' in left_sql:
+                        # This is a collection result from array path extraction (e.g., name.family)
+                        # Use FHIRPath collection promotion: check if any element in collection equals scalar
+                        final_left_sql = f"""(
+                            SELECT COUNT(*) > 0
+                            FROM json_each(COALESCE(({left_sql}), json_array()))
                             WHERE json_extract_string(value, '$') = {right_sql}
                         )"""
                         final_right_sql = "true"

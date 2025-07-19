@@ -124,6 +124,9 @@ class FHIRPathToSQL:
                 criterion_sql = master_generator.visit(processed_criterion_ast)
                 master_generator.in_where_context = False
                 
+                # Resolve optimized placeholders in WHERE conditions immediately
+                criterion_sql = master_generator._resolve_optimized_placeholders(criterion_sql)
+                
                 # Check for potential date parsing issues in WHERE criteria
                 self._check_for_date_parsing_issues(criterion_fhirpath, criterion_sql)
                 
