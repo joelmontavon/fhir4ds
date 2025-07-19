@@ -1040,8 +1040,8 @@ class ViewRunner:
         if re.search(array_index_pattern, path):
             return True
             
-        # Only enable join() for now - it's working. Disable where(), first(), exists() temporarily
-        if 'join(' in path and not any(prob in path for prob in ['where(', 'first()', 'exists()']):
+        # Enable join(), where(), first(), and exists() - all are working properly
+        if any(func in path for func in ['join(', 'where(', 'first(', 'exists(']):
             return True
             
         # Enable collection functions - these are now working and needed for tests
