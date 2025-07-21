@@ -84,7 +84,7 @@ class FHIRPathLexer:
             self.advance()
     
     def read_string(self):
-        """Read a string literal"""
+        """Read a string literal with proper escape sequence handling"""
         quote_char = self.current_char
         self.advance()  # Skip opening quote
         result = ""
@@ -92,7 +92,22 @@ class FHIRPathLexer:
             if self.current_char == '\\':
                 self.advance()
                 if self.current_char:
-                    result += self.current_char
+                    # Handle common escape sequences
+                    if self.current_char == 't':
+                        result += '\t'
+                    elif self.current_char == 'n':
+                        result += '\n'
+                    elif self.current_char == 'r':
+                        result += '\r'
+                    elif self.current_char == '\\':
+                        result += '\\'
+                    elif self.current_char == '\'':
+                        result += '\''
+                    elif self.current_char == '"':
+                        result += '"'
+                    else:
+                        # For unrecognized escape sequences, keep the backslash
+                        result += '\\' + self.current_char
                     self.advance()
             else:
                 result += self.current_char

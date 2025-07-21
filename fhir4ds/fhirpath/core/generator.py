@@ -3283,7 +3283,7 @@ class SQLGenerator:
                 SELECT 
                     CASE 
                         WHEN {self.get_json_type(f"({filtered_expr})")} = 'ARRAY' THEN {self.get_json_array_length(f"({filtered_expr})")} > 0
-                        ELSE (({filtered_expr}) IS NOT NULL AND NOT ({self.get_json_type(f"({filtered_expr})")} = 'OBJECT' AND {self.get_json_array_length(f"{self.dialect.json_extract_function}(({filtered_expr}), '$.keys()')")} = 0))
+                        ELSE ({filtered_expr} IS NOT NULL AND NOT ({self.get_json_type(f"({filtered_expr})")} = 'OBJECT' AND {self.get_json_array_length(f"{self.dialect.json_extract_function}(({filtered_expr}), '$.keys()')")} = 0))
                     END as exists_result
                 FROM {from_clause}
             """, "exists_check")

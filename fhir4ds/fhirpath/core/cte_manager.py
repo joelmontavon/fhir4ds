@@ -208,6 +208,14 @@ class CTEManager:
     
     def _should_inline_cte(self, cte_name: str, cte_sql: str) -> bool:
         """Determine if a CTE should be inlined."""
+        # Phase 4.6: Don't inline exists_check CTEs to prevent SQL syntax errors
+        if cte_name.startswith('exists_check'):
+            return False
+            
+        # Don't inline CTEs that use specific result column names
+        if 'exists_result' in cte_sql:
+            return False
+            
         # Simple CTEs can be inlined
         if self._is_simple_cte(cte_sql):
             return True

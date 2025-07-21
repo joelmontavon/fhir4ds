@@ -101,6 +101,48 @@ class BaseFunctionHandler(ABC):
         """
         pass
     
+    def get_function_patterns(self) -> List[str]:
+        """
+        Return patterns for path-based function detection.
+        
+        This method generates patterns used by ViewRunner to detect if a path
+        contains functions that need FHIRPath translation. By default, it creates
+        patterns by appending '(' to each supported function name.
+        
+        Subclasses can override this method to provide custom patterns for
+        functions that have special detection requirements.
+        
+        Returns:
+            List of patterns to search for in paths
+            
+        Example:
+            ['startswith(', 'endswith(', 'contains(', 'substring(']
+        """
+        patterns = []
+        for func in self.get_supported_functions():
+            # Most functions detected by name + opening parenthesis
+            patterns.append(f"{func}(")
+            
+            # Some functions (like convertsTo) have partial patterns
+            if func.startswith('convertsto') and not func.endswith('('):
+                patterns.append(f"{func}(")
+        
+        return patterns
+    
+    def get_legacy_function_patterns(self) -> List[str]:
+        """
+        Return legacy function patterns that match the original hardcoded patterns.
+        
+        Phase 4.5: This method ensures 100% compatibility with the original
+        hardcoded function detection patterns during the refactoring process.
+        
+        Returns:
+            List of patterns that exactly match original hardcoded detection logic
+        """
+        # Default implementation returns patterns based on supported functions
+        # Subclasses should override this method to provide exact legacy patterns
+        return self.get_function_patterns()
+    
     def should_use_cte(self, base_expr: str, operation: str, **kwargs) -> bool:
         """
         Determine if CTE should be used for this operation.
