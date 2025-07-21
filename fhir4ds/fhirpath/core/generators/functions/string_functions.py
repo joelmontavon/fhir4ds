@@ -31,6 +31,18 @@ class StringFunctionHandler(BaseFunctionHandler):
             'replace', 'toupper', 'tolower', 'upper', 'lower', 'trim', 
             'split', 'tochars', 'matches', 'replacematches'
         ]
+    
+    def get_legacy_function_patterns(self) -> List[str]:
+        """
+        Return legacy string function patterns that match original hardcoded patterns.
+        
+        Phase 4.5: Exact patterns from original hardcoded list in ViewRunner
+        """
+        return [
+            'upper()', 'lower()', 'length()', 'trim()',
+            'startsWith(', 'endsWith(', 'contains(', 'indexOf(',
+            'substring(', 'replace(', 'join(', 'split('
+        ]
 
     def can_handle(self, function_name: str) -> bool:
         """Check if this handler can process the given function."""

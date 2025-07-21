@@ -88,7 +88,7 @@ class QueryResult:
         self._description = None
     
     def to_df(self, include_metadata: bool = True) -> 'pd.DataFrame':
-        """Convert results to pandas DataFrame with proper column names"""
+        """Convert results to pandas DataFrame with proper column names and type conversion"""
         if not PANDAS_AVAILABLE:
             raise ImportError("pandas is required for to_df(). Install with: pip install pandas")
         
@@ -98,6 +98,9 @@ class QueryResult:
         # Create DataFrame
         if rows:
             df = pd.DataFrame(rows, columns=column_names)
+            
+            # Phase 4.7: Apply type conversion based on view definition
+            df = self._apply_type_conversion(df)
         else:
             df = pd.DataFrame(columns=column_names)
         
@@ -111,6 +114,69 @@ class QueryResult:
             df.attrs['dialect'] = type(self.dialect).__name__
         
         return df
+    
+    def _apply_type_conversion(self, df: 'pd.DataFrame') -> 'pd.DataFrame':
+        """Apply type conversion based on view definition column types"""
+        if not self.view_def:
+            return df
+            
+        # Get column type mapping from view definition
+        column_types = self._get_column_types_from_view_definition()
+        
+        # Apply conversions
+        for column_name, column_type in column_types.items():
+            if column_name in df.columns:
+                df[column_name] = self._convert_column_type(df[column_name], column_type)
+        
+        return df
+    
+    def _convert_column_type(self, series: 'pd.Series', target_type: str) -> 'pd.Series':
+        """Convert pandas Series to target FHIR type"""
+        try:
+            if target_type in ['decimal', 'number']:
+                # Phase 4.7: Convert to Decimal for decimal columns
+                from decimal import Decimal
+                return series.apply(lambda x: Decimal(str(x)) if x is not None and pd.notna(x) else None)
+            elif target_type in ['integer', 'int', 'positiveInt', 'unsignedInt']:
+                return series.astype('Int64')  # Nullable integer
+            elif target_type in ['boolean']:
+                return series.astype('boolean')  # Nullable boolean
+            elif target_type in ['string', 'id', 'code', 'uri', 'url']:
+                return series.astype('string')  # Nullable string
+            else:
+                # For unknown types, keep as-is
+                return series
+        except Exception:
+            # If conversion fails, keep original
+            return series
+    
+    def _get_column_types_from_view_definition(self) -> Dict[str, str]:
+        """Get column type mapping from view definition"""
+        column_types = {}
+        
+        def extract_types_from_select_items(select_items: List[Dict[str, Any]]):
+            for select_item in select_items:
+                if 'path' in select_item and 'name' in select_item and 'type' in select_item:
+                    column_types[select_item['name']] = select_item['type']
+                elif 'column' in select_item:
+                    for column in select_item['column']:
+                        if 'name' in column and 'type' in column:
+                            column_types[column['name']] = column['type']
+                if 'select' in select_item:
+                    extract_types_from_select_items(select_item['select'])
+                if 'unionAll' in select_item and select_item['unionAll']:
+                    for union_branch in select_item['unionAll']:
+                        if 'column' in union_branch:
+                            for column in union_branch['column']:
+                                if 'name' in column and 'type' in column:
+                                    column_types[column['name']] = column['type']
+                        elif 'select' in union_branch:
+                            extract_types_from_select_items(union_branch['select'])
+        
+        if 'select' in self.view_def:
+            extract_types_from_select_items(self.view_def['select'])
+        
+        return column_types
     
     def to_csv(self, file_path: Optional[str] = None, include_headers: bool = True, **kwargs) -> Optional[str]:
         """Convert results to CSV format"""

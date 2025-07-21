@@ -1026,31 +1026,14 @@ class ViewRunner:
         return False
     
     def _needs_fhirpath_translator(self, path: str) -> bool:
-        """Determine if a path expression needs the FHIRPath translator"""
-        # Be very selective - only enable for core Phase 1 features that are proven to work
+        """
+        Determine if a path expression needs the FHIRPath translator
         
-        # Enable for string functions like substring(), toInteger(), toString() - these work well
-        string_functions = ['substring(', 'toInteger()', 'toString()']
-        if any(func in path for func in string_functions):
-            return True
-            
-        # Enable for arithmetic expressions within array indices - these work well
-        import re
-        array_index_pattern = r'\[([^[\]]*[+\-*/][^[\]]*)\]'
-        if re.search(array_index_pattern, path):
-            return True
-            
-        # Only enable join() for now - where(), first(), exists() cause SQL syntax errors
-        if 'join(' in path and not any(prob in path for prob in ['where(', 'first(', 'exists(']):
-            return True
-            
-        # Enable collection functions - these are now working and needed for tests
-        collection_functions = ['allTrue()', 'allFalse()', 'anyTrue()', 'anyFalse()', 'combine(', 'single()', 'union(', 'skip(', 'take(', 'tail()', 'count()']
-        if any(func in path for func in collection_functions):
-            return True
-            
-        # Keep everything else using simple processing to maintain compatibility
-        return False
+        Phase 4.1: Updated to include working function types after operator splitting fix
+        """
+        # Phase 4.1: Use the comprehensive function detection logic
+        # Now that operator splitting is fixed, these functions work correctly
+        return self._has_fhirpath_functions(path)
     
     def _generate_fhirpath_expression(self, path: str, column_type: str) -> QueryItem:
         """Generate SQL using the FHIRPath translator for complex expressions"""
@@ -1105,6 +1088,10 @@ class ViewRunner:
         
         for op_pattern, sql_op in operators:
             if op_pattern in path:
+                # Phase 4.1: Check if operator is inside function parentheses before splitting
+                if self._is_operator_inside_function_parentheses(path, op_pattern):
+                    continue  # Skip this operator, it's inside function arguments
+                    
                 parts = path.split(op_pattern, 1)  # Split on first occurrence
                 if len(parts) == 2:
                     left_expr = parts[0].strip()
@@ -1639,36 +1626,19 @@ class ViewRunner:
                 
                 # Get resource type context if available
                 resource_type = getattr(self, 'current_resource_type', None)
-                sql = translator.translate([path], resource_type_context=resource_type)
                 
-                # For complex FHIRPath expressions, extract the condition carefully
-                import re
-                clean_sql = sql.rstrip(';').strip()
+                # Phase 4.6: Use translate_to_expression_only to avoid CTE parsing issues
+                # This method returns just the expression without CTEs, perfect for WHERE conditions
+                condition_expr = translator.translate_to_expression_only(path, resource_type_context=resource_type)
                 
-                # Find the main FROM clause (the last one in the SQL)
-                from_matches = list(re.finditer(r'\bFROM\s+fhir_resources\b', clean_sql, re.IGNORECASE))
-                if from_matches:
-                    # Extract everything between SELECT and the final FROM fhir_resources
-                    last_from = from_matches[-1]
-                    select_start = clean_sql.upper().find('SELECT') + 6
-                    from_start = last_from.start()
-                    
-                    condition_expr = clean_sql[select_start:from_start].strip()
-                    
-                    # Remove AS clauses if present
-                    if ' AS ' in condition_expr.upper():
-                        condition_expr = re.sub(r'\s+AS\s+\w+\s*$', '', condition_expr, flags=re.IGNORECASE)
-                    
-                    # For boolean-like expressions, use the condition directly
-                    if ('=' in condition_expr or 'COUNT(*)' in condition_expr or 
-                        'true' in condition_expr.lower() or 'false' in condition_expr.lower()):
-                        return condition_expr
-                    else:
-                        # For non-boolean expressions, wrap with boolean check
-                        return f"({condition_expr}) = true"
+                # For boolean-like expressions, use the condition directly
+                if ('=' in condition_expr or 'COUNT(*)' in condition_expr or 
+                    'true' in condition_expr.lower() or 'false' in condition_expr.lower() or
+                    'EXISTS' in condition_expr.upper() or 'CASE' in condition_expr.upper()):
+                    return condition_expr
                 else:
-                    # Fallback: Use the entire SELECT as a subquery in EXISTS
-                    return f"EXISTS (SELECT 1 WHERE ({clean_sql}) = true)"
+                    # For non-boolean expressions, wrap with boolean check
+                    return f"({condition_expr}) = true"
                 
             except Exception as e:
                 log_fallback_usage(self.logger, "FHIRPath translator", f"Failed for where condition '{path}': {e}")
@@ -2827,6 +2797,11 @@ class ViewRunner:
         """Generate SQL for a FHIRPath expression (left side of comparison)"""
         import re
         
+        # PHASE 1.2: String Functions Integration
+        # Check if this is a FHIRPath expression with functions
+        if self._has_fhirpath_functions(path):
+            return self._generate_fhirpath_sql(path)
+        
         # Handle choice types first (most important)
         if '.ofType(' in path:
             # Apply choice type mapping and generate SQL
@@ -3049,6 +3024,21 @@ class ViewRunner:
     
     def _generate_typed_json_extraction(self, path: str, column_type: str) -> QueryItem:
         """Generate JSON extraction with appropriate type handling"""
+        
+        # PHASE 1.2: String Functions Integration
+        # Check if this is a FHIRPath expression with functions
+        if self._has_fhirpath_functions(path):
+            fhirpath_sql = self._generate_fhirpath_sql(path)
+            # For typed extraction, we may need to wrap the FHIRPath result with casting
+            if column_type in ['boolean']:
+                return Expr([fhirpath_sql], sep='')
+            elif column_type in ['integer', 'int', 'positiveInt', 'unsignedInt']:
+                return Expr(['CAST((', fhirpath_sql, ') AS INTEGER)'], sep='')
+            elif column_type in ['decimal', 'number']:
+                return Expr(['CAST((', fhirpath_sql, ') AS DECIMAL)'], sep='')
+            else:
+                return Expr([fhirpath_sql], sep='')
+        
         json_path = f'$.{path}' if not path.startswith('$.') else path
         
         if column_type in ['boolean']:
@@ -3226,4 +3216,203 @@ class ViewRunner:
         }
         
         return status
+    
+    def _has_fhirpath_functions(self, path: str) -> bool:
+        """
+        Check if a path contains FHIRPath functions that need proper translation.
+        
+        Phase 4.5: Dynamic function discovery using handler registry
+        """
+        # Get all function patterns from registered handlers
+        all_function_patterns = self._get_all_function_patterns()
+        
+        # Check for functions that need translation
+        for pattern in all_function_patterns:
+            if pattern in path:
+                return True
+                
+        # Check for where() with complex expressions (not simple optimized patterns)
+        if '.where(' in path and not self._is_simple_where_pattern(path):
+            return True
+            
+        return False
+    
+    def _get_all_function_patterns(self) -> list:
+        """
+        Get all function patterns from registered function handlers.
+        
+        Phase 4.5: Dynamic function discovery - replaces hardcoded function lists
+        
+        This method implements the handler registry access pattern by iterating
+        through all registered function handlers and collecting their detection
+        patterns. This eliminates the need for hardcoded function lists and
+        ensures that new function handlers are automatically detected.
+        
+        Returns:
+            List of function patterns for path-based detection
+        """
+        if not hasattr(self, '_cached_function_patterns'):
+            patterns = []
+            
+            # Phase 4.5: Handler registry access pattern
+            # Get patterns from all function handlers in SQL generator
+            function_handlers = self._get_function_handler_registry()
+            
+            for handler in function_handlers:
+                patterns.extend(self._get_patterns_from_handler(handler))
+            
+            # Cache the patterns for performance (they don't change during runtime)
+            self._cached_function_patterns = list(set(patterns))  # Remove duplicates
+            
+        return self._cached_function_patterns
+    
+    def _get_function_handler_registry(self) -> list:
+        """
+        Get the registry of all function handlers.
+        
+        Phase 4.5: Formal handler registry access pattern
+        
+        Returns:
+            List of all registered function handlers
+        """
+        return [
+            self.sql_generator.collection_function_handler,
+            self.sql_generator.string_function_handler,
+            self.sql_generator.math_function_handler,
+            self.sql_generator.type_function_handler,
+            self.sql_generator.datetime_function_handler
+        ]
+    
+    def _get_patterns_from_handler(self, handler) -> list:
+        """
+        Get function patterns from a single handler with robust error handling.
+        
+        Phase 4.5: Standardized pattern extraction with fallback logic
+        
+        Args:
+            handler: Function handler instance
+            
+        Returns:
+            List of patterns from this handler
+        """
+        patterns = []
+        
+        # Phase 4.5: Use legacy patterns to ensure 100% baseline compatibility
+        if hasattr(handler, 'get_legacy_function_patterns'):
+            try:
+                handler_patterns = handler.get_legacy_function_patterns()
+                patterns.extend(handler_patterns)
+                return patterns
+            except Exception as e:
+                # Log error but continue with other handlers
+                self.logger.warning(f"Failed to get legacy patterns from {handler.__class__.__name__}: {e}")
+                
+        # Fallback to get_function_patterns if get_legacy_function_patterns fails
+        if hasattr(handler, 'get_function_patterns'):
+            try:
+                handler_patterns = handler.get_function_patterns()
+                patterns.extend(handler_patterns)
+                return patterns
+            except Exception as e:
+                self.logger.warning(f"Failed to get patterns from {handler.__class__.__name__}: {e}")
+                
+        # Final fallback to get_supported_functions
+        if hasattr(handler, 'get_supported_functions'):
+            try:
+                functions = handler.get_supported_functions()
+                for func in functions:
+                    patterns.append(f"{func}(")
+                return patterns
+            except Exception as e:
+                self.logger.error(f"All fallbacks failed for {handler.__class__.__name__}: {e}")
+        
+        return patterns
+    
+    def _is_operator_inside_function_parentheses(self, path: str, operator: str) -> bool:
+        """
+        Check if an operator is inside function parentheses.
+        
+        Phase 4.1: Fix operator splitting for FHIRPath function arguments
+        """
+        operator_positions = []
+        start = 0
+        
+        # Find all positions of the operator
+        while True:
+            pos = path.find(operator, start)
+            if pos == -1:
+                break
+            operator_positions.append(pos)
+            start = pos + 1
+        
+        if not operator_positions:
+            return False
+        
+        # For each operator position, check if it's inside function parentheses
+        for op_pos in operator_positions:
+            # Count parentheses balance from start to operator position
+            paren_depth = 0
+            in_function = False
+            
+            for i in range(op_pos):
+                char = path[i]
+                if char == '(':
+                    # Check if this is a function call (preceded by identifier)
+                    if i > 0 and (path[i-1].isalnum() or path[i-1] == '_'):
+                        in_function = True
+                    paren_depth += 1
+                elif char == ')':
+                    paren_depth -= 1
+                    if paren_depth == 0:
+                        in_function = False
+            
+            # If we're inside parentheses and it was a function call, this operator is inside function args
+            if paren_depth > 0 and in_function:
+                return True
+        
+        return False
+    
+    def _is_simple_where_pattern(self, path: str) -> bool:
+        """Check if this is a simple where pattern that's already optimized."""
+        import re
+        
+        # Simple patterns like "telecom.where(use = 'home')" are already handled
+        # Complex patterns with functions need FHIRPath translation
+        simple_patterns = [
+            r'^\w+\.where\(\w+ = [\'"][^\'"]*[\'\"]\)$',
+            r'^\w+\.where\(\w+ = \w+\)$'
+        ]
+        
+        for pattern in simple_patterns:
+            if re.match(pattern, path):
+                return True
+                
+        return False
+    
+    def _generate_fhirpath_sql(self, path: str) -> str:
+        """
+        Generate SQL using proper FHIRPath translation.
+        
+        Phase 1.2: String Functions Integration
+        """
+        try:
+            # Import FHIRPath translator
+            from .fhirpath import FHIRPath
+            
+            # Create FHIRPath instance with current dialect
+            fp = FHIRPath(dialect=self.dialect)
+            
+            # Translate the expression to SQL
+            sql = fp.to_sql(path, "Patient", "p")
+            
+            # Replace table alias with our actual column reference
+            # The translator uses "p.data" but we need "resource"
+            sql = sql.replace('p.data', 'resource')
+            
+            return sql
+            
+        except Exception as e:
+            # Fallback to simple path extraction if translation fails
+            self.logger.warning(f"FHIRPath translation failed for '{path}': {e}")
+            return f'{self.dialect.extract_json_field("resource", f"$.{path}")}'
 

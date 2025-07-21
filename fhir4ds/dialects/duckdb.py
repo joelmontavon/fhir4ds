@@ -48,9 +48,24 @@ class DuckDBDialect(DatabaseDialect):
         self.cast_syntax = "::"
         self.quote_char = '"'
         
-        self.connection = connection or duckdb.connect(database)
-        self.connection.execute("INSTALL json; LOAD json;")
-        logger.info(f"Initialized DuckDB dialect with database: {database}")
+        try:
+            self.connection = connection or duckdb.connect(database)
+            self.connection.execute("INSTALL json; LOAD json;")
+            logger.info(f"Initialized DuckDB dialect with database: {database}")
+        except Exception as e:
+            if "not a valid DuckDB database file" in str(e):
+                # Provide helpful error message for invalid database files
+                import os
+                if os.path.exists(database) and database != ":memory:":
+                    file_size = os.path.getsize(database)
+                    if file_size == 0:
+                        raise ValueError(f"Cannot open DuckDB database '{database}': The file is empty. "
+                                       f"Delete the empty file and try again, or use a different filename.") from e
+                    else:
+                        raise ValueError(f"Cannot open DuckDB database '{database}': The file exists but is not a valid DuckDB database. "
+                                       f"This could be a text file, corrupted database, or file from an incompatible DuckDB version. "
+                                       f"Delete the file and try again, or use a different filename.") from e
+            raise
     
     def get_connection(self) -> Any:
         return self.connection
@@ -403,8 +418,14 @@ class DuckDBDialect(DatabaseDialect):
         """Extract path from nested array structures using DuckDB's JSON functions"""
         # Handle root level access (current_path = "$")
         if current_path == "$":
+            # Phase 4.6: Improved array extraction - extract scalar values from single-element arrays
             return f"""CASE WHEN json_type({json_base}) = 'ARRAY' 
-            THEN json_extract({json_base}, '$[*].{identifier_name}') 
+            THEN 
+                CASE 
+                    WHEN json_array_length({json_base}) = 1 
+                    THEN json_extract({json_base}, '$[0].{identifier_name}')
+                    ELSE json_extract({json_base}, '$[*].{identifier_name}')
+                END
             ELSE json_extract({json_base}, '$.{identifier_name}') 
             END"""
         

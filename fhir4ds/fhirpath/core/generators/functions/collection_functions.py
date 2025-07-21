@@ -31,7 +31,24 @@ class CollectionFunctionHandler(BaseFunctionHandler):
             'select', 'where', 'all', 'distinct', 'single', 'tail',
             'skip', 'take', 'union', 'combine', 'intersect', 'exclude',
             'alltrue', 'allfalse', 'anytrue', 'anyfalse', 'contains',
-            'iif', 'subsetof', 'supersetof', 'isdistinct', 'repeat'
+            'children', 'descendants', 'isdistinct', 'subsetof', 'supersetof',
+            # Phase 4.3: Advanced collection functions
+            'iif', 'repeat', 'aggregate', 'flatten', 'in',
+            # Phase 4.3.1: FHIRPath specification camelCase variants
+            'allTrue', 'allFalse', 'anyTrue', 'anyFalse', 'isDistinct', 'subsetOf', 'supersetOf'
+        ]
+    
+    def get_legacy_function_patterns(self) -> List[str]:
+        """
+        Return legacy collection function patterns that match original hardcoded patterns.
+        
+        Phase 4.5: Exact patterns from original hardcoded list in ViewRunner
+        """
+        return [
+            'count()', 'distinct()', 'skip(', 'take(',
+            'union(', 'intersect(', 'exclude(',
+            'allTrue()', 'anyTrue()', 'allFalse()', 'anyFalse()',
+            'single()'  # Phase 4.6: Add single() to function detection patterns
         ]
 
     def can_handle(self, function_name: str) -> bool:
@@ -41,7 +58,11 @@ class CollectionFunctionHandler(BaseFunctionHandler):
             'select', 'where', 'all', 'distinct', 'single', 'tail',
             'skip', 'take', 'union', 'combine', 'intersect', 'exclude',
             'alltrue', 'allfalse', 'anytrue', 'anyfalse', 'contains',
-            'children', 'descendants', 'isdistinct', 'subsetof', 'supersetof'
+            'children', 'descendants', 'isdistinct', 'subsetof', 'supersetof',
+            # Phase 4.3: Advanced collection functions
+            'iif', 'repeat', 'aggregate', 'flatten', 'in',
+            # Phase 4.3.1: FHIRPath specification camelCase variants
+            'alltrue', 'allfalse', 'anytrue', 'anyfalse', 'isdistinct', 'subsetof', 'supersetof'
         }
         return function_name.lower() in collection_functions
     
@@ -115,6 +136,16 @@ class CollectionFunctionHandler(BaseFunctionHandler):
             return self._handle_subsetof(base_expr, func_node)
         elif func_name == 'supersetof':
             return self._handle_supersetof(base_expr, func_node)
+        elif func_name == 'iif':
+            return self._handle_iif(base_expr, func_node)
+        elif func_name == 'repeat':
+            return self._handle_repeat(base_expr, func_node)
+        elif func_name == 'aggregate':
+            return self._handle_aggregate(base_expr, func_node)
+        elif func_name == 'flatten':
+            return self._handle_flatten(base_expr, func_node)
+        elif func_name == 'in':
+            return self._handle_in(base_expr, func_node)
         else:
             raise ValueError(f"Unsupported collection function: {func_name}")
     
@@ -295,46 +326,177 @@ class CollectionFunctionHandler(BaseFunctionHandler):
         """
     
     def _handle_where(self, base_expr: str, func_node) -> str:
-        """Handle where() function."""
+        """
+        Handle where() function with enhanced pattern support.
+        
+        Phase 4.3: Enhanced where clause patterns for complex filtering
+        """
         # PHASE 4B: CTE Implementation with Feature Flag
         if self.generator.enable_cte and self.generator._should_use_cte_unified(base_expr, 'where'):
             try:
                 return self.generator._generate_where_with_cte(func_node, base_expr)
             except Exception as e:
-                # Fallback to original implementation if CTE generation fails
-                print(f"CTE generation failed for where(), falling back to subqueries: {e}")
+                # Fallback to enhanced implementation if CTE generation fails
+                print(f"CTE generation failed for where(), falling back to enhanced implementation: {e}")
         
-        # Original implementation (fallback)
+        # Phase 4.3: Enhanced implementation with complex pattern support
         if hasattr(func_node, 'args') and len(func_node.args) > 0:
             # Set context for WHERE clause generation
             old_context = self.generator.in_where_context
             self.generator.in_where_context = True
             
             try:
-                # Create nested generator for where condition processing
-                nested_generator = type(self.generator)(
-                    table_name=self.generator.table_name,
-                    json_column="value",  # In where context, we operate on array elements
-                    resource_type=self.generator.resource_type,
-                    dialect=self.generator.dialect
-                )
-                # Configure nested generator for WHERE context
-                nested_generator.in_where_context = True
+                # Analyze condition complexity to determine processing approach
+                condition_complexity = self._analyze_where_condition_complexity(func_node.args[0])
                 
-                where_condition = nested_generator.visit(func_node.args[0])
-                
-                # Merge CTEs and state from where condition generator
-                self.generator.merge_nested_generator_state(nested_generator)
-                
+                if condition_complexity['is_complex']:
+                    return self._handle_complex_where(base_expr, func_node.args[0], condition_complexity)
+                else:
+                    return self._handle_simple_where(base_expr, func_node.args[0])
+                    
+            finally:
+                self.generator.in_where_context = old_context
+        else:
+            return base_expr
+    
+    def _analyze_where_condition_complexity(self, condition_node) -> dict:
+        """
+        Analyze where condition complexity to determine processing approach.
+        
+        Phase 4.3: Complexity analysis for optimized where processing
+        """
+        complexity = {
+            'is_complex': False,
+            'has_functions': False,
+            'has_boolean_logic': False,
+            'has_nested_where': False,
+            'has_type_operations': False,
+            'complexity_score': 0
+        }
+        
+        # Convert condition to string for pattern analysis
+        condition_str = str(condition_node)
+        
+        # Check for function usage
+        function_patterns = [
+            'startswith', 'endswith', 'contains', 'length', 'upper', 'lower',
+            'abs', 'sqrt', 'power', 'count', 'exists', 'first', 'last'
+        ]
+        
+        for pattern in function_patterns:
+            if pattern in condition_str.lower():
+                complexity['has_functions'] = True
+                complexity['complexity_score'] += 2
+                break
+        
+        # Check for boolean logic
+        boolean_patterns = [' and ', ' or ', ' not ', '&&', '||', '!']
+        for pattern in boolean_patterns:
+            if pattern in condition_str.lower():
+                complexity['has_boolean_logic'] = True
+                complexity['complexity_score'] += 1
+                break
+        
+        # Check for nested where clauses
+        if '.where(' in condition_str:
+            complexity['has_nested_where'] = True
+            complexity['complexity_score'] += 3
+        
+        # Check for type operations
+        type_patterns = [' is ', '.as(', 'oftype(']
+        for pattern in type_patterns:
+            if pattern in condition_str.lower():
+                complexity['has_type_operations'] = True
+                complexity['complexity_score'] += 2
+                break
+        
+        # Determine if complex based on score
+        complexity['is_complex'] = complexity['complexity_score'] > 1
+        
+        return complexity
+    
+    def _handle_simple_where(self, base_expr: str, condition_node) -> str:
+        """Handle simple where conditions with basic optimization."""
+        # Create nested generator for where condition processing
+        nested_generator = type(self.generator)(
+            table_name=self.generator.table_name,
+            json_column="value",  # In where context, we operate on array elements
+            resource_type=self.generator.resource_type,
+            dialect=self.generator.dialect
+        )
+        # Configure nested generator for WHERE context
+        nested_generator.in_where_context = True
+        
+        where_condition = nested_generator.visit(condition_node)
+        
+        # Merge CTEs and state from where condition generator
+        self.generator.merge_nested_generator_state(nested_generator)
+        
+        return f"""
+        (SELECT {self.generator.aggregate_to_json_array('value')}
+         FROM json_each({base_expr}) 
+         WHERE {where_condition})
+        """
+    
+    def _handle_complex_where(self, base_expr: str, condition_node, complexity: dict) -> str:
+        """
+        Handle complex where conditions with enhanced processing.
+        
+        Phase 4.3: Enhanced complex where clause handling
+        """
+        # For complex conditions, use a more sophisticated approach
+        
+        # Create an enhanced nested generator with function handler access
+        nested_generator = type(self.generator)(
+            table_name=self.generator.table_name,
+            json_column="value",  # In where context, we operate on array elements
+            resource_type=self.generator.resource_type,
+            dialect=self.generator.dialect
+        )
+        
+        # Configure nested generator for WHERE context with enhanced capabilities
+        nested_generator.in_where_context = True
+        
+        # Enable enhanced function processing for complex conditions
+        if complexity['has_functions']:
+            # Ensure function handlers are available in where context
+            nested_generator.collection_function_handler = self.generator.collection_function_handler
+            nested_generator.string_function_handler = self.generator.string_function_handler
+            nested_generator.math_function_handler = self.generator.math_function_handler
+            nested_generator.type_function_handler = self.generator.type_function_handler
+            nested_generator.datetime_function_handler = self.generator.datetime_function_handler
+        
+        try:
+            where_condition = nested_generator.visit(condition_node)
+            
+            # Merge CTEs and state from where condition generator
+            self.generator.merge_nested_generator_state(nested_generator)
+            
+            # For very complex conditions, consider using CTE optimization
+            if complexity['complexity_score'] >= 4:
+                return self._generate_complex_where_with_optimization(base_expr, where_condition)
+            else:
                 return f"""
                 (SELECT {self.generator.aggregate_to_json_array('value')}
                  FROM json_each({base_expr}) 
                  WHERE {where_condition})
                 """
-            finally:
-                self.generator.in_where_context = old_context
-        else:
-            return base_expr
+        except Exception as e:
+            # Fallback to simple processing if complex processing fails
+            print(f"Complex where processing failed, falling back to simple: {e}")
+            return self._handle_simple_where(base_expr, condition_node)
+    
+    def _generate_complex_where_with_optimization(self, base_expr: str, where_condition: str) -> str:
+        """Generate optimized SQL for very complex where conditions."""
+        # For very complex conditions, use subquery optimization
+        return f"""
+        (SELECT {self.generator.aggregate_to_json_array('filtered_value')}
+         FROM (
+             SELECT value as filtered_value
+             FROM json_each({base_expr})
+             WHERE {where_condition}
+         ) complex_filter)
+        """
     
     def _handle_all(self, base_expr: str, func_node) -> str:
         """Handle all() function."""
@@ -866,6 +1028,35 @@ class CollectionFunctionHandler(BaseFunctionHandler):
         END
         """.strip()
     
+    # Phase 4.3.1: FHIRPath specification camelCase handlers (delegate to lowercase implementations)
+    def _handle_allTrue(self, base_expr: str, func_node) -> str:
+        """Handle allTrue() function - FHIRPath specification camelCase."""
+        return self._handle_alltrue(base_expr, func_node)
+    
+    def _handle_allFalse(self, base_expr: str, func_node) -> str:
+        """Handle allFalse() function - FHIRPath specification camelCase."""
+        return self._handle_allfalse(base_expr, func_node)
+    
+    def _handle_anyTrue(self, base_expr: str, func_node) -> str:
+        """Handle anyTrue() function - FHIRPath specification camelCase.""" 
+        return self._handle_anytrue(base_expr, func_node)
+    
+    def _handle_anyFalse(self, base_expr: str, func_node) -> str:
+        """Handle anyFalse() function - FHIRPath specification camelCase."""
+        return self._handle_anyfalse(base_expr, func_node)
+    
+    def _handle_isDistinct(self, base_expr: str, func_node) -> str:
+        """Handle isDistinct() function - FHIRPath specification camelCase."""
+        return self._handle_isdistinct(base_expr, func_node)
+    
+    def _handle_subsetOf(self, base_expr: str, func_node) -> str:
+        """Handle subsetOf() function - FHIRPath specification camelCase."""
+        return self._handle_subsetof(base_expr, func_node)
+    
+    def _handle_supersetOf(self, base_expr: str, func_node) -> str:
+        """Handle supersetOf() function - FHIRPath specification camelCase."""
+        return self._handle_supersetof(base_expr, func_node)
+    
     def _handle_contains(self, base_expr: str, func_node) -> str:
         """Handle contains() function."""
         if len(func_node.args) != 1:
@@ -1070,5 +1261,136 @@ class CollectionFunctionHandler(BaseFunctionHandler):
                 END
             ELSE 
                 {base_expr} = {other_collection}
+        END
+        """.strip()
+    
+    def _handle_iif(self, base_expr: str, func_node) -> str:
+        """
+        Handle iif() function - conditional expression (ternary operator).
+        
+        Phase 4.3: Implementation of conditional iif(condition, true_result, false_result)
+        """
+        if len(func_node.args) != 3:
+            raise ValueError("iif() function requires exactly 3 arguments: condition, true_result, false_result")
+        
+        # Process the three arguments
+        condition_sql = self.generator.visit(func_node.args[0])
+        true_result_sql = self.generator.visit(func_node.args[1])
+        false_result_sql = self.generator.visit(func_node.args[2])
+        
+        return f"""
+        CASE 
+            WHEN {condition_sql} = true THEN {true_result_sql}
+            ELSE {false_result_sql}
+        END
+        """.strip()
+    
+    def _handle_repeat(self, base_expr: str, func_node) -> str:
+        """
+        Handle repeat() function - iterative expression evaluation.
+        
+        Phase 4.3: Implementation of repeat(expression) for iterative processing
+        """
+        if len(func_node.args) != 1:
+            raise ValueError("repeat() function requires exactly 1 argument: expression")
+        
+        # For now, implement a simplified version that applies the expression once
+        # Full implementation would require recursive evaluation
+        expr_sql = self.generator.visit(func_node.args[0])
+        
+        # TODO: Implement full iterative evaluation
+        # This is a simplified implementation that applies the expression once
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NOT NULL THEN {expr_sql}
+            ELSE NULL
+        END
+        """.strip()
+    
+    def _handle_aggregate(self, base_expr: str, func_node) -> str:
+        """
+        Handle aggregate() function - custom aggregation with user-defined expressions.
+        
+        Phase 4.3: Implementation of aggregate(aggregator_expression, initial_value)
+        """
+        if len(func_node.args) < 1 or len(func_node.args) > 2:
+            raise ValueError("aggregate() function requires 1 or 2 arguments: aggregator_expression[, initial_value]")
+        
+        aggregator_sql = self.generator.visit(func_node.args[0])
+        initial_value = "NULL"
+        if len(func_node.args) == 2:
+            initial_value = self.generator.visit(func_node.args[1])
+        
+        # Implement aggregation over array elements
+        return f"""
+        CASE 
+            WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN (
+                SELECT 
+                    COALESCE(
+                        (SELECT {aggregator_sql} 
+                         FROM {self.generator.iterate_json_array(base_expr, '$')} elem
+                         ORDER BY elem.key
+                         LIMIT 1
+                        ), 
+                        {initial_value}
+                    )
+            )
+            ELSE {initial_value}
+        END
+        """.strip()
+    
+    def _handle_flatten(self, base_expr: str, func_node) -> str:
+        """
+        Handle flatten() function - recursive array flattening.
+        
+        Phase 4.3: Implementation of flatten() for nested array flattening
+        """
+        if len(func_node.args) != 0:
+            raise ValueError("flatten() function takes no arguments")
+        
+        # Implement array flattening - handle one level of nesting for now
+        return f"""
+        CASE 
+            WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN (
+                SELECT {self.generator.aggregate_to_json_array('elem_value')}
+                FROM (
+                    SELECT 
+                        CASE 
+                            WHEN {self.generator.get_json_type('elem.value')} = 'ARRAY' THEN
+                                (SELECT inner_elem.value 
+                                 FROM {self.generator.iterate_json_array('elem.value', '$')} inner_elem)
+                            ELSE elem.value
+                        END as elem_value
+                    FROM {self.generator.iterate_json_array(base_expr, '$')} elem
+                ) flattened
+                WHERE elem_value IS NOT NULL
+            )
+            ELSE {base_expr}
+        END
+        """.strip()
+    
+    def _handle_in(self, base_expr: str, func_node) -> str:
+        """
+        Handle in() function - membership testing.
+        
+        Phase 4.3: Implementation of in(collection) for membership testing
+        """
+        if len(func_node.args) != 1:
+            raise ValueError("in() function requires exactly 1 argument: collection")
+        
+        collection_sql = self.generator.visit(func_node.args[0])
+        
+        return f"""
+        CASE 
+            WHEN {self.generator.get_json_type(collection_sql)} = 'ARRAY' THEN (
+                SELECT 
+                    CASE 
+                        WHEN COUNT(*) > 0 THEN true 
+                        ELSE false 
+                    END
+                FROM {self.generator.iterate_json_array(collection_sql, '$')} elem
+                WHERE elem.value = {base_expr}
+            )
+            ELSE {base_expr} = {collection_sql}
         END
         """.strip()

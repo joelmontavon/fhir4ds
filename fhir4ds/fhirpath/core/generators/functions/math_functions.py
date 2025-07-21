@@ -30,6 +30,17 @@ class MathFunctionHandler(BaseFunctionHandler):
             'abs', 'ceiling', 'floor', 'round', 'sqrt', 'truncate',
             'exp', 'ln', 'log', 'power'
         ]
+    
+    def get_legacy_function_patterns(self) -> List[str]:
+        """
+        Return legacy math function patterns that match original hardcoded patterns.
+        
+        Phase 4.5: Exact patterns from original hardcoded list in ViewRunner
+        """
+        return [
+            'abs()', 'sqrt()', 'power(', 'exp()', 'ln()',
+            'ceiling()', 'floor()', 'round(', 'truncate('
+        ]
 
     def can_handle(self, function_name: str) -> bool:
         """Check if this handler can process the given function."""

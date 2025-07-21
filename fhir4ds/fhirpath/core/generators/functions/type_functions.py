@@ -25,6 +25,22 @@ class TypeFunctionHandler(BaseFunctionHandler):
         self.generator = generator
         self.dialect = generator.dialect
     
+    def _generate_regex_match(self, value_expr: str, pattern: str) -> str:
+        """
+        Generate dialect-appropriate regex matching SQL.
+        
+        Args:
+            value_expr: SQL expression to test
+            pattern: Regex pattern to match
+            
+        Returns:
+            SQL expression for regex matching
+        """
+        if self.dialect.name == "POSTGRESQL":
+            return f"({value_expr}) ~ '{pattern}'"
+        else:  # DuckDB
+            return f"regexp_matches(CAST({value_expr} AS VARCHAR), '{pattern}')"
+    
     def _generate_boolean_conversion_logic(self, value_expr: str, is_conversion: bool = True) -> str:
         """
         Generate shared boolean conversion logic.
@@ -106,6 +122,20 @@ class TypeFunctionHandler(BaseFunctionHandler):
             'todatetime', 'totime', 'toquantity', 'convertstoboolean', 'convertstodecimal',
             'convertstointeger', 'convertstodate', 'convertstodatetime', 'convertstotime',
             'as', 'is', 'oftype'
+        ]
+    
+    def get_legacy_function_patterns(self) -> List[str]:
+        """
+        Return legacy type function patterns that match original hardcoded patterns.
+        
+        Phase 4.5: Exact patterns from original hardcoded list in ViewRunner
+        """
+        return [
+            'toBoolean()', 'toString()', 'toInteger()', 'toDecimal()',
+            'toDate()', 'toDateTime()', 'toTime()', 'toQuantity()',
+            'convertsToBoolean()', 'convertsToInteger()', 'convertsToDecimal()',
+            'convertsToDate()', 'convertsToDateTime()', 'convertsToTime()',
+            'convertsTo('
         ]
 
     def can_handle(self, function_name: str) -> bool:
@@ -268,6 +298,11 @@ class TypeFunctionHandler(BaseFunctionHandler):
         if len(func_node.args) != 0:
             raise ValueError(f"toDecimal() requires no arguments, got {len(func_node.args)}")
         
+        # Pre-define regex pattern to avoid backslash issues in f-strings
+        decimal_pattern = '^-?[0-9]+\\.?[0-9]*$'
+        array_regex_match = self._generate_regex_match('value', decimal_pattern)
+        single_regex_match = self._generate_regex_match(base_expr, decimal_pattern)
+        
         return f"""
         CASE 
             -- Check if collection is null or empty
@@ -280,7 +315,7 @@ class TypeFunctionHandler(BaseFunctionHandler):
                         SELECT 
                             CASE 
                                 -- String numeric values - parse as decimal
-                                WHEN CAST(value AS VARCHAR) REGEXP '^-?[0-9]+\\.?[0-9]*$' THEN 
+                                WHEN {array_regex_match} THEN 
                                     CAST(CAST(value AS VARCHAR) AS DOUBLE)
                                 -- Already numeric values
                                 WHEN {self.generator.get_json_type('value')} IN ('NUMBER', 'INTEGER', 'DOUBLE') THEN
@@ -295,7 +330,7 @@ class TypeFunctionHandler(BaseFunctionHandler):
             ELSE 
                 CASE 
                     -- String numeric values - parse as decimal
-                    WHEN CAST({base_expr} AS VARCHAR) REGEXP '^-?[0-9]+\\.?[0-9]*$' THEN 
+                    WHEN {single_regex_match} THEN 
                         CAST(CAST({base_expr} AS VARCHAR) AS DOUBLE)
                     -- Already numeric values
                     WHEN {self.generator.get_json_type(base_expr)} IN ('NUMBER', 'INTEGER', 'DOUBLE') THEN
@@ -473,6 +508,11 @@ class TypeFunctionHandler(BaseFunctionHandler):
         if len(func_node.args) != 0:
             raise ValueError(f"convertsToDecimal() requires no arguments, got {len(func_node.args)}")
         
+        # Pre-define regex pattern to avoid backslash issues in f-strings
+        decimal_pattern = '^-?[0-9]+\\.?[0-9]*$'
+        array_regex_match = self._generate_regex_match('value', decimal_pattern)
+        single_regex_match = self._generate_regex_match(base_expr, decimal_pattern)
+        
         return f"""
         CASE 
             -- Check if collection is null or empty
@@ -485,7 +525,7 @@ class TypeFunctionHandler(BaseFunctionHandler):
                         SELECT 
                             CASE 
                                 -- String numeric values - check if can parse as decimal
-                                WHEN CAST(value AS VARCHAR) REGEXP '^-?[0-9]+\\.?[0-9]*$' THEN true
+                                WHEN {array_regex_match} THEN true
                                 -- Already numeric values
                                 WHEN {self.generator.get_json_type('value')} IN ('NUMBER', 'INTEGER', 'DOUBLE') THEN true
                                 ELSE false
@@ -498,7 +538,7 @@ class TypeFunctionHandler(BaseFunctionHandler):
             ELSE 
                 CASE 
                     -- String numeric values - check if can parse as decimal
-                    WHEN CAST({base_expr} AS VARCHAR) REGEXP '^-?[0-9]+\\.?[0-9]*$' THEN true
+                    WHEN {single_regex_match} THEN true
                     -- Already numeric values
                     WHEN {self.generator.get_json_type(base_expr)} IN ('NUMBER', 'INTEGER', 'DOUBLE') THEN true
                     ELSE false
@@ -522,6 +562,11 @@ class TypeFunctionHandler(BaseFunctionHandler):
         if len(func_node.args) != 0:
             raise ValueError(f"convertsToInteger() requires no arguments, got {len(func_node.args)}")
         
+        # Pre-define regex pattern to avoid backslash issues in f-strings
+        integer_pattern = '^-?[0-9]+$'
+        array_regex_match = self._generate_regex_match('value', integer_pattern)
+        single_regex_match = self._generate_regex_match(base_expr, integer_pattern)
+        
         return f"""
         CASE 
             -- Check if collection is null or empty
@@ -534,7 +579,7 @@ class TypeFunctionHandler(BaseFunctionHandler):
                         SELECT 
                             CASE 
                                 -- String integer values - check if can parse as integer (no decimals)
-                                WHEN CAST(value AS VARCHAR) REGEXP '^-?[0-9]+$' THEN true
+                                WHEN {array_regex_match} THEN true
                                 -- Already integer values
                                 WHEN {self.generator.get_json_type('value')} = 'INTEGER' THEN true
                                 ELSE false
@@ -547,7 +592,7 @@ class TypeFunctionHandler(BaseFunctionHandler):
             ELSE 
                 CASE 
                     -- String integer values - check if can parse as integer (no decimals)
-                    WHEN CAST({base_expr} AS VARCHAR) REGEXP '^-?[0-9]+$' THEN true
+                    WHEN {single_regex_match} THEN true
                     -- Already integer values
                     WHEN {self.generator.get_json_type(base_expr)} = 'INTEGER' THEN true
                     ELSE false
