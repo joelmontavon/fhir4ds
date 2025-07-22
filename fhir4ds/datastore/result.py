@@ -66,6 +66,48 @@ class QueryResult:
         """Convert results to pandas DataFrame for fluent chaining"""
         return self.to_df(include_metadata)
     
+    def to_json(self, output_path: Optional[str] = None, 
+                include_metadata: bool = True, indent: int = 2) -> Optional[str]:
+        """
+        Convert results to JSON format.
+        
+        Args:
+            output_path: Optional file path to save JSON. If None, returns JSON string.
+            include_metadata: Whether to include query metadata in output
+            indent: JSON indentation level
+            
+        Returns:
+            JSON string if output_path is None, otherwise None
+        """
+        from .formatters import ResultFormatter
+        return ResultFormatter.to_json(self, output_path, include_metadata, indent)
+    
+    def to_excel(self, output_path: str, sheet_names: Optional[List[str]] = None, 
+                 include_metadata: bool = True) -> None:
+        """
+        Convert results to Excel format.
+        
+        Args:
+            output_path: File path to save Excel file
+            sheet_names: Optional list of sheet names
+            include_metadata: Whether to include metadata sheet
+        """
+        from .formatters import ResultFormatter
+        return ResultFormatter.to_excel(self, output_path, sheet_names, include_metadata)
+    
+    def to_parquet(self, output_path: str, compression: str = 'snappy', 
+                   include_metadata: bool = True) -> None:
+        """
+        Convert results to Parquet format.
+        
+        Args:
+            output_path: File path to save Parquet file
+            compression: Compression algorithm ('snappy', 'gzip', 'brotli', 'lz4')
+            include_metadata: Whether to include query metadata
+        """
+        from .formatters import ResultFormatter
+        return ResultFormatter.to_parquet(self, output_path, compression, include_metadata)
+    
     @property
     def description(self):
         """Get column descriptions"""
