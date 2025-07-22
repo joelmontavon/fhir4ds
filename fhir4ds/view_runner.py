@@ -3039,7 +3039,9 @@ class ViewRunner:
             else:
                 return Expr([fhirpath_sql], sep='')
         
-        json_path = f'$.{path}' if not path.startswith('$.') else path
+        # Apply FHIR array adjustments before creating JSON path
+        adjusted_path = self._adjust_path_for_arrays(path)
+        json_path = f'$.{adjusted_path}' if not adjusted_path.startswith('$.') else adjusted_path
         
         if column_type in ['boolean']:
             # For boolean, extract as string and convert to boolean
