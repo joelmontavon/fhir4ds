@@ -101,6 +101,18 @@ class FHIRDataStore:
             self.load_resource(resource)
         return self
     
+    def insert_resources(self, resources: List[Dict[str, Any]]) -> None:
+        """
+        Insert FHIR resources into the datastore.
+        
+        This method provides API compatibility for expected insert_resources() interface
+        and delegates to the existing load_resources() implementation.
+        
+        Args:
+            resources: List of FHIR resource dictionaries
+        """
+        self.load_resources(resources)
+    
     def bulk_load_resources(self, resources: List[Dict[str, Any]], 
                            parallel: bool = True, batch_size: int = 100) -> 'FHIRDataStore':
         """
