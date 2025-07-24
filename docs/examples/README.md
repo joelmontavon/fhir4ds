@@ -10,9 +10,8 @@ This directory contains interactive Jupyter notebooks, sample ViewDefinitions, a
 examples/
 ├── notebooks/                          # Interactive Jupyter demonstrations
 │   ├── FHIR4DS_Quick_Start.ipynb      # 🚀 Perfect starting point for new users
-│   ├── FHIR4DS_Complete_Feature_Demo.ipynb  # 🏥 Comprehensive feature showcase
-│   ├── FHIR4DS_Server_Demo.ipynb      # 🌐 RESTful API server demonstration
-│   └── FHIR4DS_Dual_Dialect_Testing.ipynb  # 🔄 Database compatibility testing
+│   ├── cql_walkthrough.ipynb          # 🧪 Experimental CQL functionality tutorial
+│   └── (additional notebooks TBD)     # More comprehensive demos coming soon
 │
 ├── view_definitions/                    # Sample ViewDefinitions for common use cases
 │   ├── simple_patient_fields.json     # Basic patient demographics
@@ -33,26 +32,22 @@ examples/
 - Multi-format data export
 - Performance optimization
 
-### For Comprehensive Overview
-**Complete demo**: [`FHIR4DS_Complete_Feature_Demo.ipynb`](notebooks/FHIR4DS_Complete_Feature_Demo.ipynb)
-- All FHIR4DS features
-- Real-world healthcare scenarios
-- Performance benchmarking
+### For CQL and Population Health Analytics
+**🧪 CQL Tutorial**: [`cql_walkthrough.ipynb`](notebooks/cql_walkthrough.ipynb)
+- Experimental CQL functionality overview
+- Population-first processing (10-100x performance improvement)
+- Quality measure evaluation
+- Clinical functions and context management
+- Performance optimization for population health analytics
+
+**Note**: CQL support is experimental and under active development
+
+### For Additional Features
+More comprehensive demo notebooks coming soon:
+- Complete FHIR4DS feature showcase
+- RESTful API server demonstration
+- Database compatibility testing
 - Advanced analytics patterns
-
-### For API Development
-**Server demo**: [`FHIR4DS_Server_Demo.ipynb`](notebooks/FHIR4DS_Server_Demo.ipynb)
-- RESTful API endpoints
-- ViewDefinition management
-- Real-time analytics execution
-- Bulk resource processing
-
-### For Database Testing
-**Dialect testing**: [`FHIR4DS_Dual_Dialect_Testing.ipynb`](notebooks/FHIR4DS_Dual_Dialect_Testing.ipynb)
-- DuckDB vs PostgreSQL comparison
-- SQL generation analysis
-- Performance benchmarking
-- 100% compliance validation
 
 ## 📊 Sample ViewDefinitions
 

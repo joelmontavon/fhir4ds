@@ -8,6 +8,13 @@ to support incremental CTE building and complex forEach operations.
 import re
 from typing import List, Optional, Union, Any
 
+# Define what gets imported with "from .sql_builders import *"
+__all__ = [
+    'QueryItem', 'Literal', 'Field', 'Func', 'Expr', 'SelectItem', 
+    'Table', 'Join', 'Select', 'FromItem', 'TableRef', 'Subquery', 
+    'Cte', 'Union'
+]
+
 
 class QueryItem:
     """Base class for all SQL query components"""

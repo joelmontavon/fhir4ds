@@ -29,7 +29,11 @@ except ImportError:
 
 # CTEProcessor moved to archive - was disabled in production
 from .fhirpath.core.generator import SQLGenerator
-from .fhirpath.core.builders import *
+from .fhirpath.core.sql_builders import (
+    QueryItem, Literal, Field, Func, Expr, SelectItem, 
+    Table, Join, Select, FromItem, TableRef, Subquery, 
+    Cte, Union
+)
 from .fhirpath.core.choice_types import fhir_choice_types
 # DuckDBDialect now imported from dialects package
 from .dialects import DuckDBDialect

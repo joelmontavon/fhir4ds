@@ -1,0 +1,265 @@
+[
+  {
+    "resourceType": "Patient",
+    "id": "patient-001",
+    "gender": "male",
+    "birthDate": "1980-01-15",
+    "name": [
+      {
+        "family": "Smith",
+        "given": ["John"]
+      }
+    ],
+    "extension": [
+      {
+        "url": "age",
+        "valueInteger": 43
+      },
+      {
+        "url": "hba1c",
+        "valueQuantity": {
+          "value": 8.5,
+          "unit": "%"
+        }
+      },
+      {
+        "url": "bp_systolic",
+        "valueQuantity": {
+          "value": 135,
+          "unit": "mmHg"
+        }
+      },
+      {
+        "url": "bp_diastolic",
+        "valueQuantity": {
+          "value": 85,
+          "unit": "mmHg"
+        }
+      }
+    ]
+  },
+  {
+    "resourceType": "Patient", 
+    "id": "patient-002",
+    "gender": "female",
+    "birthDate": "1975-06-20",
+    "name": [
+      {
+        "family": "Johnson",
+        "given": ["Mary"]
+      }
+    ],
+    "extension": [
+      {
+        "url": "age",
+        "valueInteger": 48
+      },
+      {
+        "url": "hba1c",
+        "valueQuantity": {
+          "value": 9.2,
+          "unit": "%"
+        }
+      },
+      {
+        "url": "bp_systolic",
+        "valueQuantity": {
+          "value": 150,
+          "unit": "mmHg"
+        }
+      },
+      {
+        "url": "bp_diastolic",
+        "valueQuantity": {
+          "value": 95,
+          "unit": "mmHg"
+        }
+      }
+    ]
+  },
+  {
+    "resourceType": "Patient",
+    "id": "patient-003", 
+    "gender": "male",
+    "birthDate": "1990-03-10",
+    "name": [
+      {
+        "family": "Williams",
+        "given": ["Robert"]
+      }
+    ],
+    "extension": [
+      {
+        "url": "age",
+        "valueInteger": 33
+      },
+      {
+        "url": "hba1c",
+        "valueQuantity": {
+          "value": 7.1,
+          "unit": "%"
+        }
+      },
+      {
+        "url": "bp_systolic", 
+        "valueQuantity": {
+          "value": 125,
+          "unit": "mmHg"
+        }
+      },
+      {
+        "url": "bp_diastolic",
+        "valueQuantity": {
+          "value": 80,
+          "unit": "mmHg"
+        }
+      }
+    ]
+  },
+  {
+    "resourceType": "Patient",
+    "id": "patient-004",
+    "gender": "female", 
+    "birthDate": "1965-11-25",
+    "name": [
+      {
+        "family": "Brown",
+        "given": ["Linda"]
+      }
+    ],
+    "extension": [
+      {
+        "url": "age",
+        "valueInteger": 58
+      },
+      {
+        "url": "hba1c",
+        "valueQuantity": {
+          "value": 10.1,
+          "unit": "%"
+        }
+      },
+      {
+        "url": "bp_systolic",
+        "valueQuantity": {
+          "value": 160,
+          "unit": "mmHg"
+        }
+      },
+      {
+        "url": "bp_diastolic",
+        "valueQuantity": {
+          "value": 100,
+          "unit": "mmHg"
+        }
+      }
+    ]
+  },
+  {
+    "resourceType": "Patient",
+    "id": "patient-005",
+    "gender": "male",
+    "birthDate": "1995-08-05",
+    "name": [
+      {
+        "family": "Davis",
+        "given": ["Michael"]
+      }
+    ],
+    "extension": [
+      {
+        "url": "age",
+        "valueInteger": 28
+      },
+      {
+        "url": "hba1c",
+        "valueQuantity": {
+          "value": 6.8,
+          "unit": "%"
+        }
+      },
+      {
+        "url": "bp_systolic",
+        "valueQuantity": {
+          "value": 118,
+          "unit": "mmHg"
+        }
+      },
+      {
+        "url": "bp_diastolic",
+        "valueQuantity": {
+          "value": 75,
+          "unit": "mmHg"
+        }
+      }
+    ]
+  },
+  {
+    "resourceType": "Observation",
+    "id": "obs-001",
+    "status": "final",
+    "category": [
+      {
+        "coding": [
+          {
+            "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+            "code": "vital-signs"
+          }
+        ]
+      }
+    ],
+    "code": {
+      "coding": [
+        {
+          "system": "http://loinc.org",
+          "code": "4548-4",
+          "display": "Hemoglobin A1c/Hemoglobin.total in Blood"
+        }
+      ]
+    },
+    "subject": {
+      "reference": "Patient/patient-001"
+    },
+    "effectiveDateTime": "2023-06-15",
+    "valueQuantity": {
+      "value": 8.5,
+      "unit": "%",
+      "system": "http://unitsofmeasure.org",
+      "code": "%"
+    }
+  },
+  {
+    "resourceType": "Observation",
+    "id": "obs-002", 
+    "status": "final",
+    "category": [
+      {
+        "coding": [
+          {
+            "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+            "code": "vital-signs"
+          }
+        ]
+      }
+    ],
+    "code": {
+      "coding": [
+        {
+          "system": "http://loinc.org",
+          "code": "4548-4",
+          "display": "Hemoglobin A1c/Hemoglobin.total in Blood"
+        }
+      ]
+    },
+    "subject": {
+      "reference": "Patient/patient-002"
+    },
+    "effectiveDateTime": "2023-07-20",
+    "valueQuantity": {
+      "value": 9.2,
+      "unit": "%",
+      "system": "http://unitsofmeasure.org",
+      "code": "%"
+    }
+  }
+]

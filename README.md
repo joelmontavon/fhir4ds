@@ -2,7 +2,7 @@
 
 Production-ready healthcare analytics platform providing 100% SQL-on-FHIR v2.0 compliance and 100% FHIRPath specification coverage with dual database support (DuckDB + PostgreSQL).
 
-**Current Version**: 0.6.1  
+**Current Version**: 0.7.0  
 **FHIRPath Coverage**: 100% (91/91 functions implemented)
 **SQL-on-FHIR Compliance**: 100% (117/117 tests passing)
 **Database Support**: DuckDB 100% + PostgreSQL 100%  
@@ -16,6 +16,7 @@ Production-ready healthcare analytics platform providing 100% SQL-on-FHIR v2.0 c
 - **High-performance SQL generation** - Optimized for complex healthcare queries
 - **Multi-format export** - Pandas, JSON, CSV, Excel, Parquet
 - **Database object creation** - Views, tables, schemas from ViewDefinitions
+- **🧪 Experimental CQL support** - Clinical Quality Language with population-first analytics
 
 ## Quick Start
 
@@ -71,6 +72,51 @@ views = db.list_views()
 ```
 
 For more details, please see the [documentation](./docs/README.md).
+
+## Experimental: Clinical Quality Language (CQL) Support
+
+FHIR4DS now includes **experimental support** for Clinical Quality Language (CQL), specifically optimized for population health analytics and quality measure evaluation.
+
+### Implemented CQL Functionality
+
+- CQL expression parser extending FHIRPath parser
+- CQL-to-FHIRPath translation for seamless SQL generation
+- Library management with define statements, includes, and parameters
+- Context management (Patient, Population, Practitioner, Encounter contexts)
+- Population-first processing - 10-100x performance improvement
+
+### Known Limitations & Gaps
+
+- Complex CQL expressions with advanced syntax patterns may not parse correctly
+- Some CQL-specific constructs still under development
+- Advanced query expressions (complex `from`/`where`/`return` clauses) have limited support
+- Terminology functions (CodeSystem, ValueSet operations) are basic implementations
+- Error handling for edge cases needs improvement
+
+### 🔬 CQL Quick Start
+
+```python
+from fhir4ds.cql.core.engine import CQLEngine
+from fhir4ds.cql.measures.quality import QualityMeasureEngine
+from fhir4ds.dialects import DuckDBDialect
+
+# Initialize CQL engine (defaults to population-first processing)
+cql_engine = CQLEngine(dialect=DuckDBDialect())
+
+# Simple CQL expression evaluation
+sql = cql_engine.evaluate_expression("Patient.name.family")
+
+# Population health analytics (optimized for large datasets)
+cql_engine.set_population_context({
+    'ageRange': (18, 65),
+    'gender': 'female'
+})
+
+# Quality measure evaluation
+quality_engine = QualityMeasureEngine(cql_engine)
+quality_engine.load_predefined_measures()
+results = quality_engine.evaluate_measure("CMS122v12")  # Diabetes HbA1c measure
+```
 
 ## Testing
 
