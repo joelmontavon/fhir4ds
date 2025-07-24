@@ -313,6 +313,230 @@ print(sql)  # See generated SQL
 
 ---
 
+### fhir4ds.cql
+
+**Clinical Quality Language (CQL) support for healthcare analytics.**
+
+FHIR4DS includes comprehensive CQL support with 80-85% language compliance, enabling sophisticated clinical quality measure development and population health analytics.
+
+#### CQLEngine
+
+Main CQL processing engine with advanced construct support.
+
+```python
+from fhir4ds.cql.core.engine import CQLEngine
+
+# Initialize CQL engine
+engine = CQLEngine(dialect="duckdb", initial_context="Population")
+
+# Evaluate CQL expressions
+sql = engine.evaluate_expression(
+    '[Patient] P where P.active = true', 
+    table_name="fhir_resources"
+)
+
+# Advanced CQL constructs (Phase 6)
+advanced_cql = '''
+[Patient] P
+  with [Condition: "Diabetes"] D such that D.subject references P
+  without [Encounter: "Emergency"] E such that E.subject references P
+'''
+result_sql = engine.evaluate_expression(advanced_cql)
+```
+
+**Key Features:**
+- **82 CQL functions** across mathematical, temporal, interval, and nullological operations
+- **Advanced query constructs**: with/without clauses, let expressions, multi-resource queries
+- **Production-ready terminology integration** with VSAC caching
+- **Cross-dialect support** (DuckDB/PostgreSQL)
+- **Sub-millisecond performance** for complex clinical scenarios
+
+**Constructor:**
+```python
+CQLEngine(
+    dialect: str = "duckdb",           # Database dialect
+    initial_context: str = "Population", # Evaluation context
+    terminology_client: Any = None,    # Custom terminology service
+    db_connection: Any = None          # Database connection for caching
+)
+```
+
+**Methods:**
+- `evaluate_expression(cql_expression: str, table_name: str = "fhir_resources") -> str`
+- `load_library(library_name: str, library_content: str) -> Dict[str, Any]`
+- `set_context(context: str) -> None`
+- `set_patient_context(patient_id: str) -> None`
+- `get_terminology_cache_stats() -> Dict[str, Any]`
+
+#### CQL Functions Coverage
+
+**Mathematical Functions (17 implemented):**
+```python
+# Arithmetic operations
+engine.evaluate_expression("5 + 3 * 2")           # Basic arithmetic
+engine.evaluate_expression("Abs(-10)")             # Absolute value
+engine.evaluate_expression("Max({1, 5, 3})")      # Maximum value
+engine.evaluate_expression("Round(3.14159, 2)")   # Rounding
+
+# Advanced mathematical
+engine.evaluate_expression("Sqrt(16)")             # Square root
+engine.evaluate_expression("Power(2, 3)")         # Exponentiation
+engine.evaluate_expression("Ln(2.718)")           # Natural logarithm
+```
+
+**DateTime Functions (36 implemented):**
+```python
+# Date component extraction
+engine.evaluate_expression("year from @2023-07-15")
+engine.evaluate_expression("month from @2023-07-15T14:30:00")
+
+# Date arithmetic
+engine.evaluate_expression("@2023-01-01 + 30 days")
+engine.evaluate_expression("years between @2020-01-01 and @2023-01-01")
+
+# DateTime construction
+engine.evaluate_expression("DateTime(2023, 7, 15, 14, 30, 0)")
+```
+
+**Interval Functions (21 implemented):**
+```python
+# Interval operations (Allen's algebra)
+engine.evaluate_expression("Interval[1, 10] overlaps Interval[5, 15]")
+engine.evaluate_expression("Interval[@2023-01-01, @2023-12-31] contains @2023-07-15")
+
+# Temporal relationships
+engine.evaluate_expression("Interval[1, 5] meets Interval[5, 10]")
+engine.evaluate_expression("Interval[1, 10] starts Interval[1, 15]")
+```
+
+**Nullological Functions (8 implemented):**
+```python
+# Three-valued logic
+engine.evaluate_expression("Coalesce(null, 'default')")
+engine.evaluate_expression("IsNull(@2023-01-01)")
+engine.evaluate_expression("IsTrue(true)")
+```
+
+#### Advanced CQL Constructs (Phase 6)
+
+**with/without Clauses:**
+```python
+# Complex relationship queries
+diabetes_with_hba1c = '''
+[Condition: "Diabetes mellitus"] Diabetes
+  with [Observation: "HbA1c laboratory test"] HbA1c
+    such that HbA1c.subject references Diabetes.subject
+      and HbA1c.effective during "Measurement Period"
+      and HbA1c.value as Quantity > 9.0 '%'
+'''
+
+# Exclusion logic
+patients_without_insulin = '''
+[Patient] P
+  without [MedicationRequest: "Insulin"] Insulin
+    such that Insulin.subject references P
+'''
+```
+
+**let Expressions:**
+```python
+# Variable definitions
+population_query = '''
+let measurementPeriod: Interval[@2023-01-01T00:00:00.000, @2023-12-31T23:59:59.999],
+    diabetesValueSet: "Diabetes mellitus"
+[Patient] P
+  with [Condition: diabetesValueSet] D
+    such that D.subject references P
+      and D.recordedDate during measurementPeriod
+'''
+```
+
+**Multi-Resource Queries:**
+```python
+# Complex clinical scenarios
+comprehensive_diabetes_care = '''
+[Patient] P
+  with [Condition: "Diabetes mellitus"] DM
+    such that DM.subject references P
+  with [Observation: "HbA1c laboratory test"] A1C
+    such that A1C.subject references P
+      and A1C.effective during "Measurement Period"
+  with [MedicationRequest: "Diabetes medications"] DM_Meds
+    such that DM_Meds.subject references P
+      and DM_Meds.authoredOn during "Measurement Period"
+  without [Encounter: "Emergency department visit"] ED
+    such that ED.subject references P
+      and ED.period during "Measurement Period"
+'''
+```
+
+#### Terminology Integration
+
+**VSAC Integration with Caching:**
+```python
+# Terminology operations with production caching
+engine.evaluate_expression('[Condition: "Diabetes Value Set"] C where C.active = true')
+
+# Cache management
+cache_stats = engine.get_terminology_cache_stats()
+print(f"Cache hit rate: {cache_stats['hit_rate']}")
+
+# Clear cache when needed
+engine.clear_expired_terminology_cache()
+```
+
+#### Context Management
+
+**Multiple Context Support:**
+```python
+# Population analytics (default)
+engine.set_context("Population") 
+result = engine.evaluate_expression("[Patient] P where P.active = true")
+
+# Patient-specific analysis
+engine.set_patient_context("patient-123")
+result = engine.evaluate_expression("Patient.name.family")
+
+# Practitioner context
+engine.set_context("Practitioner")
+```
+
+#### Clinical Use Cases
+
+**Quality Measure Development:**
+```python
+# CMS/HEDIS measure implementation
+cms_diabetes_measure = '''
+define "Numerator":
+  [Patient] P
+    with [Condition: "Diabetes mellitus"] DM
+      such that DM.subject references P
+    with [Observation: "HbA1c laboratory test"] A1C
+      such that A1C.subject references P
+        and A1C.effective during "Measurement Period"
+        and A1C.value as Quantity < 7.0 '%'
+'''
+
+sql = engine.evaluate_expression(cms_diabetes_measure)
+```
+
+**Population Health Analytics:**
+```python
+# Risk stratification
+cardiovascular_risk = '''
+let riskPeriod: Interval[@2023-01-01T00:00:00.000, @2023-12-31T23:59:59.999]
+[Patient] P
+  with [Condition: "Hypertension"] HTN such that HTN.subject references P
+  with [Condition: "Hyperlipidemia"] HLD such that HLD.subject references P
+  with [Observation: "Blood pressure"] BP
+    such that BP.subject references P and BP.effective during riskPeriod
+  without [Procedure: "Cardiac intervention"] CARD
+    such that CARD.subject references P and CARD.performed during riskPeriod
+'''
+```
+
+---
+
 ### fhir4ds.fhirpath
 
 **FHIRPath expression parsing and SQL translation.**
@@ -818,6 +1042,7 @@ await server.startup()
 
 - **FHIR4DS Version:** 3.0.0
 - **SQL-on-FHIR Compliance:** v2.0 (117/117 tests)
+- **CQL Compliance:** 80-85% (82 functions + advanced constructs)
 - **Python Support:** 3.8+
 - **Database Support:** DuckDB 0.8+, PostgreSQL 12+
 
