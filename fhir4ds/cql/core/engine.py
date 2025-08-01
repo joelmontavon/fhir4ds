@@ -20,6 +20,7 @@ from ..functions.math_functions import CQLMathFunctionHandler
 from ..functions.nullological_functions import CQLNullologicalFunctionHandler
 from ..functions.datetime_functions import CQLDateTimeFunctionHandler
 from ..functions.interval_functions import CQLIntervalFunctionHandler
+from .unified_registry import UnifiedFunctionRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,14 @@ class CQLEngine:
             dialect=self.dialect_name
         )
         
+        # Initialize unified function registry for enhanced function routing
+        self.unified_registry = UnifiedFunctionRegistry(
+            dialect=self.dialect_name,
+            terminology_client=terminology_client,
+            db_connection=db_connection
+        )
+        logger.info(f"CQL Engine initialized with UnifiedFunctionRegistry: {self.unified_registry.get_registry_stats()['total_functions']} functions available")
+        
         # Mathematical, nullological, date/time, and interval function handlers  
         self.math_functions = CQLMathFunctionHandler(self.dialect_name)
         self.nullological_functions = CQLNullologicalFunctionHandler(self.dialect_name)
@@ -82,6 +91,9 @@ class CQLEngine:
         self.translator.nullological_functions = self.nullological_functions
         self.translator.datetime_functions = self.datetime_functions
         self.translator.interval_functions = self.interval_functions
+        
+        # Provide unified registry access to translator for enhanced function routing
+        self.translator.unified_registry = self.unified_registry
         
     def _get_dialect_instance(self, dialect_name: str):
         """Create proper dialect instance from dialect name string."""
@@ -109,6 +121,10 @@ class CQLEngine:
         logger.info(f"CQL Engine evaluating: {cql_expression}")
         
         try:
+            # Check for direct function calls that can be routed through unified registry
+            if self._is_direct_function_call(cql_expression):
+                return self._evaluate_function_via_registry(cql_expression, table_name, json_column)
+            
             # Check if this is an advanced CQL construct (Phase 6)
             if self._has_advanced_constructs(cql_expression):
                 return self.evaluate_advanced_expression(cql_expression, table_name, json_column)
@@ -128,6 +144,8 @@ class CQLEngine:
             # Step 3: Generate SQL using existing FHIRPath infrastructure
             if self.dialect:
                 generator = SQLGenerator(table_name, json_column, dialect=self.dialect)
+                # Provide unified registry access to FHIRPath generator for enhanced function routing
+                generator.unified_registry = self.unified_registry
                 sql = generator.visit(fhirpath_ast)
                 
                 # Step 4: Apply context filtering to generated SQL
@@ -162,6 +180,151 @@ class CQLEngine:
         return bool(re.search(with_pattern, expression_lower) or 
                    re.search(without_pattern, expression_lower) or
                    re.search(let_pattern, expression_lower))
+    
+    def _is_direct_function_call(self, cql_expression: str) -> bool:
+        """
+        Check if CQL expression is a direct function call that can be routed via unified registry.
+        
+        Args:
+            cql_expression: CQL expression to check
+            
+        Returns:
+            True if expression is a simple function call pattern
+        """
+        import re
+        
+        # Remove 'define "name":' prefix if present
+        expression = cql_expression.strip()
+        define_pattern = r'define\s+"[^"]+"\s*:\s*(.+)'
+        match = re.match(define_pattern, expression, re.IGNORECASE)
+        if match:
+            expression = match.group(1).strip()
+        
+        # Check for simple function call patterns like StdDev([1,2,3]) or Count(collection)
+        function_call_pattern = r'^(\w+)\s*\([^)]*\)$'
+        if re.match(function_call_pattern, expression):
+            # Extract function name
+            func_match = re.match(r'^(\w+)\s*\(', expression)
+            if func_match:
+                func_name = func_match.group(1)
+                # Check if unified registry can handle this function
+                return self.unified_registry.can_handle_function(func_name)
+        
+        return False
+    
+    def _evaluate_function_via_registry(self, cql_expression: str, table_name: str = "fhir_resources", 
+                                      json_column: str = "resource") -> str:
+        """
+        Evaluate function call using unified registry for direct routing.
+        
+        Args:
+            cql_expression: CQL function call expression
+            table_name: Database table name
+            json_column: JSON column name
+            
+        Returns:
+            SQL query string from registry function handler
+        """
+        import re
+        
+        try:
+            # Remove 'define "name":' prefix if present
+            expression = cql_expression.strip()
+            define_pattern = r'define\s+"[^"]+"\s*:\s*(.+)'
+            match = re.match(define_pattern, expression, re.IGNORECASE)
+            if match:
+                expression = match.group(1).strip()
+            
+            # Extract function name and arguments
+            func_match = re.match(r'^(\w+)\s*\(([^)]*)\)$', expression)
+            if not func_match:
+                raise ValueError(f"Invalid function call format: {expression}")
+            
+            func_name = func_match.group(1)
+            args_str = func_match.group(2).strip()
+            
+            logger.info(f"Routing function '{func_name}' via unified registry")
+            
+            # Get handler from unified registry
+            handler = self.unified_registry.get_handler_for_function(func_name)
+            if not handler:
+                raise ValueError(f"No handler found for function '{func_name}'")
+            
+            # For simple cases, try to call the function directly
+            # This handles cases like StdDev([1,2,3,4,5]) or Count([1,2,3])
+            if args_str.startswith('[') and args_str.endswith(']'):
+                # Simple array literal
+                try:
+                    # Get the function method from handler
+                    if hasattr(handler, 'function_map') and func_name.lower() in handler.function_map:
+                        func_method = handler.function_map[func_name.lower()]
+                        result = func_method(args_str)
+                        
+                        # Extract SQL from LiteralNode if needed
+                        if hasattr(result, 'value'):
+                            sql = result.value
+                        else:
+                            sql = str(result)
+                        
+                        # Wrap in basic SELECT for complete query
+                        final_sql = f"SELECT {sql} as result"
+                        logger.info(f"Successfully generated SQL via registry: {final_sql[:100]}...")
+                        return final_sql
+                        
+                except Exception as e:
+                    logger.warning(f"Direct function call failed: {e}, falling back to normal parsing")
+                    # Fall through to normal parsing if direct call fails
+            
+            # If direct call doesn't work, fall back to existing parsing logic
+            raise ValueError("Direct function call not supported, use normal parsing")
+            
+        except Exception as e:
+            logger.warning(f"Registry-based evaluation failed: {e}, falling back to normal parsing")
+            # Remove the direct function call flag and use normal parsing
+            return self._evaluate_via_normal_parsing(cql_expression, table_name, json_column)
+    
+    def _evaluate_via_normal_parsing(self, cql_expression: str, table_name: str = "fhir_resources", 
+                                   json_column: str = "resource") -> str:
+        """
+        Evaluate expression using normal CQL parsing pipeline.
+        
+        Args:
+            cql_expression: CQL expression string
+            table_name: Database table name
+            json_column: JSON column name
+            
+        Returns:
+            SQL query string
+        """
+        try:
+            # Standard CQL parsing pipeline
+            lexer = CQLLexer(cql_expression)
+            tokens = lexer.tokenize()
+            self.parser.tokens = tokens
+            self.parser.current = 0
+            
+            # Use smart parsing method
+            cql_ast = self.parser.parse_expression_or_fhirpath(cql_expression)
+            
+            # Translate to FHIRPath AST
+            fhirpath_ast = self.translator.translate_expression(cql_ast)
+            
+            # Generate SQL
+            if self.dialect:
+                generator = SQLGenerator(table_name, json_column, dialect=self.dialect)
+                # Provide unified registry access to FHIRPath generator for enhanced function routing
+                generator.unified_registry = self.unified_registry
+                sql = generator.visit(fhirpath_ast)
+                
+                # Apply context filtering
+                context_filtered_sql = self.context_manager.current_context.apply_context_to_query(sql, table_name)
+                return context_filtered_sql
+            else:
+                return f"-- CQL Expression (no dialect): {cql_expression}"
+                
+        except Exception as e:
+            logger.error(f"Normal CQL parsing failed: {e}")
+            return f"-- CQL Expression (error: {e}): {cql_expression}"
     
     def evaluate_advanced_expression(self, cql_expression: str, table_name: str = "fhir_resources", 
                                    json_column: str = "resource") -> str:

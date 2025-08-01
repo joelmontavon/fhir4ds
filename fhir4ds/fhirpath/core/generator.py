@@ -4359,8 +4359,76 @@ class SQLGenerator:
         elif self.datetime_function_handler.can_handle(func_name):
             return self.datetime_function_handler.handle_function(func_name, base_expr, func_node)
         
+        # Check unified registry for CQL functions (fallback for advanced functions)
+        elif hasattr(self, 'unified_registry') and self.unified_registry and self.unified_registry.can_handle_function(func_name):
+            return self._handle_function_via_unified_registry(func_name, func_node, base_expr)
+        
         # Delegate remaining functions to the fallback dispatcher
         return self._handle_remaining_functions(func_name, func_node, base_expr)
+    
+    def _handle_function_via_unified_registry(self, func_name: str, func_node, base_expr: str) -> str:
+        """
+        Handle functions using the unified CQL function registry.
+        
+        Args:
+            func_name: Name of the function to handle
+            func_node: FunctionCallNode from AST
+            base_expr: Base SQL expression
+            
+        Returns:
+            SQL expression for the function call
+        """
+        try:
+            self.logger.debug(f"Handling function '{func_name}' via unified registry")
+            
+            # Get handler from unified registry
+            handler = self.unified_registry.get_handler_for_function(func_name)
+            if not handler:
+                raise ValueError(f"No handler found in unified registry for '{func_name}'")
+            
+            # Convert FHIRPath function node arguments to what CQL handlers expect
+            args = []
+            for arg in func_node.args:
+                if hasattr(arg, 'value'):
+                    # Literal node - use the value directly
+                    args.append(arg.value)
+                else:
+                    # Complex expression - visit to get SQL
+                    arg_sql = self.visit(arg)
+                    args.append(arg_sql)
+            
+            # Try to call the function handler
+            if hasattr(handler, 'function_map') and func_name.lower() in handler.function_map:
+                # Use function map for direct method access
+                func_method = handler.function_map[func_name.lower()]
+                result = func_method(*args)
+                
+                # Extract SQL from LiteralNode if needed
+                if hasattr(result, 'value'):
+                    sql = result.value
+                else:
+                    sql = str(result)
+                    
+                self.logger.debug(f"Generated SQL via unified registry: {sql[:100]}...")
+                return sql
+                
+            elif hasattr(handler, func_name.lower()):
+                # Call method directly by name
+                func_method = getattr(handler, func_name.lower())
+                result = func_method(*args)
+                
+                if hasattr(result, 'value'):
+                    return result.value
+                else:
+                    return str(result)
+                    
+            else:
+                raise ValueError(f"Handler found but no callable method for '{func_name}'")
+                
+        except Exception as e:
+            self.logger.warning(f"Failed to handle function '{func_name}' via unified registry: {e}")
+            # Fall back to standard function handling
+            raise ValueError(f"Unified registry handling failed for '{func_name}': {e}")
     
     def _handle_remaining_functions(self, func_name: str, func_node, base_expr: str) -> str:
         """Handle functions not covered by specialized handlers"""

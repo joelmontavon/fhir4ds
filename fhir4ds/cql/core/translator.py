@@ -178,8 +178,10 @@ class CQLTranslator:
             # Handle FHIRPath function calls that might be CQL functions
             if isinstance(cql_ast, FunctionCallNode):
                 func_name = cql_ast.name.lower()
-                # Check if this is a CQL function that needs special handling
-                if func_name in self.function_registry:
+                # First check unified registry if available, then fall back to function_registry
+                if hasattr(self, 'unified_registry') and self.unified_registry.can_handle_function(func_name):
+                    return self._translate_function_via_registry(cql_ast)
+                elif func_name in self.function_registry:
                     return self._translate_general_function(cql_ast)
             return cql_ast
             
@@ -647,6 +649,77 @@ class CQLTranslator:
         else:
             logger.warning(f"Function {func_name} not found in registry")
             return FunctionCallNode(func_name, args)
+    
+    def _translate_function_via_registry(self, func_call: FunctionCallNode) -> Any:
+        """
+        Translate CQL functions using the unified function registry.
+        
+        Args:
+            func_call: FunctionCallNode for function call
+            
+        Returns:
+            Translated function call with enhanced routing
+        """
+        logger.debug(f"Translating function via unified registry: {func_call.name}")
+        
+        func_name = func_call.name.lower()
+        args = [self.translate_expression(arg) for arg in func_call.args]
+        
+        if not hasattr(self, 'unified_registry') or not self.unified_registry:
+            logger.warning("Unified registry not available, falling back to standard function registry")
+            return self._translate_general_function(func_call)
+        
+        try:
+            # Get handler from unified registry
+            handler = self.unified_registry.get_handler_for_function(func_name)
+            if not handler:
+                logger.warning(f"No handler found in unified registry for {func_name}")
+                return FunctionCallNode(func_name, args)
+            
+            # Get handler info for debugging
+            handler_info = self.unified_registry.get_handler_info(func_name)
+            logger.debug(f"Using {handler_info['handler_name']} handler for {func_name}")
+            
+            # Try different handler method patterns
+            if hasattr(handler, 'function_map') and func_name in handler.function_map:
+                # Use function map for direct method access
+                func_method = handler.function_map[func_name]
+                logger.debug(f"Calling {func_name} via function map")
+                result = func_method(*args)
+                
+                # Return LiteralNode for SQL expressions, or create FunctionCallNode
+                if hasattr(result, 'value') and hasattr(result, 'type'):
+                    # This is a LiteralNode with SQL
+                    return result
+                else:
+                    # Return as literal value
+                    return LiteralNode(value=str(result), type='value')
+                    
+            elif hasattr(handler, func_name):
+                # Call method directly by name
+                func_method = getattr(handler, func_name)
+                logger.debug(f"Calling {func_name} via direct method")
+                result = func_method(*args)
+                
+                if hasattr(result, 'value') and hasattr(result, 'type'):
+                    return result
+                else:
+                    return LiteralNode(value=str(result), type='value')
+                    
+            elif hasattr(handler, 'generate_cql_function_sql'):
+                # Use generic SQL generation method
+                logger.debug(f"Calling {func_name} via generate_cql_function_sql")
+                sql = handler.generate_cql_function_sql(func_name, args, self.dialect)
+                return LiteralNode(value=sql, type='sql')
+                
+            else:
+                logger.warning(f"Handler found but no callable method for {func_name}")
+                return FunctionCallNode(func_name, args)
+                
+        except Exception as e:
+            logger.error(f"Error translating function {func_name} via unified registry: {e}")
+            # Fall back to standard function registry
+            return self._translate_general_function(func_call)
             
     def _is_temporal_operator(self, operator: str) -> bool:
         """Check if operator is a temporal operator."""
