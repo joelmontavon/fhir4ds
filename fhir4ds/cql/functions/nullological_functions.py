@@ -8,6 +8,7 @@ three-valued logic system.
 
 import logging
 from typing import Any, List, Dict, Union
+from ...fhirpath.parser.ast_nodes import LiteralNode
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ class CQLNullologicalFunctionHandler:
             'nullif': self.null_if,
         }
     
-    def coalesce(self, *args: Any) -> str:
+    def coalesce(self, *args: Any) -> LiteralNode:
         """
         CQL Coalesce() function - return first non-null value.
         
@@ -46,22 +47,30 @@ class CQLNullologicalFunctionHandler:
             *args: Variable number of expressions to coalesce
             
         Returns:
-            SQL expression for coalesce operation
+            LiteralNode containing SQL expression for coalesce operation
         """
         logger.debug(f"Generating CQL Coalesce() with {len(args)} arguments")
         
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return str(arg)
+        
         if not args:
-            return "NULL"
+            sql = "NULL"
+        elif len(args) == 1:
+            sql = str(extract_value(args[0]))
+        else:
+            # Use SQL COALESCE for basic functionality
+            # Could be enhanced for CQL-specific type conversion rules
+            args_sql = [str(extract_value(arg)) for arg in args]
+            sql = f"COALESCE({', '.join(args_sql)})"
         
-        if len(args) == 1:
-            return str(args[0])
-        
-        # Use SQL COALESCE for basic functionality
-        # Could be enhanced for CQL-specific type conversion rules
-        args_sql = [str(arg) for arg in args]
-        return f"COALESCE({', '.join(args_sql)})"
+        return LiteralNode(value=sql, type='sql')
     
-    def is_null(self, expression: Any) -> str:
+    def is_null(self, expression: Any) -> LiteralNode:
         """
         CQL IsNull() function - test if expression is null.
         
@@ -69,12 +78,22 @@ class CQLNullologicalFunctionHandler:
             expression: Expression to test for null
             
         Returns:
-            SQL expression that returns true if expression is null
+            LiteralNode containing SQL expression that returns true if expression is null
         """
         logger.debug("Generating CQL IsNull() function")
-        return f"({expression} IS NULL)"
+        
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return str(arg)
+        
+        expr_val = extract_value(expression)
+        sql = f"({expr_val} IS NULL)"
+        return LiteralNode(value=sql, type='sql')
     
-    def is_not_null(self, expression: Any) -> str:
+    def is_not_null(self, expression: Any) -> LiteralNode:
         """
         CQL IsNotNull() function - test if expression is not null.
         
@@ -82,12 +101,22 @@ class CQLNullologicalFunctionHandler:
             expression: Expression to test for not null
             
         Returns:
-            SQL expression that returns true if expression is not null
+            LiteralNode containing SQL expression that returns true if expression is not null
         """
         logger.debug("Generating CQL IsNotNull() function")
-        return f"({expression} IS NOT NULL)"
+        
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return str(arg)
+        
+        expr_val = extract_value(expression)
+        sql = f"({expr_val} IS NOT NULL)"
+        return LiteralNode(value=sql, type='sql')
     
-    def is_true(self, expression: Any) -> str:
+    def is_true(self, expression: Any) -> LiteralNode:
         """
         CQL IsTrue() function - test if expression is true (not null or false).
         
@@ -100,14 +129,23 @@ class CQLNullologicalFunctionHandler:
             expression: Boolean expression to test
             
         Returns:
-            SQL expression that returns true only if expression is true
+            LiteralNode containing SQL expression that returns true only if expression is true
         """
         logger.debug("Generating CQL IsTrue() function")
         
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return str(arg)
+        
+        expr_val = extract_value(expression)
         # Handle three-valued logic: true if expression is true, false otherwise
-        return f"({expression} IS TRUE)"
+        sql = f"({expr_val} IS TRUE)"
+        return LiteralNode(value=sql, type='sql')
     
-    def is_false(self, expression: Any) -> str:
+    def is_false(self, expression: Any) -> LiteralNode:
         """
         CQL IsFalse() function - test if expression is false (not null or true).
         
@@ -120,14 +158,23 @@ class CQLNullologicalFunctionHandler:
             expression: Boolean expression to test
             
         Returns:
-            SQL expression that returns true only if expression is false
+            LiteralNode containing SQL expression that returns true only if expression is false
         """
         logger.debug("Generating CQL IsFalse() function")
         
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return str(arg)
+        
+        expr_val = extract_value(expression)
         # Handle three-valued logic: true if expression is false, false otherwise
-        return f"({expression} IS FALSE)"
+        sql = f"({expr_val} IS FALSE)"
+        return LiteralNode(value=sql, type='sql')
     
-    def if_null(self, test_expression: Any, null_value: Any) -> str:
+    def if_null(self, test_expression: Any, null_value: Any) -> LiteralNode:
         """
         CQL IfNull() function - return alternative value if expression is null.
         
@@ -138,12 +185,23 @@ class CQLNullologicalFunctionHandler:
             null_value: Value to return if test_expression is null
             
         Returns:
-            SQL expression for conditional null replacement
+            LiteralNode containing SQL expression for conditional null replacement
         """
         logger.debug("Generating CQL IfNull() function")
-        return f"COALESCE({test_expression}, {null_value})"
+        
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return str(arg)
+        
+        test_val = extract_value(test_expression)
+        null_val = extract_value(null_value)
+        sql = f"COALESCE({test_val}, {null_val})"
+        return LiteralNode(value=sql, type='sql')
     
-    def null_if(self, expression: Any, compare_value: Any) -> str:
+    def null_if(self, expression: Any, compare_value: Any) -> LiteralNode:
         """
         CQL NullIf() function - return null if expression equals compare_value.
         
@@ -152,12 +210,23 @@ class CQLNullologicalFunctionHandler:
             compare_value: Value to compare against
             
         Returns:
-            SQL expression that returns null if values are equal
+            LiteralNode containing SQL expression that returns null if values are equal
         """
         logger.debug("Generating CQL NullIf() function")
-        return f"NULLIF({expression}, {compare_value})"
+        
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return str(arg)
+        
+        expr_val = extract_value(expression)
+        comp_val = extract_value(compare_value)
+        sql = f"NULLIF({expr_val}, {comp_val})"
+        return LiteralNode(value=sql, type='sql')
     
-    def to_boolean(self, expression: Any) -> str:
+    def to_boolean(self, expression: Any) -> LiteralNode:
         """
         CQL ToBoolean() function - convert expression to boolean.
         
@@ -171,28 +240,49 @@ class CQLNullologicalFunctionHandler:
             expression: Expression to convert to boolean
             
         Returns:
-            SQL expression for boolean conversion
+            LiteralNode containing SQL expression for boolean conversion
         """
         logger.debug("Generating CQL ToBoolean() function")
         
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return str(arg)
+        
+        expr_val = extract_value(expression)
+        
         if self.dialect == "duckdb":
-            return f"""
+            sql = f"""
             CASE 
-                WHEN LOWER(TRIM({expression})) IN ('true', 't', '1') THEN true
-                WHEN LOWER(TRIM({expression})) IN ('false', 'f', '0') THEN false
-                WHEN {expression} IS NULL OR TRIM({expression}) = '' THEN NULL
+                WHEN LOWER(TRIM({expr_val})) IN ('true', 't', '1') THEN true
+                WHEN LOWER(TRIM({expr_val})) IN ('false', 'f', '0') THEN false
+                WHEN {expr_val} IS NULL OR TRIM({expr_val}) = '' THEN NULL
                 ELSE NULL
             END
             """.strip()
         elif self.dialect == "postgresql":
-            return f"""
+            sql = f"""
             CASE 
-                WHEN LOWER(TRIM({expression})) IN ('true', 't', '1') THEN true
-                WHEN LOWER(TRIM({expression})) IN ('false', 'f', '0') THEN false
-                WHEN {expression} IS NULL OR TRIM({expression}) = '' THEN NULL
+                WHEN LOWER(TRIM({expr_val})) IN ('true', 't', '1') THEN true
+                WHEN LOWER(TRIM({expr_val})) IN ('false', 'f', '0') THEN false
+                WHEN {expr_val} IS NULL OR TRIM({expr_val}) = '' THEN NULL
                 ELSE NULL
             END
             """.strip()
+        else:
+            # Generic SQL fallback
+            sql = f"""
+            CASE 
+                WHEN LOWER(TRIM({expr_val})) IN ('true', 't', '1') THEN true
+                WHEN LOWER(TRIM({expr_val})) IN ('false', 'f', '0') THEN false
+                WHEN {expr_val} IS NULL OR TRIM({expr_val}) = '' THEN NULL
+                ELSE NULL
+            END
+            """.strip()
+        
+        return LiteralNode(value=sql, type='sql')
     
     def handle_three_valued_logic(self, operator: str, left: Any, right: Any) -> str:
         """

@@ -86,6 +86,16 @@ class CQLTranslator:
             'second': self.datetime_functions,
             'date': self.datetime_functions,
             'time': self.datetime_functions,
+            
+            # Component extraction functions
+            'year_from': self.datetime_functions,
+            'month_from': self.datetime_functions,
+            'day_from': self.datetime_functions,
+            'hour_from': self.datetime_functions,
+            'minute_from': self.datetime_functions,
+            'second_from': self.datetime_functions,
+            'date_from': self.datetime_functions,
+            'time_from': self.datetime_functions,
             'years_between': self.datetime_functions,
             'months_between': self.datetime_functions,
             'days_between': self.datetime_functions,
@@ -151,8 +161,14 @@ class CQLTranslator:
         """
         logger.debug(f"Translating CQL AST: {type(cql_ast)}")
         
-        # If it's already a FHIRPath AST node, return as-is
+        # If it's already a FHIRPath AST node, check if it's a function call that needs translation
         if not isinstance(cql_ast, CQLASTNode):
+            # Handle FHIRPath function calls that might be CQL functions
+            if isinstance(cql_ast, FunctionCallNode):
+                func_name = cql_ast.name.lower()
+                # Check if this is a CQL function that needs special handling
+                if func_name in self.function_registry:
+                    return self._translate_general_function(cql_ast)
             return cql_ast
             
         # Handle CQL-specific nodes
@@ -176,8 +192,13 @@ class CQLTranslator:
             return self._translate_let_clause(cql_ast)
         elif isinstance(cql_ast, BinaryOpNode) and self._is_temporal_operator(cql_ast.operator):
             return self._translate_temporal_operation(cql_ast)
-        elif isinstance(cql_ast, FunctionCallNode) and self._is_clinical_function(cql_ast.name):
-            return self._translate_clinical_function(cql_ast)
+        elif isinstance(cql_ast, FunctionCallNode):
+            # Handle all function calls - first check if it's a clinical function
+            if self._is_clinical_function(cql_ast.name):
+                return self._translate_clinical_function(cql_ast)
+            else:
+                # Handle general function calls using the function registry
+                return self._translate_general_function(cql_ast)
         else:
             logger.warning(f"Unknown CQL AST node type: {type(cql_ast)}")
             return cql_ast
@@ -508,6 +529,12 @@ class CQLTranslator:
         # Use comprehensive interval functions for temporal operations
         op_lower = binary_op.operator.lower()
         
+        # Handle arithmetic operations with temporal units (e.g., + 1 year, - 3 months)
+        # Note: These are now handled by the parser as function calls (add_years, etc.)
+        if op_lower in ['+', '-']:
+            # This path may not be reached now due to enhanced parsing
+            logger.debug(f"Basic arithmetic operation {op_lower} - may need special handling")
+        
         if op_lower in self.interval_functions.function_map:
             # Direct mapping to interval function
             handler = self.interval_functions.function_map[op_lower]
@@ -565,10 +592,53 @@ class CQLTranslator:
         else:
             # Return as regular function call for functions not yet implemented
             return FunctionCallNode(func_name, args)
+    
+    def _translate_general_function(self, func_call: FunctionCallNode) -> Any:
+        """
+        Translate general CQL functions using the function registry.
+        
+        Args:
+            func_call: FunctionCallNode for general function
+            
+        Returns:
+            Translated function call or SQL expression
+        """
+        logger.debug(f"Translating general function: {func_call.name}")
+        
+        func_name = func_call.name.lower()
+        args = [self.translate_expression(arg) for arg in func_call.args]
+        
+        # Look up function in registry
+        if func_name in self.function_registry:
+            handler = self.function_registry[func_name]
+            try:
+                # Call the appropriate handler method based on handler type
+                if hasattr(handler, 'generate_cql_datetime_function_sql'):
+                    # DateTime function handler - use specific method
+                    return handler.generate_cql_datetime_function_sql(func_name, args, self.dialect)
+                elif hasattr(handler, 'generate_nullological_function_sql'):
+                    # Nullological function handler - use specific method
+                    return handler.generate_nullological_function_sql(func_name, args, self.dialect)
+                elif hasattr(handler, 'generate_function_sql'):
+                    # Generic function handler
+                    return handler.generate_function_sql(func_name, args, self.dialect)
+                elif hasattr(handler, func_name):
+                    # Call the specific function method directly
+                    method = getattr(handler, func_name)
+                    return method(*args)
+                else:
+                    logger.warning(f"Handler for {func_name} found but no method available")
+                    return FunctionCallNode(func_name, args)
+            except Exception as e:
+                logger.error(f"Error calling function handler for {func_name}: {e}")
+                return FunctionCallNode(func_name, args)
+        else:
+            logger.warning(f"Function {func_name} not found in registry")
+            return FunctionCallNode(func_name, args)
             
     def _is_temporal_operator(self, operator: str) -> bool:
         """Check if operator is a temporal operator."""
-        temporal_ops = ['during', 'overlaps', 'before', 'after', 'meets', 'starts', 'ends', 'includes']
+        temporal_ops = ['during', 'overlaps', 'before', 'after', 'meets', 'starts', 'ends', 'includes', '+', '-']
         return operator.lower() in temporal_ops
         
     def _is_clinical_function(self, function_name: str) -> bool:

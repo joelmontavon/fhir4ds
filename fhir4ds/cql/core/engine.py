@@ -186,7 +186,12 @@ class CQLEngine:
             context_filtered_sql = self.context_manager.current_context.apply_context_to_query(sql, table_name)
             return context_filtered_sql
             
+        except (ValueError, SyntaxError, AttributeError) as e:
+            # Re-raise validation errors so they can be caught by tests
+            logger.error(f"CQL validation error: {e}")
+            raise e
         except Exception as e:
+            # Other implementation errors return as comments
             logger.error(f"Advanced CQL evaluation failed: {e}")
             return f"-- Advanced CQL Expression (error: {e}): {cql_expression}"
     

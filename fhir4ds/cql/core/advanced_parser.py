@@ -190,6 +190,12 @@ class AdvancedCQLParser:
         # Replace multiple whitespaces with single spaces
         text = re.sub(r'\s+', ' ', text.strip())
         
+        # Extract query body from define statements
+        define_pattern = r'define\s+"[^"]+"\s*:\s*(.*)'
+        define_match = re.match(define_pattern, text, re.IGNORECASE | re.DOTALL)
+        if define_match:
+            text = define_match.group(1).strip()
+        
         # Ensure consistent keyword casing
         for keyword in self.advanced_keywords:
             # Use word boundaries to avoid partial matches
@@ -211,6 +217,58 @@ class AdvancedCQLParser:
         let_pattern = r'\blet\s+\w+\s*:'
         return bool(re.search(let_pattern, text, re.IGNORECASE))
     
+    def _validate_with_without_clauses(self, text: str):
+        """Validate that with/without clauses have proper syntax."""
+        import re
+        
+        # Check for with/without clauses without "such that"
+        invalid_with_pattern = r'\b(with|without)\s+\[[^\]]+\]\s+\w+(?!\s+such\s+that)'
+        invalid_matches = re.findall(invalid_with_pattern, text, re.IGNORECASE)
+        
+        if invalid_matches:
+            raise SyntaxError(f"with/without clause must be followed by 'such that' condition")
+        
+        # Check for "such that" without proper condition
+        empty_such_that_pattern = r'\bsuch\s+that\s*(?:\s*$|\s*(?:with|without|where|return))'
+        empty_matches = re.search(empty_such_that_pattern, text, re.IGNORECASE)
+        
+        if empty_matches:
+            raise SyntaxError("'such that' clause cannot be empty")
+    
+    def _validate_let_expressions(self, let_expressions: List[LetExpressionNode]):
+        """Validate let expressions for circular references and other issues."""
+        # Build dependency graph
+        dependencies = {}
+        for let_expr in let_expressions:
+            var_name = let_expr.variable_name
+            expression = let_expr.expression
+            
+            # Find variable references in the expression
+            referenced_vars = []
+            for other_let in let_expressions:
+                if other_let.variable_name != var_name and other_let.variable_name in expression:
+                    referenced_vars.append(other_let.variable_name)
+            
+            dependencies[var_name] = referenced_vars
+        
+        # Check for circular references using simple cycle detection
+        for var_name in dependencies:
+            if self._has_circular_dependency(var_name, dependencies, set()):
+                raise ValueError(f"Circular reference detected in let expression: {var_name}")
+    
+    def _has_circular_dependency(self, var_name: str, dependencies: dict, visited: set) -> bool:
+        """Check if a variable has circular dependencies."""
+        if var_name in visited:
+            return True
+        
+        visited.add(var_name)
+        
+        for dep in dependencies.get(var_name, []):
+            if self._has_circular_dependency(dep, dependencies, visited.copy()):
+                return True
+        
+        return False
+    
     def _parse_query_with_relationships(self, text: str) -> QueryWithRelationshipsNode:
         """Parse a query containing with/without relationship clauses."""
         logger.debug(f"Parsing query with relationships: {text}")
@@ -228,6 +286,9 @@ class AdvancedCQLParser:
         # Parse with/without clauses
         remaining_text = text[primary_match.end():].strip()
         
+        # Validate that with/without clauses have proper "such that" conditions
+        self._validate_with_without_clauses(remaining_text)
+        
         # Pattern to match with/without clauses (improved for multiline)
         relationship_pattern = r'\b(with|without)\s+(\[[^\]]+\])\s+(\w+)\s+such\s+that\s+(.*?)(?=\s*(?:with|without|where|return|$))'
         
@@ -239,6 +300,10 @@ class AdvancedCQLParser:
             
             # Clean up the condition (remove trailing keywords)
             condition = re.sub(r'\s+(with|without|where|return).*$', '', condition, flags=re.IGNORECASE)
+            
+            # Validate that condition is not empty
+            if not condition.strip():
+                raise ValueError(f"Empty condition in {clause_type} clause")
             
             is_without = clause_type == 'without'
             with_clause = WithClauseNode(related_alias, related_query, condition, is_without)
@@ -260,13 +325,19 @@ class AdvancedCQLParser:
         """Parse a query containing let expressions."""
         logger.debug(f"Parsing query with let expressions: {text}")
         
-        # For now, return a simple representation
-        # Full implementation would build proper AST nodes
-        # Better handling for multiple let expressions
-        let_expressions = []
+        # Extract the primary query (resource retrieval) - look for pattern like [ResourceType] Alias
+        primary_match = re.match(r'^\s*(\[[^\]]+\])\s+(\w+)', text, re.IGNORECASE)
+        if not primary_match:
+            # Fallback: create a generic container
+            container = QueryWithRelationshipsNode("[Query]", "Q")
+        else:
+            primary_query = primary_match.group(1)
+            primary_alias = primary_match.group(2)
+            container = QueryWithRelationshipsNode(primary_query, primary_alias)
         
         # Find all let expressions in the text
-        let_block_pattern = r'let\s+(.*?)(?=define|where|return|$)'
+        let_expressions = []
+        let_block_pattern = r'let\s+(.*?)(?=where|return|$)'
         let_block_match = re.search(let_block_pattern, text, re.IGNORECASE | re.DOTALL)
         
         if let_block_match:
@@ -285,8 +356,11 @@ class AdvancedCQLParser:
                         expression = match.group(2).strip().rstrip(',')
                         let_expressions.append(LetExpressionNode(var_name, expression))
         
-        # Create a container node for the query with let expressions
-        container = QueryWithRelationshipsNode("[Query]", "Q")
+        # Validate let expressions for circular references
+        if let_expressions:
+            self._validate_let_expressions(let_expressions)
+        
+        # Add let expressions to the container
         for let_expr in let_expressions:
             container.add_let_expression(let_expr)
         

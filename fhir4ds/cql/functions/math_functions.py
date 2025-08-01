@@ -7,6 +7,7 @@ aggregates (Min, Max, Sum, Avg) and mathematical functions not present in FHIRPa
 
 import logging
 from typing import Any, List, Dict, Union
+from ...fhirpath.parser.ast_nodes import LiteralNode
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ class CQLMathFunctionHandler:
             'power': self.power,
         }
     
-    def min(self, expression: Any) -> str:
+    def min(self, expression: Any) -> LiteralNode:
         """
         CQL Min() function - find minimum value in collection or between arguments.
         
@@ -60,27 +61,38 @@ class CQLMathFunctionHandler:
             expression: Collection expression or first argument
             
         Returns:
-            SQL expression for minimum value
+            LiteralNode with SQL expression for minimum value
         """
         logger.debug("Generating CQL Min() function")
         
-        # Handle collection case: Min(collection)
-        if isinstance(expression, str):
-            return f"""
-            (
-                SELECT MIN(CAST(value AS DOUBLE))
-                FROM (
-                    SELECT json_array_elements_text({expression}) AS value
-                ) subq
-                WHERE value IS NOT NULL AND value != 'null'
-            )
-            """.strip()
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return str(arg)
         
-        # Handle multiple arguments case would need parser integration
-        # For now, fallback to SQL MIN aggregate
-        return f"MIN(CAST({expression} AS DOUBLE))"
+        expr_val = extract_value(expression)
+        
+        # Handle collection case: Min(collection)
+        if isinstance(expr_val, str):
+            sql = f"""
+(
+    SELECT MIN(CAST(value AS DOUBLE))
+    FROM (
+        SELECT json_array_elements_text({expr_val}) AS value
+    ) subq
+    WHERE value IS NOT NULL AND value != 'null'
+)
+""".strip()
+        else:
+            # Handle multiple arguments case would need parser integration
+            # For now, fallback to SQL MIN aggregate
+            sql = f"MIN({expr_val})"
+        
+        return LiteralNode(value=sql, type='sql')
     
-    def max(self, expression: Any) -> str:
+    def max(self, expression: Any) -> LiteralNode:
         """
         CQL Max() function - find maximum value in collection or between arguments.
         
@@ -92,27 +104,38 @@ class CQLMathFunctionHandler:
             expression: Collection expression or first argument
             
         Returns:
-            SQL expression for maximum value
+            LiteralNode with SQL expression for maximum value
         """
         logger.debug("Generating CQL Max() function")
         
-        # Handle collection case: Max(collection)
-        if isinstance(expression, str):
-            return f"""
-            (
-                SELECT MAX(CAST(value AS DOUBLE))
-                FROM (
-                    SELECT json_array_elements_text({expression}) AS value
-                ) subq
-                WHERE value IS NOT NULL AND value != 'null'
-            )
-            """.strip()
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return str(arg)
         
-        # Handle multiple arguments case would need parser integration
-        # For now, fallback to SQL MAX aggregate
-        return f"MAX(CAST({expression} AS DOUBLE))"
+        expr_val = extract_value(expression)
+        
+        # Handle collection case: Max(collection)
+        if isinstance(expr_val, str):
+            sql = f"""
+(
+    SELECT MAX(CAST(value AS DOUBLE))
+    FROM (
+        SELECT json_array_elements_text({expr_val}) AS value
+    ) subq
+    WHERE value IS NOT NULL AND value != 'null'
+)
+""".strip()
+        else:
+            # Handle multiple arguments case would need parser integration
+            # For now, fallback to SQL MAX aggregate
+            sql = f"MAX(CAST({expr_val} AS DOUBLE))"
+        
+        return LiteralNode(value=sql, type='sql')
     
-    def sum(self, expression: Any) -> str:
+    def sum(self, expression: Any) -> LiteralNode:
         """
         CQL Sum() function - sum all values in collection.
         
@@ -120,25 +143,36 @@ class CQLMathFunctionHandler:
             expression: Collection expression to sum
             
         Returns:
-            SQL expression for sum of values
+            LiteralNode with SQL expression for sum of values
         """
         logger.debug("Generating CQL Sum() function")
         
-        if isinstance(expression, str):
-            return f"""
-            (
-                SELECT SUM(CAST(value AS DOUBLE))
-                FROM (
-                    SELECT json_array_elements_text({expression}) AS value
-                ) subq
-                WHERE value IS NOT NULL AND value != 'null'
-                AND value ~ '^-?[0-9]+(\\.[0-9]+)?$'
-            )
-            """.strip()
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return str(arg)
         
-        return f"SUM(CAST({expression} AS DOUBLE))"
+        expr_val = extract_value(expression)
+        
+        if isinstance(expr_val, str):
+            sql = f"""
+(
+    SELECT SUM(CAST(value AS DOUBLE))
+    FROM (
+        SELECT json_array_elements_text({expr_val}) AS value
+    ) subq
+    WHERE value IS NOT NULL AND value != 'null'
+    AND value ~ '^-?[0-9]+(\\.[0-9]+)?$'
+)
+""".strip()
+        else:
+            sql = f"SUM(CAST({expr_val} AS DOUBLE))"
+        
+        return LiteralNode(value=sql, type='sql')
     
-    def avg(self, expression: Any) -> str:
+    def avg(self, expression: Any) -> LiteralNode:
         """
         CQL Avg() function - average of all values in collection.
         
@@ -146,25 +180,36 @@ class CQLMathFunctionHandler:
             expression: Collection expression to average
             
         Returns:
-            SQL expression for average of values
+            LiteralNode with SQL expression for average of values
         """
         logger.debug("Generating CQL Avg() function")
         
-        if isinstance(expression, str):
-            return f"""
-            (
-                SELECT AVG(CAST(value AS DOUBLE))
-                FROM (
-                    SELECT json_array_elements_text({expression}) AS value
-                ) subq
-                WHERE value IS NOT NULL AND value != 'null'
-                AND value ~ '^-?[0-9]+(\\.[0-9]+)?$'
-            )
-            """.strip()
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return str(arg)
         
-        return f"AVG(CAST({expression} AS DOUBLE))"
+        expr_val = extract_value(expression)
+        
+        if isinstance(expr_val, str):
+            sql = f"""
+(
+    SELECT AVG(CAST(value AS DOUBLE))
+    FROM (
+        SELECT json_array_elements_text({expr_val}) AS value
+    ) subq
+    WHERE value IS NOT NULL AND value != 'null'
+    AND value ~ '^-?[0-9]+(\\.[0-9]+)?$'
+)
+""".strip()
+        else:
+            sql = f"AVG(CAST({expr_val} AS DOUBLE))"
+        
+        return LiteralNode(value=sql, type='sql')
     
-    def predecessor(self, expression: Any, precision: str = None) -> str:
+    def predecessor(self, expression: Any, precision: str = None) -> LiteralNode:
         """
         CQL Predecessor() function - get previous value for given type.
         
@@ -178,9 +223,18 @@ class CQLMathFunctionHandler:
             precision: For date/time types (year, month, day, hour, minute, second)
             
         Returns:
-            SQL expression for predecessor value
+            LiteralNode with SQL expression for predecessor value
         """
         logger.debug(f"Generating CQL Predecessor() function with precision: {precision}")
+        
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return str(arg)
+        
+        expr_val = extract_value(expression)
         
         if precision:
             # Date/DateTime predecessor with precision
@@ -196,14 +250,20 @@ class CQLMathFunctionHandler:
             if precision.lower() in precision_map:
                 interval_unit = precision_map[precision.lower()]
                 if self.dialect == "duckdb":
-                    return f"({expression} - INTERVAL 1 {interval_unit})"
+                    sql = f"({expr_val} - INTERVAL 1 {interval_unit})"
                 elif self.dialect == "postgresql":
-                    return f"({expression} - INTERVAL '1 {interval_unit}')"
+                    sql = f"({expr_val} - INTERVAL '1 {interval_unit}')"
+                else:
+                    sql = f"({expr_val} - 1)"
+            else:
+                sql = f"({expr_val} - 1)"
+        else:
+            # Numeric predecessor (subtract 1)
+            sql = f"({expr_val} - 1)"
         
-        # Numeric predecessor (subtract 1)
-        return f"({expression} - 1)"
+        return LiteralNode(value=sql, type='sql')
     
-    def successor(self, expression: Any, precision: str = None) -> str:
+    def successor(self, expression: Any, precision: str = None) -> LiteralNode:
         """
         CQL Successor() function - get next value for given type.
         
@@ -217,9 +277,18 @@ class CQLMathFunctionHandler:
             precision: For date/time types (year, month, day, hour, minute, second)
             
         Returns:
-            SQL expression for successor value
+            LiteralNode with SQL expression for successor value
         """
         logger.debug(f"Generating CQL Successor() function with precision: {precision}")
+        
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return str(arg)
+        
+        expr_val = extract_value(expression)
         
         if precision:
             # Date/DateTime successor with precision
@@ -235,56 +304,169 @@ class CQLMathFunctionHandler:
             if precision.lower() in precision_map:
                 interval_unit = precision_map[precision.lower()]
                 if self.dialect == "duckdb":
-                    return f"({expression} + INTERVAL 1 {interval_unit})"
+                    sql = f"({expr_val} + INTERVAL 1 {interval_unit})"
                 elif self.dialect == "postgresql":
-                    return f"({expression} + INTERVAL '1 {interval_unit}')"
+                    sql = f"({expr_val} + INTERVAL '1 {interval_unit}')"
+                else:
+                    sql = f"({expr_val} + 1)"
+            else:
+                sql = f"({expr_val} + 1)"
+        else:
+            # Numeric successor (add 1)
+            sql = f"({expr_val} + 1)"
         
-        # Numeric successor (add 1)
-        return f"({expression} + 1)"
+        return LiteralNode(value=sql, type='sql')
     
     # FHIRPath Mathematical Functions (reimplemented for CQL compatibility)
     
-    def abs(self, expression: Any) -> str:
+    def abs(self, expression: Any) -> LiteralNode:
         """CQL/FHIRPath abs() function - absolute value."""
-        return f"ABS(CAST({expression} AS DOUBLE))"
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            elif hasattr(arg, 'operator') and hasattr(arg, 'operand'):
+                # Handle UnaryOpNode like -5
+                if arg.operator == '-':
+                    operand_val = extract_value(arg.operand)
+                    return f"-{operand_val}"
+                else:
+                    return f"{arg.operator}{extract_value(arg.operand)}"
+            else:
+                return arg
+        
+        expr_val = extract_value(expression)
+        sql = f"ABS(CAST({expr_val} AS DOUBLE))"
+        return LiteralNode(value=sql, type='sql')
     
-    def ceiling(self, expression: Any) -> str:
+    def ceiling(self, expression: Any) -> LiteralNode:
         """CQL/FHIRPath ceiling() function - round up to integer."""
-        return f"CEIL(CAST({expression} AS DOUBLE))"
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        expr_val = extract_value(expression)
+        sql = f"CEIL(CAST({expr_val} AS DOUBLE))"
+        return LiteralNode(value=sql, type='sql')
     
-    def floor(self, expression: Any) -> str:
+    def floor(self, expression: Any) -> LiteralNode:
         """CQL/FHIRPath floor() function - round down to integer."""
-        return f"FLOOR(CAST({expression} AS DOUBLE))"
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        expr_val = extract_value(expression)
+        sql = f"FLOOR(CAST({expr_val} AS DOUBLE))"
+        return LiteralNode(value=sql, type='sql')
     
-    def round(self, expression: Any, precision: Any = None) -> str:
+    def round(self, expression: Any, precision: Any = None) -> LiteralNode:
         """CQL/FHIRPath round() function - round to nearest integer or precision."""
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            elif hasattr(arg, 'operator') and hasattr(arg, 'operand'):
+                # Handle UnaryOpNode like -5
+                if arg.operator == '-':
+                    operand_val = extract_value(arg.operand)
+                    return f"-{operand_val}"
+                else:
+                    return f"{arg.operator}{extract_value(arg.operand)}"
+            else:
+                return arg
+        
+        expr_val = extract_value(expression)
         if precision is not None:
-            return f"ROUND(CAST({expression} AS DOUBLE), {precision})"
-        return f"ROUND(CAST({expression} AS DOUBLE))"
+            prec_val = extract_value(precision)
+            sql = f"ROUND(CAST({expr_val} AS DOUBLE), {prec_val})"
+        else:
+            sql = f"ROUND(CAST({expr_val} AS DOUBLE))"
+        return LiteralNode(value=sql, type='sql')
     
-    def sqrt(self, expression: Any) -> str:
+    def sqrt(self, expression: Any) -> LiteralNode:
         """CQL/FHIRPath sqrt() function - square root."""
-        return f"SQRT(CAST({expression} AS DOUBLE))"
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        expr_val = extract_value(expression)
+        sql = f"SQRT(CAST({expr_val} AS DOUBLE))"
+        return LiteralNode(value=sql, type='sql')
     
-    def truncate(self, expression: Any) -> str:
+    def truncate(self, expression: Any) -> LiteralNode:
         """CQL/FHIRPath truncate() function - remove decimal part."""
-        return f"TRUNC(CAST({expression} AS DOUBLE))"
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        expr_val = extract_value(expression)
+        sql = f"TRUNC(CAST({expr_val} AS DOUBLE))"
+        return LiteralNode(value=sql, type='sql')
     
-    def exp(self, expression: Any) -> str:
+    def exp(self, expression: Any) -> LiteralNode:
         """CQL/FHIRPath exp() function - exponential (e^x)."""
-        return f"EXP(CAST({expression} AS DOUBLE))"
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        expr_val = extract_value(expression)
+        sql = f"EXP(CAST({expr_val} AS DOUBLE))"
+        return LiteralNode(value=sql, type='sql')
     
-    def ln(self, expression: Any) -> str:
+    def ln(self, expression: Any) -> LiteralNode:
         """CQL/FHIRPath ln() function - natural logarithm."""
-        return f"LN(CAST({expression} AS DOUBLE))"
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        expr_val = extract_value(expression)
+        sql = f"LN(CAST({expr_val} AS DOUBLE))"
+        return LiteralNode(value=sql, type='sql')
     
-    def log(self, expression: Any) -> str:
+    def log(self, expression: Any) -> LiteralNode:
         """CQL/FHIRPath log() function - base-10 logarithm."""
-        return f"LOG10(CAST({expression} AS DOUBLE))"
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        expr_val = extract_value(expression)
+        sql = f"LOG10(CAST({expr_val} AS DOUBLE))"
+        return LiteralNode(value=sql, type='sql')
     
-    def power(self, base: Any, exponent: Any) -> str:
+    def power(self, base: Any, exponent: Any) -> LiteralNode:
         """CQL/FHIRPath power() function - base^exponent."""
-        return f"POW(CAST({base} AS DOUBLE), CAST({exponent} AS DOUBLE))"
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        base_val = extract_value(base)
+        exp_val = extract_value(exponent)
+        sql = f"POW(CAST({base_val} AS DOUBLE), CAST({exp_val} AS DOUBLE))"
+        return LiteralNode(value=sql, type='sql')
     
     def get_supported_functions(self) -> List[str]:
         """Get list of all supported CQL mathematical functions."""
@@ -319,9 +501,12 @@ class CQLMathFunctionHandler:
                 handler = self.function_map[function_name_lower]
                 
                 if len(args) == 1:
-                    return handler(args[0])
+                    result = handler(args[0])
+                    # Extract SQL from LiteralNode if needed
+                    return result.value if hasattr(result, 'value') else result
                 elif len(args) == 2 and function_name_lower in ['predecessor', 'successor']:
-                    return handler(args[0], args[1])
+                    result = handler(args[0], args[1])
+                    return result.value if hasattr(result, 'value') else result
                 else:
                     # Multiple arguments - need special handling
                     return self._handle_multiple_args(function_name_lower, args)

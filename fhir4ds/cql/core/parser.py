@@ -493,6 +493,12 @@ class CQLParser(FHIRPathParser):
         cql_keywords = ['library', 'define', 'context', 'include', 'parameter']
         cql_constructs = ['[', 'from', 'where', 'return']
         
+        # CQL temporal functions - these should be treated as CQL, not FHIRPath
+        cql_temporal_functions = ['datetime', 'date', 'time']
+        
+        # CQL temporal units - expressions containing these are likely CQL arithmetic
+        cql_temporal_units = ['year', 'month', 'day', 'hour', 'minute', 'second', 'years', 'months', 'days', 'hours', 'minutes', 'seconds']
+        
         expression_lower = expression.lower().strip()
         
         # If it starts with CQL keywords, it's CQL
@@ -504,6 +510,27 @@ class CQLParser(FHIRPathParser):
         for construct in cql_constructs:
             if construct in expression_lower:
                 return False
+        
+        # If it contains CQL temporal functions, it's CQL
+        for func in cql_temporal_functions:
+            if f'{func}(' in expression_lower:
+                return False
+        
+        # If it contains temporal arithmetic (e.g., "+ 1 year", "- 3 months"), it's CQL
+        import re
+        temporal_arithmetic_pattern = r'[+\-]\s*\d+\s*(' + '|'.join(cql_temporal_units) + r')'
+        if re.search(temporal_arithmetic_pattern, expression_lower):
+            return False
+        
+        # If it contains component extraction patterns (e.g., "year from", "month from"), it's CQL
+        component_extraction_pattern = r'\b(' + '|'.join(['year', 'month', 'day', 'hour', 'minute', 'second']) + r')\s+from\s+'
+        if re.search(component_extraction_pattern, expression_lower):
+            return False
+        
+        # If it contains duration calculation patterns (e.g., "years between", "months between"), it's CQL
+        duration_calculation_pattern = r'\b(' + '|'.join(['years', 'months', 'days', 'hours', 'minutes', 'seconds']) + r')\s+between\s+'
+        if re.search(duration_calculation_pattern, expression_lower):
+            return False
                 
         # Otherwise, assume it's FHIRPath
         return True
@@ -535,8 +562,174 @@ class CQLParser(FHIRPathParser):
                 self.current = 0
                 return self.parse_retrieve()
             else:
-                # For other CQL constructs, fall back to FHIRPath for now
-                lexer = FHIRPathLexer(text)
-                tokens = lexer.tokenize()
-                parser = FHIRPathParser(tokens)
-                return parser.parse()
+                # Check if this contains temporal arithmetic
+                import re
+                temporal_arithmetic_pattern = r'[+\-]\s*\d+\s*(year|month|day|hour|minute|second|years|months|days|hours|minutes|seconds)'
+                if re.search(temporal_arithmetic_pattern, text.lower()):
+                    # Parse as CQL temporal arithmetic expression
+                    return self.parse_cql_temporal_arithmetic(text)
+                
+                # Check if this contains component extraction patterns
+                component_extraction_pattern = r'\b(year|month|day|hour|minute|second)\s+from\s+'
+                if re.search(component_extraction_pattern, text.lower()):
+                    # Parse as CQL component extraction expression
+                    return self.parse_cql_component_extraction(text)
+                
+                # Check if this contains duration calculation patterns
+                duration_calculation_pattern = r'\b(years|months|days|hours|minutes|seconds)\s+between\s+'
+                if re.search(duration_calculation_pattern, text.lower()):
+                    # Parse as CQL duration calculation expression
+                    return self.parse_cql_duration_calculation(text)
+                else:
+                    # For other CQL constructs, fall back to FHIRPath for now
+                    lexer = FHIRPathLexer(text)
+                    tokens = lexer.tokenize()
+                    parser = FHIRPathParser(tokens)
+                    return parser.parse()
+    
+    def parse_cql_temporal_arithmetic(self, text: str) -> Union[CQLASTNode, ASTNode]:
+        """
+        Parse CQL temporal arithmetic expressions like 'DateTime(2023, 1, 15) + 1 year'.
+        
+        Args:
+            text: CQL temporal arithmetic expression
+            
+        Returns:
+            AST node representing the temporal arithmetic operation
+        """
+        logger.debug(f"Parsing CQL temporal arithmetic: {text}")
+        
+        # Use regex to split the expression into parts
+        import re
+        
+        # Pattern to match: <expression> +/- <number> <temporal_unit>
+        pattern = r'^(.+?)\s*([+\-])\s*(\d+)\s*(year|month|day|hour|minute|second|years|months|days|hours|minutes|seconds)s?$'
+        match = re.match(pattern, text.strip(), re.IGNORECASE)
+        
+        if not match:
+            # Fall back to regular FHIRPath parsing
+            lexer = FHIRPathLexer(text)
+            tokens = lexer.tokenize()
+            parser = FHIRPathParser(tokens)
+            return parser.parse()
+        
+        base_expr_text, operator, amount, unit = match.groups()
+        
+        # Parse the base expression (e.g., "DateTime(2023, 1, 15)")
+        base_lexer = FHIRPathLexer(base_expr_text.strip())
+        base_tokens = base_lexer.tokenize()
+        base_parser = FHIRPathParser(base_tokens)
+        base_ast = base_parser.parse()
+        
+        # Create a special temporal arithmetic node
+        # We'll represent this as a function call like "add_years(DateTime(...), 1)"
+        unit_lower = unit.lower()
+        
+        # Normalize unit to singular form
+        if unit_lower.endswith('s'):
+            unit_lower = unit_lower[:-1]
+        
+        # Determine the function name based on operator and unit
+        if operator == '+':
+            func_name = f"add_{unit_lower}s"
+        else:  # operator == '-'
+            func_name = f"subtract_{unit_lower}s"
+        
+        # Create arguments: base expression and amount
+        amount_literal = LiteralNode(int(amount), 'integer')
+        
+        # For subtraction, make the amount negative
+        if operator == '-':
+            amount_literal = LiteralNode(-int(amount), 'integer')
+            func_name = f"add_{unit_lower}s"  # Use add with negative number
+        
+        # Create function call node
+        return FunctionCallNode(func_name, [base_ast, amount_literal])
+    
+    def parse_cql_component_extraction(self, text: str) -> Union[CQLASTNode, ASTNode]:
+        """
+        Parse CQL component extraction expressions like 'year from DateTime(2023, 6, 15)'.
+        
+        Args:
+            text: CQL component extraction expression
+            
+        Returns:
+            AST node representing the component extraction operation
+        """
+        logger.debug(f"Parsing CQL component extraction: {text}")
+        
+        # Use regex to split the expression into parts
+        import re
+        
+        # Pattern to match: <component> from <expression>
+        pattern = r'^(year|month|day|hour|minute|second)\s+from\s+(.+)$'
+        match = re.match(pattern, text.strip(), re.IGNORECASE)
+        
+        if not match:
+            # Fall back to regular FHIRPath parsing
+            lexer = FHIRPathLexer(text)
+            tokens = lexer.tokenize()
+            parser = FHIRPathParser(tokens)
+            return parser.parse()
+        
+        component, source_expr_text = match.groups()
+        
+        # Parse the source expression (e.g., "DateTime(2023, 6, 15)")
+        source_lexer = FHIRPathLexer(source_expr_text.strip())
+        source_tokens = source_lexer.tokenize()
+        source_parser = FHIRPathParser(source_tokens)
+        source_ast = source_parser.parse()
+        
+        # Create a component extraction function call
+        # e.g., "year from DateTime(...)" becomes "year_from(DateTime(...))"
+        func_name = f"{component.lower()}_from"
+        
+        # Create function call node
+        return FunctionCallNode(func_name, [source_ast])
+    
+    def parse_cql_duration_calculation(self, text: str) -> Union[CQLASTNode, ASTNode]:
+        """
+        Parse CQL duration calculation expressions like 'years between Date(2020, 1, 1) and Date(2023, 1, 1)'.
+        
+        Args:
+            text: CQL duration calculation expression
+            
+        Returns:
+            AST node representing the duration calculation operation
+        """
+        logger.debug(f"Parsing CQL duration calculation: {text}")
+        
+        # Use regex to split the expression into parts
+        import re
+        
+        # Pattern to match: <duration_unit> between <expression1> and <expression2>
+        pattern = r'^(years|months|days|hours|minutes|seconds)\s+between\s+(.+?)\s+and\s+(.+)$'
+        match = re.match(pattern, text.strip(), re.IGNORECASE)
+        
+        if not match:
+            # Fall back to regular FHIRPath parsing
+            lexer = FHIRPathLexer(text)
+            tokens = lexer.tokenize()
+            parser = FHIRPathParser(tokens)
+            return parser.parse()
+        
+        duration_unit, start_expr_text, end_expr_text = match.groups()
+        
+        # Parse the start expression (e.g., "Date(2020, 1, 1)")
+        start_lexer = FHIRPathLexer(start_expr_text.strip())
+        start_tokens = start_lexer.tokenize()
+        start_parser = FHIRPathParser(start_tokens)
+        start_ast = start_parser.parse()
+        
+        # Parse the end expression (e.g., "Date(2023, 1, 1)")
+        end_lexer = FHIRPathLexer(end_expr_text.strip())
+        end_tokens = end_lexer.tokenize()
+        end_parser = FHIRPathParser(end_tokens)
+        end_ast = end_parser.parse()
+        
+        # Create a duration calculation function call
+        # e.g., "years between Date(...) and Date(...)" becomes "years_between(Date(...), Date(...))"
+        func_name = f"{duration_unit.lower()}_between"
+        
+        # Create function call node with both arguments
+        return FunctionCallNode(func_name, [start_ast, end_ast])
