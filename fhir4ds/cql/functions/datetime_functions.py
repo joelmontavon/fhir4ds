@@ -60,6 +60,9 @@ class CQLDateTimeFunctionHandler:
             'minutes_between': self.minutes_between,
             'seconds_between': self.seconds_between,
             
+            # Age calculation functions
+            'ageinyears': self.age_in_years,
+            
             # Difference calculation functions (boundary crossings)
             'difference_in_years': self.difference_in_years,
             'difference_in_months': self.difference_in_months,
@@ -223,6 +226,39 @@ class CQLDateTimeFunctionHandler:
             sql = f"EXTRACT(YEAR FROM AGE(CAST({end_val} AS TIMESTAMP), CAST({start_val} AS TIMESTAMP)))"
         else:  # DuckDB
             sql = f"DATE_DIFF('year', CAST({start_val} AS TIMESTAMP), CAST({end_val} AS TIMESTAMP))"
+            
+        return LiteralNode(value=sql, type='sql')
+    
+    def age_in_years(self, birthdate_expr: Any) -> LiteralNode:
+        """
+        CQL 'AgeInYears' function - calculate age in years from birthdate to today.
+        
+        Args:
+            birthdate_expr: Birthdate expression (Date or DateTime)
+            
+        Returns:
+            LiteralNode with SQL expression for age in years
+            
+        Example: AgeInYears(@1990-06-15) → current age in years
+        """
+        logger.debug("Generating CQL AgeInYears operation")
+        
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        birthdate_val = extract_value(birthdate_expr)
+        
+        # Calculate age from birthdate to current date
+        if self.dialect == "postgresql":
+            # PostgreSQL: Use AGE function to get interval, then extract years
+            sql = f"EXTRACT(YEAR FROM AGE(CURRENT_DATE, CAST({birthdate_val} AS DATE)))"
+        else:  # DuckDB
+            # DuckDB: Use DATEDIFF to calculate years between birthdate and today
+            sql = f"DATE_DIFF('year', CAST({birthdate_val} AS DATE), CURRENT_DATE)"
             
         return LiteralNode(value=sql, type='sql')
     

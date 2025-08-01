@@ -53,6 +53,16 @@ class CQLTranslator:
             'sum': self.math_functions,
             'avg': self.math_functions,
             'average': self.math_functions,
+            'count': self.math_functions,
+            'first': self.math_functions,
+            'last': self.math_functions,
+            # CQL statistical functions
+            'stddev': self.math_functions,
+            'stdev': self.math_functions,
+            'variance': self.math_functions,
+            'median': self.math_functions,
+            'mode': self.math_functions,
+            'percentile': self.math_functions,
             'predecessor': self.math_functions,
             'successor': self.math_functions,
             # All FHIRPath math functions are inherited
@@ -95,6 +105,8 @@ class CQLTranslator:
             'minute_from': self.datetime_functions,
             'second_from': self.datetime_functions,
             'date_from': self.datetime_functions,
+            # CQL datetime functions
+            'ageinyears': self.datetime_functions,
             'time_from': self.datetime_functions,
             'years_between': self.datetime_functions,
             'months_between': self.datetime_functions,
