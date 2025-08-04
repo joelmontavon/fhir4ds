@@ -69,21 +69,22 @@ class UnifiedFunctionRegistry:
     - Backward compatibility with existing patterns
     """
     
-    def __init__(self, dialect: str = "duckdb", terminology_client=None, db_connection=None):
+    def __init__(self, dialect: Union[str, Any] = "duckdb", terminology_client=None, db_connection=None):
         """
         Initialize unified function registry with all function handlers.
         
         Args:
-            dialect: Database dialect ("duckdb" or "postgresql")
+            dialect: Database dialect ("duckdb" or "postgresql") or dialect object
             terminology_client: Optional terminology client for clinical functions
             db_connection: Optional database connection for caching
         """
-        self.dialect = dialect
+        # Convert dialect object to string if needed
+        self.dialect = self._normalize_dialect(dialect)
         self.handlers = {}
         self.capabilities = {}
         self.function_map = {}  # Direct function name -> handler mapping
         
-        logger.info(f"Initializing UnifiedFunctionRegistry with dialect: {dialect}")
+        logger.info(f"Initializing UnifiedFunctionRegistry with dialect: {self.dialect}")
         
         # Initialize all function handlers
         self._initialize_handlers(terminology_client, db_connection)
@@ -95,6 +96,32 @@ class UnifiedFunctionRegistry:
         self._build_function_map()
         
         logger.info(f"UnifiedFunctionRegistry initialized with {len(self.function_map)} functions")
+    
+    def _normalize_dialect(self, dialect: Union[str, Any]) -> str:
+        """
+        Convert dialect object to string if needed.
+        
+        Args:
+            dialect: Database dialect string or dialect object
+            
+        Returns:
+            Normalized dialect string ("duckdb" or "postgresql")
+        """
+        if isinstance(dialect, str):
+            return dialect.lower()
+        
+        # Handle dialect objects by extracting class name
+        dialect_class_name = dialect.__class__.__name__.lower()
+        if "duckdb" in dialect_class_name:
+            logger.debug(f"Converted DuckDB dialect object to string")
+            return "duckdb"
+        elif "postgresql" in dialect_class_name or "postgres" in dialect_class_name:
+            logger.debug(f"Converted PostgreSQL dialect object to string")
+            return "postgresql"
+        else:
+            # Fallback to duckdb for unknown dialect objects
+            logger.warning(f"Unknown dialect object type: {dialect_class_name}, defaulting to duckdb")
+            return "duckdb"
     
     def _initialize_handlers(self, terminology_client=None, db_connection=None):
         """Initialize all function handlers with proper configuration."""

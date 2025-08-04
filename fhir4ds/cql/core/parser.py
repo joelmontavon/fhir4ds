@@ -195,6 +195,11 @@ class CQLParser(FHIRPathParser):
     
     def __init__(self, tokens: List):
         super().__init__(tokens)
+    
+    def error(self, message: str):
+        """Raise a parsing error with current position info."""
+        position = getattr(self.current_token, 'position', -1) if self.current_token else -1
+        raise ValueError(f"Parse error at position {position}: {message}")
         
     def parse_library(self) -> LibraryNode:
         """
@@ -242,7 +247,7 @@ class CQLParser(FHIRPathParser):
         """Parse qualified identifier (e.g., 'Common.Demographics')."""
         parts = [self.consume_identifier()]
         
-        while self.current_token() and self.current_token().type == TokenType.DOT:
+        while self.current_token and self.current_token.type == TokenType.DOT:
             self.advance()  # consume dot
             parts.append(self.consume_identifier())
         
@@ -250,8 +255,8 @@ class CQLParser(FHIRPathParser):
     
     def parse_version_specifier(self) -> str:
         """Parse version specifier (string literal)."""
-        if self.current_token() and self.current_token().type == TokenType.STRING:
-            version = self.current_token().value
+        if self.current_token and self.current_token.type == TokenType.STRING:
+            version = self.current_token.value
             self.advance()
             return version
         else:
@@ -277,7 +282,7 @@ class CQLParser(FHIRPathParser):
         
         # Optional type
         param_type = None
-        if self.current_token() and self.current_token().type == TokenType.IDENTIFIER:
+        if self.current_token and self.current_token.type == TokenType.IDENTIFIER:
             param_type = self.consume_identifier()
         
         # Optional default value
@@ -302,7 +307,12 @@ class CQLParser(FHIRPathParser):
         elif self.match_keyword('private'):
             access_level = "PRIVATE"
         
-        define_name = self.consume_identifier()
+        # Define name can be a quoted string or identifier
+        if self.current_token and self.current_token.type == TokenType.STRING:
+            define_name = self.current_token.value
+            self.advance()
+        else:
+            define_name = self.consume_identifier()
         
         # Expect colon
         if not self.match(TokenType.COLON):
@@ -323,8 +333,8 @@ class CQLParser(FHIRPathParser):
         terminology = None
         if self.match(TokenType.COLON):
             # Parse terminology reference (for now, just string)
-            if self.current_token() and self.current_token().type == TokenType.STRING:
-                terminology = self.current_token().value
+            if self.current_token and self.current_token.type == TokenType.STRING:
+                terminology = self.current_token.value
                 self.advance()
         
         if not self.match(TokenType.RBRACKET):
@@ -344,23 +354,23 @@ class CQLParser(FHIRPathParser):
         source = None
         aliases = []
         
-        if self.current_token() and self.current_token().type == TokenType.LBRACKET:
+        if self.current_token and self.current_token.type == TokenType.LBRACKET:
             # Retrieve expression
             source = self.parse_retrieve()
-        elif self.current_token() and self.current_token().type == TokenType.IDENTIFIER:
+        elif self.current_token and self.current_token.type == TokenType.IDENTIFIER:
             # Could be identifier or from clause
-            if self.current_token().value.lower() == 'from':
+            if self.current_token.value.lower() == 'from':
                 self.advance()  # consume 'from'
                 source = self.parse_expression()
                 # Check for alias
-                if self.current_token() and self.current_token().type == TokenType.IDENTIFIER:
+                if self.current_token and self.current_token.type == TokenType.IDENTIFIER:
                     aliases.append(self.consume_identifier())
             else:
                 source = IdentifierNode(self.consume_identifier())
         
         # Parse optional with clauses
         with_clauses = []
-        while self.current_token() and self.current_token().type == TokenType.IDENTIFIER and self.current_token().value.lower() == 'with':
+        while self.current_token and self.current_token.type == TokenType.IDENTIFIER and self.current_token.value.lower() == 'with':
             self.advance()  # consume 'with'
             with_clause = self.parse_with_clause()
             with_clauses.append(with_clause)
@@ -449,8 +459,8 @@ class CQLParser(FHIRPathParser):
         left = self.parse_expression()
         
         # Check for temporal operators
-        if self.current_token() and self.current_token().type == TokenType.IDENTIFIER:
-            operator = self.current_token().value.lower()
+        if self.current_token and self.current_token.type == TokenType.IDENTIFIER:
+            operator = self.current_token.value.lower()
             
             if operator in ['during', 'overlaps', 'before', 'after', 'meets', 'starts', 'ends', 'includes']:
                 self.advance()  # consume operator
@@ -463,7 +473,7 @@ class CQLParser(FHIRPathParser):
     
     def match_keyword(self, keyword: str) -> bool:
         """Check if current token matches a keyword."""
-        token = self.current_token()
+        token = self.current_token
         if token and token.type == TokenType.IDENTIFIER:
             if token.value.lower() == keyword.lower():
                 self.advance()
@@ -472,8 +482,8 @@ class CQLParser(FHIRPathParser):
     
     def consume_identifier(self) -> str:
         """Consume and return identifier value."""
-        if self.current_token() and self.current_token().type == TokenType.IDENTIFIER:
-            value = self.current_token().value
+        if self.current_token and self.current_token.type == TokenType.IDENTIFIER:
+            value = self.current_token.value
             self.advance()
             return value
         else:
@@ -580,12 +590,86 @@ class CQLParser(FHIRPathParser):
                 if re.search(duration_calculation_pattern, text.lower()):
                     # Parse as CQL duration calculation expression
                     return self.parse_cql_duration_calculation(text)
-                else:
-                    # For other CQL constructs, fall back to FHIRPath for now
+                
+                # Check if this contains statistical function with resource query patterns
+                statistical_function_pattern = r'\b(stddev|stdev|variance|median|mode|percentile|count|sum|avg|average|min|max)\s*\(\s*\[.*?\].*?\)'
+                if re.search(statistical_function_pattern, text.lower(), re.DOTALL):
+                    # Parse as CQL statistical function with resource query
+                    return self.parse_cql_statistical_function(text)
+                
+                # Check if this contains define statements
+                define_pattern = r'define\s+"[^"]+"\s*:'
+                if re.search(define_pattern, text.lower()):
+                    # Parse as complete CQL library/define construct
+                    return self.parse_cql_define_construct(text)
+                
+                # Check if this contains resource queries with sorting/clauses
+                resource_query_pattern = r'\[[^\]]+\]\s+\w+\s+(where|return|sort\s+by)'
+                if re.search(resource_query_pattern, text.lower()):
+                    # Parse as CQL resource query with clauses
+                    return self.parse_cql_resource_query(text)
+                
+                # For other CQL constructs, try full CQL parsing instead of FHIRPath
+                try:
+                    lexer = CQLLexer(text)
+                    tokens = lexer.tokenize()
+                    self.tokens = tokens
+                    self.current = 0
+                    # Try to parse as CQL expression first
+                    return self.parse_expression()
+                except Exception:
+                    # If CQL parsing fails, fall back to FHIRPath
                     lexer = FHIRPathLexer(text)
                     tokens = lexer.tokenize()
                     parser = FHIRPathParser(tokens)
                     return parser.parse()
+    
+    def parse_cql_statistical_function(self, text: str) -> Union[CQLASTNode, ASTNode]:
+        """
+        Parse CQL statistical function expressions with resource queries.
+        
+        Handles patterns like:
+        - StdDev([Observation: "Systolic Blood Pressure"] O return O.valueQuantity.value)
+        - Count([Patient] P where P.active = true)
+        
+        Args:
+            text: CQL statistical function expression
+            
+        Returns:
+            FunctionCallNode with proper resource query handling
+        """
+        import re
+        
+        # Extract function name and arguments
+        func_pattern = r'(\w+)\s*\(\s*(.*)\s*\)'
+        match = re.match(func_pattern, text.strip(), re.DOTALL)
+        if not match:
+            # Fallback to FHIRPath parsing
+            lexer = FHIRPathLexer(text)
+            tokens = lexer.tokenize()
+            parser = FHIRPathParser(tokens)
+            return parser.parse()
+        
+        func_name = match.group(1)
+        func_args = match.group(2).strip()
+        
+        # Parse the resource query argument
+        try:
+            # Create a temporary parser for the resource query
+            lexer = CQLLexer(func_args)
+            tokens = lexer.tokenize()
+            temp_parser = CQLParser(tokens)
+            
+            # Try to parse as query expression
+            query_ast = temp_parser.parse_query_expression()
+            
+            # Create function call node with parsed query
+            return FunctionCallNode(func_name, [query_ast])
+            
+        except Exception as e:
+            logger.debug(f"Failed to parse statistical function arguments: {e}")
+            # Fallback: create simple function call with raw arguments
+            return FunctionCallNode(func_name, [LiteralNode(func_args, "string")])
     
     def parse_cql_temporal_arithmetic(self, text: str) -> Union[CQLASTNode, ASTNode]:
         """
@@ -733,3 +817,75 @@ class CQLParser(FHIRPathParser):
         
         # Create function call node with both arguments
         return FunctionCallNode(func_name, [start_ast, end_ast])
+    
+    def parse_cql_define_construct(self, text: str) -> Union[CQLASTNode, ASTNode]:
+        """
+        Parse CQL define statements and complete constructs.
+        
+        Args:
+            text: CQL define construct text
+            
+        Returns:
+            DefineNode or appropriate AST structure
+        """
+        logger.debug(f"Parsing CQL define construct: {text[:100]}...")
+        
+        try:
+            # Create CQL lexer and parser for the full construct
+            lexer = CQLLexer(text)
+            tokens = lexer.tokenize()
+            self.tokens = tokens
+            self.current = 0
+            
+            # Check if this is a complete library or just a define statement
+            if text.strip().lower().startswith('library'):
+                return self.parse_library()
+            elif text.strip().lower().startswith('define'):
+                # Parse define statement - consume the 'define' keyword first
+                if self.match_keyword('define'):
+                    return self.parse_define()
+                else:
+                    raise self.error("Expected 'define' keyword")
+            else:
+                # Try to parse as general CQL expression
+                return self.parse_expression()
+                
+        except Exception as e:
+            logger.warning(f"CQL define parsing failed: {e}, falling back to FHIRPath")
+            import traceback
+            logger.debug(f"Full traceback: {traceback.format_exc()}")
+            # Fall back to FHIRPath parsing
+            lexer = FHIRPathLexer(text)
+            tokens = lexer.tokenize()
+            parser = FHIRPathParser(tokens)
+            return parser.parse()
+    
+    def parse_cql_resource_query(self, text: str) -> Union[CQLASTNode, ASTNode]:
+        """
+        Parse CQL resource queries with where/return/sort clauses.
+        
+        Args:
+            text: CQL resource query text
+            
+        Returns:
+            QueryNode or appropriate AST structure
+        """
+        logger.debug(f"Parsing CQL resource query: {text[:100]}...")
+        
+        try:
+            # Create CQL lexer and parser for the resource query
+            lexer = CQLLexer(text)
+            tokens = lexer.tokenize()
+            self.tokens = tokens
+            self.current = 0
+            
+            # Parse as query expression
+            return self.parse_query_expression()
+            
+        except Exception as e:
+            logger.debug(f"CQL resource query parsing failed: {e}, falling back to FHIRPath")
+            # Fall back to FHIRPath parsing
+            lexer = FHIRPathLexer(text)
+            tokens = lexer.tokenize()
+            parser = FHIRPathParser(tokens)
+            return parser.parse()

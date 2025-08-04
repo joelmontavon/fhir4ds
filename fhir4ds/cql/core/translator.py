@@ -620,6 +620,11 @@ class CQLTranslator:
         logger.debug(f"Translating general function: {func_call.name}")
         
         func_name = func_call.name.lower()
+        
+        # Enhanced handling for statistical functions with complex arguments
+        if func_name in ['stddev', 'stdev', 'variance', 'median', 'mode', 'percentile']:
+            return self._translate_statistical_function_with_query(func_call)
+        
         args = [self.translate_expression(arg) for arg in func_call.args]
         
         # Look up function in registry
@@ -650,6 +655,81 @@ class CQLTranslator:
             logger.warning(f"Function {func_name} not found in registry")
             return FunctionCallNode(func_name, args)
     
+    def _translate_statistical_function_with_query(self, func_call: FunctionCallNode) -> Any:
+        """
+        Translate statistical functions that have complex query arguments.
+        
+        Handles patterns like:
+        - StdDev([Observation: "Systolic Blood Pressure"] O return O.valueQuantity.value)
+        - Count([Patient] P where P.active = true)
+        
+        Args:
+            func_call: FunctionCallNode for statistical function with query
+            
+        Returns:
+            Enhanced FunctionCallNode with proper query structure
+        """
+        logger.debug(f"Translating statistical function with query: {func_call.name}")
+        
+        func_name = func_call.name.lower()
+        
+        # Process each argument carefully
+        processed_args = []
+        for arg in func_call.args:
+            if isinstance(arg, QueryNode):
+                # This is a resource query with potential return clause
+                logger.debug(f"Processing QueryNode for {func_name}")
+                
+                # Translate the query components
+                source_expr = self.translate_expression(arg.source)
+                
+                # Build the query chain: source -> where -> return
+                query_expr = source_expr
+                
+                # Apply where clause if present
+                if arg.where_clause:
+                    where_expr = self.translate_expression(arg.where_clause)
+                    query_expr = FunctionCallNode("where", [query_expr, where_expr])
+                
+                # Apply return clause - this is crucial for statistical functions
+                if arg.return_clause:
+                    return_expr = self.translate_expression(arg.return_clause)
+                    query_expr = FunctionCallNode("select", [query_expr, return_expr])
+                else:
+                    # If no explicit return clause, default to extracting the resource itself
+                    logger.debug(f"No return clause found for {func_name}, using default resource selection")
+                
+                processed_args.append(query_expr)
+                
+            else:
+                # Regular argument, translate normally
+                processed_args.append(self.translate_expression(arg))
+        
+        # Now call the function handler with the properly structured arguments
+        if func_name in self.function_registry:
+            handler = self.function_registry[func_name]
+            try:
+                # For statistical functions, prefer the unified registry if available
+                if hasattr(self, 'unified_registry') and self.unified_registry.can_handle_function(func_name):
+                    return self._translate_function_via_registry(FunctionCallNode(func_name, processed_args))
+                
+                # Otherwise use standard handler
+                if hasattr(handler, func_name):
+                    method = getattr(handler, func_name)
+                    return method(*processed_args)
+                elif hasattr(handler, 'generate_function_sql'):
+                    return handler.generate_function_sql(func_name, processed_args, self.dialect)
+                else:
+                    logger.warning(f"No appropriate method found for statistical function {func_name}")
+                    return FunctionCallNode(func_name, processed_args)
+                    
+            except Exception as e:
+                logger.error(f"Error translating statistical function {func_name}: {e}")
+                return FunctionCallNode(func_name, processed_args)
+        else:
+            logger.warning(f"Statistical function {func_name} not found in registry")
+            return FunctionCallNode(func_name, processed_args)
+
     def _translate_function_via_registry(self, func_call: FunctionCallNode) -> Any:
         """
         Translate CQL functions using the unified function registry.
