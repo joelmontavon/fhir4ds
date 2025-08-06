@@ -584,6 +584,14 @@ class ViewRunner:
         # Process SELECT items
         select_items = []
         for select_item in view_def['select']:
+            # Process WHERE clauses within select items (QueryBuilder format)
+            if 'where' in select_item:
+                for where_item in select_item['where']:
+                    if 'path' in where_item:
+                        # Generate WHERE condition using enhanced SQL generator
+                        where_condition = self._generate_where_condition(where_item['path'])
+                        where_items.append(where_condition)
+            
             # Process direct columns (newer format)
             if 'column' in select_item:
                 for column in select_item['column']:
@@ -1039,7 +1047,7 @@ class ViewRunner:
         # Now that operator splitting is fixed, these functions work correctly
         return self._has_fhirpath_functions(path)
     
-    def _generate_fhirpath_expression(self, path: str, column_type: str) -> QueryItem:
+    def _generate_fhirpath_expression(self, path: str, column_type: str, collection_setting: bool = None) -> QueryItem:
         """Generate SQL using the FHIRPath translator for complex expressions"""
         try:
             # Import the FHIRPath translator
@@ -1059,7 +1067,20 @@ class ViewRunner:
             # without CTEs, specifically designed for embedding in larger queries
             expression = translator.translate_to_expression_only(path, resource_type_context=resource_type)
             
-            return Expr([expression], sep='')
+            # Handle collection setting for FHIRPath expressions
+            if collection_setting is True:
+                # Wrap the FHIRPath expression result in collection handling logic
+                wrapped_expression = f"""(
+ CASE 
+ WHEN json_type({expression}) = 'ARRAY' THEN 
+ {expression}
+ ELSE 
+ json_array({expression})
+ END
+ )"""
+                return Expr([wrapped_expression], sep='')
+            else:
+                return Expr([expression], sep='')
                 
         except Exception as e:
             # If FHIRPath translation fails, fall back to simple expression generation
@@ -2194,7 +2215,7 @@ class ViewRunner:
         # Handle complex FHIRPath expressions that need the translator BEFORE collection handling
         # This ensures that paths like "name.tail().use" with collection: true get proper FHIRPath processing
         if self._needs_fhirpath_translator(path):
-            return self._generate_fhirpath_expression(path, column_type)
+            return self._generate_fhirpath_expression(path, column_type, collection_setting)
         
         # Handle collection: true - return arrays (but only for non-FHIRPath expressions)
         if collection_setting is True:

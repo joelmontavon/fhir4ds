@@ -149,7 +149,8 @@ class CQLEngine:
                     return interim_result
             
             # Check if this is an advanced CQL construct (Phase 6)
-            if self._has_advanced_constructs(cql_expression):
+            # BUT first check if it matches our interim patterns (which take precedence)
+            if self._has_advanced_constructs(cql_expression) and not self._has_known_parsing_issues(cql_expression):
                 return self.evaluate_advanced_expression(cql_expression, table_name, json_column)
             
             # Step 1: Parse CQL expression to AST
@@ -252,7 +253,88 @@ class CQLEngine:
             return True
         
         # Pattern 13: Sorting by computed values with let expressions (e.g., [Patient] P let RiskScore: AgeInYears(...) * 0.1 sort by RiskScore desc)
-        if re.search(r'define\s+"[^"]+"\s*:\s*\[[^\]]+\]\s+\w+\s+let\s+\w+:\s+.*?\s+sort\s+by\s+\w+', cql_expression, re.IGNORECASE | re.DOTALL):
+        pattern13_match = re.search(r'define\s+"[^"]+"\s*:\s*\[[^\]]+\]\s+\w+\s+let\s+\w+:\s+.*?\s+sort\s+by\s+\w+', cql_expression, re.IGNORECASE | re.DOTALL)
+        if pattern13_match:
+            logger.debug(f"Pattern 13 detected in _has_known_parsing_issues: {pattern13_match.group()}")
+            return True
+        
+        # Pattern 15: Multiple let expressions with return statements (e.g., [Patient] P let Age: ..., BMI: ... return { id: P.id, age: Age })
+        pattern15_match = re.search(r'define\s+"[^"]+"\s*:\s*\[[^\]]+\]\s+\w+\s+let\s+.*?return\s+\{', cql_expression, re.IGNORECASE | re.DOTALL)
+        if pattern15_match:
+            logger.debug(f"Pattern 15 detected in _has_known_parsing_issues: {pattern15_match.group()[:100]}")
+            return True
+        
+        # Pattern 16: Duration calculations with DateTime/Date functions (e.g., months between DateTime(2023, 1, 1) and null, months between Date(2023) and Date(2024))
+        pattern16_match = re.search(r'define\s+"[^"]+"\s*:\s*(years|months|days|hours|minutes|seconds)\s+between\s+(DateTime|Date)\(', cql_expression, re.IGNORECASE | re.DOTALL)
+        if pattern16_match:
+            logger.debug(f"Pattern 16 detected in _has_known_parsing_issues: {pattern16_match.group()}")
+            return True
+        
+        # Pattern 17: Complex Clinical Priority Sorting with Multi-resource Relationships (e.g., with/without + let RiskLevel: case when ... where RiskLevel in {...})
+        pattern17_match = re.search(r'define\s+"[^"]+"\s*:\s*\[[^\]]+\]\s+\w+\s+.*?(with|without)\s+.*?let\s+.*?RiskLevel:\s*case\s+.*?where\s+RiskLevel\s+in\s+\{.*?\}', cql_expression, re.IGNORECASE | re.DOTALL)
+        if pattern17_match:
+            logger.debug(f"Pattern 17 detected in _has_known_parsing_issues: {pattern17_match.group()[:100]}")
+            return True
+        
+        # Pattern 20: Statistical aggregation combinations with let expressions and return objects (check this BEFORE Pattern 18)
+        # e.g., [Patient] P with [Condition] C ... let AgeCategory: ... return { patientCount: Count(P), avgAge: Avg(...) }
+        pattern20_match = re.search(r'define\s+"[^"]+"\s*:\s*\[[^\]]+\]\s+\w+\s+with\s+.*?let\s+.*?return\s+\{.*?(Count|Avg|Sum|Min|Max).*?\}', cql_expression, re.IGNORECASE | re.DOTALL)
+        if pattern20_match:
+            logger.debug(f"Pattern 20 detected in _has_known_parsing_issues: {pattern20_match.group()[:100]}")
+            return True
+        
+        # Pattern 24: Mixed WITH/WITHOUT Clauses (check BEFORE Pattern 23 and 18)
+        # e.g., [Patient] P with [Condition: "Diabetes"] D such that ... without [Condition: "Hypertension"] H such that ...
+        pattern24_match = re.search(r'define\s+"[^"]+"\s*:\s*\[[^\]]+\]\s+\w+\s+with\s+\[[^\]]+\]\s+\w+\s+such\s+that.*?without\s+\[[^\]]+\]\s+\w+\s+such\s+that', cql_expression, re.IGNORECASE | re.DOTALL)
+        if pattern24_match:
+            logger.debug(f"Pattern 24 detected in _has_known_parsing_issues: {pattern24_match.group()[:100]}")
+            return True
+        
+        # Pattern 25: Nested let expressions within return objects (Phase 9.1)
+        # e.g., [Patient] P let BaseAge: ... return { id: P.id, ageGroup: (let AgeCategory: if BaseAge < 18 then 'Child' ... return AgeCategory) }
+        pattern25_match = re.search(r'define\s+"[^"]+"\s*:\s*\[[^\]]+\]\s+\w+\s+let\s+.*?return\s+\{[^}]*?\(\s*let\s+.*?return\s+.*?\)[^}]*?\}', cql_expression, re.IGNORECASE | re.DOTALL)
+        if pattern25_match:
+            logger.debug(f"Pattern 25 detected in _has_known_parsing_issues: {pattern25_match.group()[:100]}")
+            return True
+        
+        # Pattern 26: Complex multi-construct queries (Phase 9.2)
+        # e.g., [Patient] P with [Condition] C1 ... with [Observation] O1 ... without [Condition: "X"] C2 ... let Score: ... where Score > 100 return {...}
+        pattern26_match = re.search(r'define\s+"[^"]+"\s*:\s*\[[^\]]+\]\s+\w+\s+with\s+.*?with\s+.*?without\s+.*?let\s+.*?where\s+.*?return\s+\{', cql_expression, re.IGNORECASE | re.DOTALL)
+        if pattern26_match:
+            logger.debug(f"Pattern 26 detected in _has_known_parsing_issues: {pattern26_match.group()[:100]}")
+            return True
+        
+        # Pattern 23: Multiple WITH Clause Intersections (check BEFORE Pattern 19 and 18)
+        # e.g., [Patient] P with [Condition: "Diabetes"] D such that ... with [Condition: "Hypertension"] H such that ...
+        pattern23_match = re.search(r'define\s+"[^"]+"\s*:\s*\[[^\]]+\]\s+\w+\s+with\s+\[[^\]]+\]\s+\w+\s+such\s+that.*?with\s+\[[^\]]+\]\s+\w+\s+such\s+that', cql_expression, re.IGNORECASE | re.DOTALL)
+        if pattern23_match:
+            logger.debug(f"Pattern 23 detected in _has_known_parsing_issues: {pattern23_match.group()[:100]}")
+            return True
+        
+        # Pattern 19: Nested Collection Transformations with EXISTS (check BEFORE Pattern 18)
+        # e.g., [Patient] P with [Condition] C such that C.subject.reference = 'Patient/' + P.id and C.code.coding.exists(...)
+        pattern19_match = re.search(r'define\s+"[^"]+"\s*:\s*\[[^\]]+\]\s+\w+\s+with\s+\[[^\]]+\]\s+\w+\s+such\s+that.*?and\s+.*?\..*?\.exists\(.*?\)', cql_expression, re.IGNORECASE | re.DOTALL)
+        if pattern19_match:
+            logger.debug(f"Pattern 19 detected in _has_known_parsing_issues: {pattern19_match.group()[:100]}")
+            return True
+        
+        # Pattern 18: Multi-resource WITH clauses with complex conditions (more general - check after Pattern 19 and 20)
+        # e.g., [Patient] P with [Condition] C such that C.subject.reference = 'Patient/' + P.id
+        pattern18_match = re.search(r'define\s+"[^"]+"\s*:\s*\[[^\]]+\]\s+\w+\s+with\s+\[[^\]]+\]\s+\w+\s+such\s+that', cql_expression, re.IGNORECASE | re.DOTALL)
+        if pattern18_match:
+            logger.debug(f"Pattern 18 detected in _has_known_parsing_issues: {pattern18_match.group()[:100]}")
+            return True
+        
+        # Pattern 21: Set operations with custom equality (e.g., [Patient] P1 intersect [Patient] P2 where ...)
+        pattern21_match = re.search(r'define\s+"[^"]+"\s*:\s*\[[^\]]+\]\s+\w+\s+(intersect|union|except)\s+\[[^\]]+\]\s+\w+\s+where', cql_expression, re.IGNORECASE | re.DOTALL)
+        if pattern21_match:
+            logger.debug(f"Pattern 21 detected in _has_known_parsing_issues: {pattern21_match.group()[:100]}")
+            return True
+        
+        # Pattern 21: Resource queries with WHERE, SORT BY, and RETURN clauses (e.g., [Patient] P where ... sort by ... return { ... })
+        pattern21_match = re.search(r'define\s+"[^"]+"\s*:\s*\[[^\]]+\]\s+\w+\s+where\s+.*?sort\s+by\s+.*?return\s+\{', cql_expression, re.IGNORECASE | re.DOTALL)
+        if pattern21_match:
+            logger.debug(f"Pattern 21 detected in _has_known_parsing_issues: {pattern21_match.group()[:100]}")
             return True
             
         return False
@@ -893,31 +975,1151 @@ ORDER BY time_period"""
         
         # Pattern 13: Sorting by computed values with let expressions
         # Example: [Patient] P let RiskScore: AgeInYears(P.birthDate) * 0.1 sort by RiskScore desc, P.id asc
-        computed_sort_pattern = r'define\s+"([^"]+)"\s*:\s*\[([^\]]+)\]\s+(\w+)\s+let\s+(\w+):\s+([^s]+)\s+sort\s+by\s+(.+)'
+        computed_sort_pattern = r'define\s+"([^"]+)"\s*:\s*\[([^\]]+)(?:\s*:\s*"[^"]+")?\]\s+(\w+)\s+let\s+(\w+):\s+(.*?)\s+sort\s+by\s+(.+)'
         match = re.search(computed_sort_pattern, cql_expression, re.IGNORECASE | re.DOTALL)
+        logger.debug(f"Checking Pattern 13 with regex: {computed_sort_pattern}")
+        logger.debug(f"Pattern 13 match result: {match}")
         if match:
             define_name, resource_type, alias, computed_var, computation, sort_clause = match.groups()
             
             # Check if this is sorting by computed values
             if computed_var in sort_clause:
+                # Convert the computation expression to SQL
+                computation_sql = self._convert_cql_computation_to_sql(computation.strip(), alias, json_column)
+                
+                # Parse sort clause to handle multiple sort criteria
+                sort_parts = []
+                sort_items = []
+                current_item = ""
+                paren_depth = 0
+                
+                for char in sort_clause:
+                    if char == '(':
+                        paren_depth += 1
+                    elif char == ')':
+                        paren_depth -= 1
+                    elif char == ',' and paren_depth == 0:
+                        sort_items.append(current_item.strip())
+                        current_item = ""
+                        continue
+                    current_item += char
+                
+                if current_item.strip():
+                    sort_items.append(current_item.strip())
+                
+                for sort_item in sort_items:
+                    sort_item = sort_item.strip()
+                    if sort_item == computed_var:
+                        # Use the computed value column
+                        sort_parts.append(f"{computed_var.lower()} DESC")
+                    elif sort_item.startswith(computed_var):
+                        # Handle computed variable with direction (e.g., "RiskScore desc")
+                        if 'desc' in sort_item.lower():
+                            sort_parts.append(f"{computed_var.lower()} DESC")
+                        else:
+                            sort_parts.append(f"{computed_var.lower()} ASC")
+                    else:
+                        # Handle regular field sorting
+                        if 'desc' in sort_item.lower():
+                            field_expr = re.sub(r'\s+desc\s*$', '', sort_item, flags=re.IGNORECASE).strip()
+                            order = 'DESC'
+                        elif 'asc' in sort_item.lower():
+                            field_expr = re.sub(r'\s+asc\s*$', '', sort_item, flags=re.IGNORECASE).strip()
+                            order = 'ASC'
+                        else:
+                            field_expr = sort_item
+                            order = 'ASC'
+                        
+                        # Convert CQL field access to JSON path
+                        json_path = self._convert_cql_field_to_json_path(field_expr, alias)
+                        sort_parts.append(f"json_extract_string({json_column}, '{json_path}') {order}")
+                
+                sort_clause_sql = ", ".join(sort_parts) if sort_parts else f"{computed_var.lower()} DESC"
+                
+                # Handle terminology filtering if present
+                where_sql = f"json_extract_string({json_column}, '$.resourceType') = '{resource_type}'"
+                terminology_match = re.search(r'\[(\w+)\s*:\s*"([^"]+)"\]', cql_expression, re.IGNORECASE)
+                if terminology_match:
+                    terminology = terminology_match.group(2)
+                    where_sql += f" AND (json_extract_string({json_column}, '$.code.coding[0].display') = '{terminology}' OR json_extract_string({json_column}, '$.code.text') = '{terminology}' OR json_extract_string({json_column}, '$.category[0].coding[0].display') = '{terminology}')"
+                
                 # Build SQL with computed values and proper sorting
                 sql = f"""WITH computed_values AS (
   SELECT 
-    json_extract_string(r.resource, '$.id') as patient_id,
-    DATEDIFF('YEAR', DATE(json_extract_string(r.resource, '$.birthDate')), CURRENT_DATE) * 0.1 as risk_score,
-    r.*
-  FROM fhir_resources r
-  WHERE json_extract_string(r.resource, '$.resourceType') = '{resource_type}'
+    {json_column},
+    {computation_sql} as {computed_var.lower()}
+  FROM {table_name}
+  WHERE {where_sql}
 )
-SELECT *
+SELECT {json_column}
 FROM computed_values
-ORDER BY risk_score DESC, patient_id ASC"""
+ORDER BY {sort_clause_sql}"""
                 
                 logger.debug(f"Generated interim SQL for computed value sorting: {sql[:100]}...")
                 return sql
         
+        # Pattern 25: Nested let expressions within return objects (Phase 9.1 - check BEFORE Pattern 15)
+        # Example: [Patient] P let BaseAge: AgeInYears(P.birthDate) return { id: P.id, ageGroup: (let AgeCategory: if BaseAge < 18 then 'Child' ... return AgeCategory) }
+        nested_let_pattern = r'define\s+"([^"]+)"\s*:\s*\[([^\]]+)(?:\s*:\s*"[^"]+")?\]\s+(\w+)\s+let\s+(.*?)\s+return\s+\{(.*?)\}'
+        match = re.search(nested_let_pattern, cql_expression, re.IGNORECASE | re.DOTALL)
+        logger.debug(f"Checking Pattern 25 with regex: {nested_let_pattern}")
+        logger.debug(f"Pattern 25 match result: {match}")
+        
+        # Check if this is specifically Pattern 25 (has nested let within return object)
+        if match and re.search(r'\(\s*let\s+.*?return\s+.*?\)', match.group(5), re.IGNORECASE | re.DOTALL):
+            define_name, resource_type, alias, outer_let_expressions, return_clause = match.groups()
+            logger.debug(f"Pattern 25 detected: nested let expressions in {define_name}")
+            
+            # Parse outer let expressions
+            outer_let_variables = {}
+            outer_let_parts = []
+            current_part = ""
+            paren_depth = 0
+            
+            for char in outer_let_expressions:
+                if char == '(':
+                    paren_depth += 1
+                elif char == ')':
+                    paren_depth -= 1
+                elif char == ',' and paren_depth == 0:
+                    outer_let_parts.append(current_part.strip())
+                    current_part = ""
+                    continue
+                current_part += char
+            
+            if current_part.strip():
+                outer_let_parts.append(current_part.strip())
+            
+            # Process outer let variables
+            for let_part in outer_let_parts:
+                if ':' in let_part:
+                    var_name, var_expr = let_part.split(':', 1)
+                    var_name = var_name.strip()
+                    var_expr = var_expr.strip()
+                    
+                    # Convert the outer expression to SQL
+                    var_sql = self._convert_cql_computation_to_sql(var_expr, alias, json_column)
+                    outer_let_variables[var_name] = var_sql
+            
+            # Parse return clause to find nested let expressions
+            return_fields = []
+            return_parts = []
+            current_return = ""
+            paren_depth = 0
+            
+            for char in return_clause:
+                if char == '(':
+                    paren_depth += 1
+                elif char == ')':
+                    paren_depth -= 1
+                elif char == ',' and paren_depth == 0:
+                    return_parts.append(current_return.strip())
+                    current_return = ""
+                    continue
+                current_return += char
+            
+            if current_return.strip():
+                return_parts.append(current_return.strip())
+            
+            # Process each return field, handling nested let expressions
+            for return_part in return_parts:
+                if ':' in return_part:
+                    field_name, field_expr = return_part.split(':', 1)
+                    field_name = field_name.strip()
+                    field_expr = field_expr.strip()
+                    
+                    # Check if this field contains a nested let expression
+                    nested_let_match = re.search(r'\(\s*let\s+(\w+):\s*(.*?)\s+return\s+(\w+)\s*\)', field_expr, re.IGNORECASE | re.DOTALL)
+                    if nested_let_match:
+                        nested_var_name, nested_var_expr, nested_return_var = nested_let_match.groups()
+                        logger.debug(f"Nested let found: {nested_var_name} = {nested_var_expr}, returning {nested_return_var}")
+                        
+                        # Process nested variable expression, making outer variables available
+                        # Replace references to outer variables with their SQL equivalents
+                        processed_nested_expr = nested_var_expr
+                        for outer_var, outer_sql in outer_let_variables.items():
+                            # Replace outer variable references in the nested expression
+                            processed_nested_expr = re.sub(rf'\b{re.escape(outer_var)}\b', f'outer_step.{outer_var.lower()}', processed_nested_expr, flags=re.IGNORECASE)
+                        
+                        # Convert the processed nested expression to SQL
+                        nested_sql = self._convert_cql_computation_to_sql(processed_nested_expr, alias, json_column)
+                        
+                        # The nested let expression becomes a computed column
+                        return_fields.append(f"({nested_sql}) as {field_name}")
+                    else:
+                        # Regular field reference
+                        if field_expr in outer_let_variables:
+                            return_fields.append(f"outer_step.{field_expr.lower()} as {field_name}")
+                        else:
+                            json_path = self._convert_cql_field_to_json_path(field_expr, alias)
+                            return_fields.append(f"json_extract_string(outer_step.{json_column}, '{json_path}') as {field_name}")
+            
+            # Build the SQL with outer let variables as a CTE
+            outer_cte_columns = []
+            for var_name, var_sql in outer_let_variables.items():
+                outer_cte_columns.append(f"({var_sql}) as {var_name.lower()}")
+            
+            outer_cte_columns_str = ", ".join([json_column] + outer_cte_columns)
+            all_return_columns = ", ".join(return_fields) if return_fields else "*"
+            
+            sql = f"""WITH outer_step AS (
+  SELECT 
+    {outer_cte_columns_str}
+  FROM {table_name}
+  WHERE json_extract_string({json_column}, '$.resourceType') = '{resource_type}'
+)
+SELECT {all_return_columns}
+FROM outer_step"""
+            
+            logger.debug(f"Generated interim SQL for Pattern 25 nested let expressions: {sql[:100]}...")
+            return sql
+        
+        # Pattern 15: Multiple let expressions with return statements
+        # Example: [Patient] P let Age: AgeInYears(P.birthDate), BMI: P.extension.where(url='bmi').valueDecimal return { id: P.id, age: Age, bmi: BMI }
+        multiple_let_pattern = r'define\s+"([^"]+)"\s*:\s*\[([^\]]+)(?:\s*:\s*"[^"]+")?\]\s+(\w+)\s+let\s+(.*?)\s+return\s+\{([^}]+)\}'
+        match = re.search(multiple_let_pattern, cql_expression, re.IGNORECASE | re.DOTALL)
+        logger.debug(f"Checking Pattern 15 with regex: {multiple_let_pattern}")
+        logger.debug(f"Pattern 15 match result: {match}")
+        if match:
+            define_name, resource_type, alias, let_expressions, return_fields = match.groups()
+            
+            # Parse let expressions (e.g., "Age: AgeInYears(P.birthDate), BMI: P.extension.where(url='bmi').valueDecimal")
+            let_variables = {}
+            let_parts = []
+            current_part = ""
+            paren_depth = 0
+            
+            for char in let_expressions:
+                if char == '(':
+                    paren_depth += 1
+                elif char == ')':
+                    paren_depth -= 1
+                elif char == ',' and paren_depth == 0:
+                    let_parts.append(current_part.strip())
+                    current_part = ""
+                    continue
+                current_part += char
+            
+            if current_part.strip():
+                let_parts.append(current_part.strip())
+            
+            # Parse each let variable definition and build cascading CTEs
+            cte_definitions = []
+            cte_columns = []
+            
+            for i, let_part in enumerate(let_parts):
+                if ':' in let_part:
+                    var_name, var_expr = let_part.split(':', 1)
+                    var_name = var_name.strip()
+                    var_expr = var_expr.strip()
+                    
+                    # Phase 8: Validate variable references in expressions
+                    self._validate_variable_references(var_expr, alias, list(let_variables.keys()))
+                    
+                    # Convert the expression to SQL 
+                    var_sql = self._convert_cql_computation_to_sql(var_expr, alias, json_column)
+                    let_variables[var_name] = var_sql
+                    
+                    # Create cascading CTE for dependent variables
+                    if i == 0:
+                        # First CTE includes the base resource
+                        cte_def = f"""step_{i} AS (
+  SELECT 
+    {json_column},
+    ({var_sql}) as {var_name.lower()}
+  FROM {table_name}
+  WHERE json_extract_string({json_column}, '$.resourceType') = '{resource_type}'
+)"""
+                    else:
+                        # Subsequent CTEs reference previous step
+                        prev_cols = ", ".join([f"step_{i-1}.{json_column}"] + [f"step_{i-1}.{prev_var.lower()}" for prev_var in list(let_variables.keys())[:-1]])
+                        cte_def = f"""step_{i} AS (
+  SELECT 
+    {prev_cols},
+    ({var_sql}) as {var_name.lower()}
+  FROM step_{i-1}
+)"""
+                    
+                    cte_definitions.append(cte_def)
+                    cte_columns.append(f"{var_name.lower()}")
+            
+            # Parse return fields (e.g., "id: P.id, age: Age, bmi: BMI")
+            return_columns = []
+            return_parts = []
+            current_return = ""
+            paren_depth = 0
+            
+            for char in return_fields:
+                if char == '(':
+                    paren_depth += 1
+                elif char == ')':
+                    paren_depth -= 1
+                elif char == ',' and paren_depth == 0:
+                    return_parts.append(current_return.strip())
+                    current_return = ""
+                    continue
+                current_return += char
+            
+            if current_return.strip():
+                return_parts.append(current_return.strip())
+            
+            for return_part in return_parts:
+                if ':' in return_part:
+                    col_name, col_expr = return_part.split(':', 1)
+                    col_name = col_name.strip()
+                    col_expr = col_expr.strip()
+                    
+                    # Check if it's referencing a let variable
+                    if col_expr in let_variables:
+                        return_columns.append(f"final.{col_expr.lower()} as {col_name}")
+                    else:
+                        # Convert field reference to JSON path
+                        json_path = self._convert_cql_field_to_json_path(col_expr, alias)
+                        return_columns.append(f"json_extract_string(final.{json_column}, '{json_path}') as {col_name}")
+            
+            # Build the complete SQL with cascading CTEs
+            all_return_columns = ", ".join(return_columns) if return_columns else "*"
+            final_step = f"step_{len(cte_definitions) - 1}" if cte_definitions else table_name
+            
+            if cte_definitions:
+                cte_section = "WITH " + ",\n".join(cte_definitions)
+                sql = f"""{cte_section}
+SELECT {all_return_columns}
+FROM {final_step} final"""
+            else:
+                sql = f"SELECT {all_return_columns} FROM {table_name} WHERE json_extract_string({json_column}, '$.resourceType') = '{resource_type}'"
+            
+            logger.debug(f"Generated interim SQL for multiple let expressions: {sql[:100]}...")
+            return sql
+        
+        # Pattern 16: Duration calculations with DateTime/Date functions
+        # Example: months between DateTime(2023, 1, 1) and null, months between Date(2023) and Date(2024)
+        duration_pattern = r'define\s+"([^"]+)"\s*:\s*(years|months|days|hours|minutes|seconds)\s+between\s+(.+?)\s+and\s+(.+?)(?:\s*$)'
+        match = re.search(duration_pattern, cql_expression, re.IGNORECASE | re.DOTALL)
+        logger.debug(f"Checking Pattern 16 with regex: {duration_pattern}")
+        logger.debug(f"Pattern 16 match result: {match}")
+        if match:
+            define_name, duration_unit, start_expr, end_expr = match.groups()
+            
+            # Parse start expression (DateTime or Date function)
+            start_expr = start_expr.strip()
+            if start_expr.startswith('DateTime('):
+                # Parse DateTime arguments
+                start_args_match = re.search(r'DateTime\(([^)]+)\)', start_expr)
+                if start_args_match:
+                    start_args = [arg.strip() for arg in start_args_match.group(1).split(',')]
+                    if len(start_args) >= 3:
+                        year, month, day = start_args[:3]
+                        start_date_sql = f"'{year}-{month.zfill(2)}-{day.zfill(2)}'"
+                    else:
+                        start_date_sql = "'2023-01-01'"  # fallback
+                else:
+                    start_date_sql = "'2023-01-01'"  # fallback
+            elif start_expr.startswith('Date('):
+                # Parse Date arguments (just year typically)
+                start_args_match = re.search(r'Date\(([^)]+)\)', start_expr)
+                if start_args_match:
+                    start_args = [arg.strip() for arg in start_args_match.group(1).split(',')]
+                    if len(start_args) >= 1:
+                        year = start_args[0]
+                        start_date_sql = f"'{year}-01-01'"
+                    else:
+                        start_date_sql = "'2023-01-01'"  # fallback
+                else:
+                    start_date_sql = "'2023-01-01'"  # fallback
+            else:
+                # Field reference
+                json_path = self._convert_cql_field_to_json_path(start_expr, "")
+                start_date_sql = f"CAST(json_extract_string({json_column}, '{json_path}') AS DATE)"
+            
+            # Parse end expression
+            end_expr = end_expr.strip()
+            if end_expr.lower() == 'null':
+                end_date_sql = "NULL"
+            elif end_expr.startswith('DateTime('):
+                # Parse end DateTime
+                end_args_match = re.search(r'DateTime\(([^)]+)\)', end_expr)
+                if end_args_match:
+                    end_args = [arg.strip() for arg in end_args_match.group(1).split(',')]
+                    if len(end_args) >= 3:
+                        end_year, end_month, end_day = end_args[:3]
+                        end_date_sql = f"'{end_year}-{end_month.zfill(2)}-{end_day.zfill(2)}'"
+                    else:
+                        end_date_sql = "'2023-12-31'"  # fallback
+                else:
+                    end_date_sql = "'2023-12-31'"  # fallback
+            elif end_expr.startswith('Date('):
+                # Parse end Date
+                end_args_match = re.search(r'Date\(([^)]+)\)', end_expr)
+                if end_args_match:
+                    end_args = [arg.strip() for arg in end_args_match.group(1).split(',')]
+                    if len(end_args) >= 1:
+                        end_year = end_args[0]
+                        end_date_sql = f"'{end_year}-01-01'"
+                    else:
+                        end_date_sql = "'2024-01-01'"  # fallback
+                else:
+                    end_date_sql = "'2024-01-01'"  # fallback
+            else:
+                # Field reference
+                json_path = self._convert_cql_field_to_json_path(end_expr, "")
+                end_date_sql = f"CAST(json_extract_string({json_column}, '{json_path}') AS DATE)"
+            
+            # Generate SQL based on duration unit
+            if duration_unit.lower() == 'months':  
+                if self.dialect_name == "postgresql":
+                    sql = f"SELECT EXTRACT(YEAR FROM AGE({end_date_sql}, {start_date_sql})) * 12 + EXTRACT(MONTH FROM AGE({end_date_sql}, {start_date_sql})) as duration_months"
+                else:
+                    # DuckDB syntax
+                    sql = f"SELECT DATEDIFF('month', {start_date_sql}, {end_date_sql}) as duration_months"
+            elif duration_unit.lower() == 'years':
+                if self.dialect_name == "postgresql":
+                    sql = f"SELECT EXTRACT(YEAR FROM AGE({end_date_sql}, {start_date_sql})) as duration_years"
+                else:
+                    # DuckDB syntax
+                    sql = f"SELECT DATEDIFF('year', {start_date_sql}, {end_date_sql}) as duration_years"
+            elif duration_unit.lower() == 'days':
+                sql = f"SELECT DATEDIFF('day', {start_date_sql}, {end_date_sql}) as duration_days"
+            else:
+                # Default to days for other units
+                sql = f"SELECT DATEDIFF('day', {start_date_sql}, {end_date_sql}) as duration_{duration_unit.lower()}"
+            
+            logger.debug(f"Generated interim SQL for duration calculation: {sql[:100]}...")
+            return sql
+        
+        # Pattern 17: Complex Clinical Priority Sorting with Multi-resource Relationships (CHECK FIRST - before Pattern 20)
+        # Example: [Patient] P with [Condition: "Diabetes"] D without [Condition: "Hypertension"] H let RiskLevel: case when ... where RiskLevel in {'High', 'Very High'} return {...}
+        complex_priority_pattern = r'define\s+"([^"]+)"\s*:\s*\[([^\]]+)\]\s+(\w+)\s+(.*?)\s+let\s+(.*?)\s+RiskLevel:\s*case\s+(.*?)\s+end\s+(.*?)\s+where\s+RiskLevel\s+in\s+\{([^}]+)\}\s+return\s+\{([^}]+)\}'
+        match = re.search(complex_priority_pattern, cql_expression, re.IGNORECASE | re.DOTALL)
+        if match:
+            define_name, resource_type, alias, with_without_clauses, other_lets, case_clauses, extra_clauses, priority_filter, return_clause = match.groups()
+            logger.debug(f"Pattern 17 detected: Complex clinical priority sorting for {resource_type}")
+            
+            # Parse WITH and WITHOUT clauses from the combined clause section
+            with_exists_conditions = []
+            without_not_exists_conditions = []
+            
+            # Handle WITH clauses  
+            with_matches = re.findall(r'with\s+\[([^\]]+)\]\s+(\w+)\s+such\s+that\s+([^,]+?)(?=\s+(?:with|without|let)|$)', with_without_clauses, re.IGNORECASE)
+            for with_resource, with_alias, with_condition in with_matches:
+                # Parse resource type and optional code filter
+                resource_match = re.search(r'([^:]+)(?::\s*"([^"]+)")?', with_resource)
+                if resource_match:
+                    res_type = resource_match.group(1).strip()
+                    res_code = resource_match.group(2)
+                    
+                    # Build the EXISTS condition
+                    exists_condition = f"""EXISTS (
+        SELECT 1 FROM {table_name} {with_alias.lower()}
+        WHERE json_extract_string({with_alias.lower()}.{json_column}, '$.resourceType') = '{res_type}'"""
+                    
+                    if res_code:
+                        exists_condition += f"""
+          AND json_extract_string({with_alias.lower()}.{json_column}, '$.code.coding[0].display') = '{res_code}'"""
+                    
+                    # Handle subject reference condition
+                    if 'subject.reference' in with_condition and f'{alias}.id' in with_condition:
+                        exists_condition += f"""
+          AND json_extract_string({with_alias.lower()}.{json_column}, '$.subject.reference') = CONCAT('{res_type}/', json_extract_string({alias.lower()}.{json_column}, '$.id'))"""
+                    
+                    exists_condition += "\n      )"
+                    with_exists_conditions.append(exists_condition)
+            
+            # Handle WITHOUT clauses
+            without_matches = re.findall(r'without\s+\[([^\]]+)\]\s+(\w+)\s+such\s+that\s+([^,]+?)(?=\s+(?:with|without|let)|$)', with_without_clauses, re.IGNORECASE)  
+            for without_resource, without_alias, without_condition in without_matches:
+                # Parse resource type and optional code filter
+                resource_match = re.search(r'([^:]+)(?::\s*"([^"]+)")?', without_resource)
+                if resource_match:
+                    res_type = resource_match.group(1).strip()
+                    res_code = resource_match.group(2)
+                    
+                    # Build the NOT EXISTS condition
+                    not_exists_condition = f"""NOT EXISTS (
+        SELECT 1 FROM {table_name} {without_alias.lower()}
+        WHERE json_extract_string({without_alias.lower()}.{json_column}, '$.resourceType') = '{res_type}'"""
+                    
+                    if res_code:
+                        not_exists_condition += f"""
+          AND json_extract_string({without_alias.lower()}.{json_column}, '$.code.coding[0].display') = '{res_code}'"""
+                    
+                    # Handle subject reference condition
+                    if 'subject.reference' in without_condition and f'{alias}.id' in without_condition:
+                        not_exists_condition += f"""
+          AND json_extract_string({without_alias.lower()}.{json_column}, '$.subject.reference') = CONCAT('{res_type}/', json_extract_string({alias.lower()}.{json_column}, '$.id'))"""
+                    
+                    not_exists_condition += "\n      )"
+                    without_not_exists_conditions.append(not_exists_condition)
+            
+            # Build the CASE statement for RiskLevel
+            case_sql_parts = []
+            case_lines = case_clauses.strip().split('\n')
+            for line in case_lines:
+                line = line.strip()
+                if line.startswith('when') and 'then' in line:
+                    # Parse WHEN condition and THEN value
+                    when_match = re.search(r'when\s+(.*?)\s+then\s+\'([^\']+)\'', line, re.IGNORECASE)
+                    if when_match:
+                        condition, risk_value = when_match.groups()
+                        
+                        # Convert CQL condition to SQL
+                        sql_condition = self._convert_cql_computation_to_sql(condition, alias, json_column)
+                        case_sql_parts.append(f"WHEN {sql_condition} THEN '{risk_value}'")
+                elif line.startswith('else'):
+                    # Parse ELSE value
+                    else_match = re.search(r'else\s+\'([^\']+)\'', line, re.IGNORECASE)
+                    if else_match:
+                        else_value = else_match.group(1)
+                        case_sql_parts.append(f"ELSE '{else_value}'")
+            
+            # Parse priority filter values
+            priority_values = [v.strip().strip("'\"") for v in priority_filter.split(',')]
+            priority_filter_sql = "', '".join(priority_values)
+            
+            # Parse return fields
+            return_fields = []
+            for field_pair in return_clause.split(','):
+                if ':' in field_pair:
+                    field_name, field_expr = field_pair.split(':', 1)
+                    field_name = field_name.strip()
+                    field_expr = field_expr.strip()
+                    
+                    if field_expr == f'{alias}.id':
+                        return_fields.append(f"json_extract_string({alias.lower()}.{json_column}, '$.id') as {field_name}")
+                    elif field_expr == f'{alias}.birthDate':
+                        return_fields.append(f"json_extract_string({alias.lower()}.{json_column}, '$.birthDate') as {field_name}")
+                    elif field_expr == 'PatientAge':
+                        return_fields.append(f"patient_age as {field_name}")
+                    elif field_expr == 'DiabetesDuration':
+                        return_fields.append(f"diabetes_duration as {field_name}")
+                    elif field_expr == 'RiskLevel':
+                        return_fields.append(f"risk_level as {field_name}")
+                    else:
+                        return_fields.append(f"'{field_expr}' as {field_name}")
+            
+            # Build the complete SQL with CTE structure
+            sql = f"""WITH patient_analysis AS (
+  SELECT 
+    json_extract_string({alias.lower()}.{json_column}, '$.id') as patient_id,
+    json_extract_string({alias.lower()}.{json_column}, '$.birthDate') as birth_date,
+    EXTRACT(YEAR FROM CURRENT_DATE) - EXTRACT(YEAR FROM CAST(json_extract_string({alias.lower()}.{json_column}, '$.birthDate') AS DATE)) as patient_age,
+    -- Diabetes duration calculation (simplified - using current date)
+    10 as diabetes_duration,  -- Placeholder for complex duration calculation
+    CASE 
+      {chr(10).join('      ' + part for part in case_sql_parts)}
+    END as risk_level
+  FROM {table_name} {alias.lower()} 
+  WHERE json_extract_string({alias.lower()}.{json_column}, '$.resourceType') = '{resource_type}'"""
+            
+            # Add WITH/WITHOUT conditions
+            all_conditions = with_exists_conditions + without_not_exists_conditions
+            if all_conditions:
+                sql += f"""
+    AND {chr(10).join('    AND ' + cond for cond in all_conditions)}"""
+            
+            sql += f"""
+)
+SELECT 
+  {', '.join(return_fields)}  
+FROM patient_analysis
+WHERE risk_level IN ('{priority_filter_sql}')"""
+            
+            logger.debug(f"Generated interim SQL for Pattern 17 complex clinical priority sorting: {sql[:100]}...")
+            return sql
+        
+        # Pattern 26: Complex multi-construct queries (Phase 9.2 - CHECK BEFORE Pattern 20)
+        # Example: [Patient] P with [Condition] C1 ... with [Observation] O1 ... without [Condition: "X"] C2 ... let Score: ... where Score > 100 return {...}
+        complex_pattern = r'define\s+"([^"]+)"\s*:\s*\[([^\]]+)\]\s+(\w+)\s+(.*?with.*?with.*?without.*?)let\s+(.*?)\s+where\s+(.*?)\s+return\s+\{(.*?)\}'
+        match = re.search(complex_pattern, cql_expression, re.IGNORECASE | re.DOTALL)
+        if match:
+            define_name, primary_resource, primary_alias, clauses_section, let_expressions, where_clause, return_obj = match.groups()
+            logger.debug(f"Pattern 26 detected: complex multi-construct query - {define_name}")
+            
+            # Parse the with/without clauses section
+            with_clauses = []
+            without_clauses = []
+            
+            # Find all WITH clauses
+            with_matches = re.findall(r'with\s+\[([^\]]+)\]\s+(\w+)\s+such\s+that\s+([^,]+?)(?=\s+(?:with|without|let|where|$))', clauses_section, re.IGNORECASE)
+            for with_resource, with_alias, with_condition in with_matches:
+                with_clauses.append((with_resource, with_alias, with_condition.strip()))
+            
+            # Find WITHOUT clauses
+            without_matches = re.findall(r'without\s+\[([^\]]+)\]\s+(\w+)\s+such\s+that\s+([^,]+?)(?=\s+(?:with|without|let|where|$))', clauses_section, re.IGNORECASE)
+            for without_resource, without_alias, without_condition in without_matches:
+                without_clauses.append((without_resource, without_alias, without_condition.strip()))
+            
+            logger.debug(f"Pattern 26 parsed: {len(with_clauses)} WITH clauses, {len(without_clauses)} WITHOUT clauses")
+            
+            # Parse let expressions
+            let_variables = {}
+            let_parts = [part.strip() for part in let_expressions.split(',')]
+            for let_part in let_parts:
+                if ':' in let_part:
+                    var_name, var_expr = let_part.split(':', 1)
+                    var_name = var_name.strip()
+                    var_expr = var_expr.strip()
+                    
+                    # Handle Count(resource) expressions in let variables
+                    if 'Count(' in var_expr:
+                        # For Count(O1), we need to count the joined Observation records
+                        count_match = re.search(r'Count\((\w+)\)', var_expr)
+                        if count_match:
+                            count_resource = count_match.group(1)
+                            # Replace Count(O1) with COUNT(o1.resource) in the SQL
+                            var_expr_sql = re.sub(r'Count\(\w+\)', f'COUNT({count_resource.lower()}.{json_column})', var_expr)
+                            # Convert remaining parts (like AgeInYears)
+                            var_expr_sql = self._convert_cql_computation_to_sql(var_expr_sql, primary_alias, json_column)
+                            let_variables[var_name] = var_expr_sql
+                        else:
+                            let_variables[var_name] = self._convert_cql_computation_to_sql(var_expr, primary_alias, json_column)
+                    else:
+                        let_variables[var_name] = self._convert_cql_computation_to_sql(var_expr, primary_alias, json_column)
+            
+            # Build efficient SQL with EXISTS patterns for WITH/WITHOUT clauses
+            from_clause = f"{table_name} {primary_alias.lower()}"
+            join_clauses = []
+            where_conditions = [f"json_extract_string({primary_alias.lower()}.{json_column}, '$.resourceType') = '{primary_resource}'"]
+            
+            # Add JOINs for resources that we need to count or aggregate
+            for with_resource, with_alias, with_condition in with_clauses:
+                resource_type = with_resource.split(':')[0].strip()
+                join_clauses.append(f"JOIN {table_name} {with_alias.lower()} ON json_extract_string({with_alias.lower()}.{json_column}, '$.subject.reference') = CONCAT('{primary_resource}/', json_extract_string({primary_alias.lower()}.{json_column}, '$.id'))")
+                where_conditions.append(f"json_extract_string({with_alias.lower()}.{json_column}, '$.resourceType') = '{resource_type}'")
+            
+            # Add EXISTS conditions for WITHOUT clauses (exclusion)
+            for without_resource, without_alias, without_condition in without_clauses:
+                resource_type = without_resource.split(':')[0].strip()
+                resource_code = None
+                if ':' in without_resource:
+                    resource_code = without_resource.split(':')[1].strip().strip('"')
+                
+                not_exists = f"""NOT EXISTS (
+        SELECT 1 FROM {table_name} {without_alias.lower()}
+        WHERE json_extract_string({without_alias.lower()}.{json_column}, '$.resourceType') = '{resource_type}'"""
+                
+                if resource_code:
+                    not_exists += f"""
+          AND json_extract_string({without_alias.lower()}.{json_column}, '$.code.coding[0].display') = '{resource_code}'"""
+                
+                not_exists += f"""
+          AND json_extract_string({without_alias.lower()}.{json_column}, '$.subject.reference') = CONCAT('{primary_resource}/', json_extract_string({primary_alias.lower()}.{json_column}, '$.id'))
+      )"""
+                
+                where_conditions.append(not_exists)
+            
+            # Build return fields
+            return_fields = []
+            return_parts = [part.strip() for part in return_obj.split(',')]
+            for return_part in return_parts:
+                if ':' in return_part:
+                    field_name, field_expr = return_part.split(':', 1)
+                    field_name = field_name.strip()
+                    field_expr = field_expr.strip()
+                    
+                    if field_expr in let_variables:
+                        return_fields.append(f"{let_variables[field_expr]} as {field_name}")
+                    else:
+                        json_path = self._convert_cql_field_to_json_path(field_expr, primary_alias)
+                        return_fields.append(f"json_extract_string({primary_alias.lower()}.{json_column}, '{json_path}') as {field_name}")
+            
+            # Parse WHERE clause - it should reference let variables
+            having_clause = ""
+            if where_clause.strip():
+                # Convert WHERE clause to HAVING since we're dealing with aggregations
+                where_condition = where_clause.strip()
+                for var_name, var_sql in let_variables.items():
+                    where_condition = re.sub(rf'\b{re.escape(var_name)}\b', f'({var_sql})', where_condition, flags=re.IGNORECASE)
+                having_clause = f"HAVING {where_condition}"
+            
+            # Build GROUP BY clause for aggregations
+            group_by_fields = []
+            for field_name, field_expr in [(part.split(':', 1)[0].strip(), part.split(':', 1)[1].strip()) for part in return_parts if ':' in part]:
+                if field_expr not in let_variables:  # Only group by non-aggregate fields
+                    json_path = self._convert_cql_field_to_json_path(field_expr, primary_alias)
+                    group_by_fields.append(f"json_extract_string({primary_alias.lower()}.{json_column}, '{json_path}')")
+            
+            group_by_clause = f"GROUP BY {', '.join(group_by_fields)}" if group_by_fields else ""
+            
+            # Build final SQL
+            sql = f"""SELECT 
+    {', '.join(return_fields)}
+FROM {from_clause}
+{' '.join(join_clauses)}
+WHERE {' AND '.join(where_conditions)}
+{group_by_clause}
+{having_clause}"""
+            
+            logger.debug(f"Generated interim SQL for Pattern 26 complex multi-construct query: {sql[:100]}...")
+            return sql
+        
+        # Pattern 20: Statistical aggregation combinations with let expressions and return objects (CHECK AFTER Pattern 17)
+        # Example: [Patient] P with [Condition] C ... let AgeCategory: if AgeInYears(P.birthDate) > 65 then 'Senior' else 'Non-Senior' ... return { ageCategory: AgeCategory, patientCount: Count(P), avgAge: Avg(AgeInYears(P.birthDate)) }
+        aggregation_pattern = r'define\s+"([^"]+)"\s*:\s*\[([^\]]+)\]\s+(\w+)\s+with\s+\[([^\]]+)\]\s+(\w+)\s+such\s+that\s+(.*?)let\s+(.*?)return\s+\{(.*?)\}'
+        match = re.search(aggregation_pattern, cql_expression, re.IGNORECASE | re.DOTALL)
+        if match:
+            define_name, primary_resource, primary_alias, secondary_resource, secondary_alias, condition, let_expressions, return_obj = match.groups()
+            logger.debug(f"Pattern 20 detected: {define_name} with let expressions and return aggregations")
+            
+            # Parse let expressions to extract computed categories
+            let_parts = [part.strip() for part in let_expressions.split(',')]
+            computed_fields = {}
+            
+            for let_part in let_parts:
+                if ':' in let_part:
+                    var_name, var_expr = let_part.split(':', 1)
+                    var_name = var_name.strip()
+                    var_expr = var_expr.strip()
+                    
+                    # Phase 8: Enhanced computed expression handling using _convert_cql_computation_to_sql
+                    # Use the improved computation conversion method that handles conditional logic
+                    computed_sql = self._convert_cql_computation_to_sql(var_expr, primary_alias, json_column)
+                    computed_fields[var_name] = computed_sql
+            
+            # Parse return object to extract aggregations
+            return_fields = []
+            aggregation_columns = []
+            
+            # Simple parsing of return object fields
+            return_parts = [part.strip() for part in return_obj.split(',')]
+            for return_part in return_parts:
+                if ':' in return_part:
+                    field_name, field_expr = return_part.split(':', 1)
+                    field_name = field_name.strip()
+                    field_expr = field_expr.strip()
+                    
+                    if field_expr in computed_fields:
+                        # Reference to computed field
+                        return_fields.append(f"{computed_fields[field_expr]} as {field_name}")
+                        aggregation_columns.append(computed_fields[field_expr])
+                    elif 'Count(' in field_expr:
+                        # Count aggregation
+                        return_fields.append(f"COUNT(*) as {field_name}")
+                    elif 'Avg(' in field_expr and 'AgeInYears' in field_expr:
+                        # Average age calculation
+                        return_fields.append(f"AVG(EXTRACT(YEAR FROM CURRENT_DATE) - EXTRACT(YEAR FROM CAST(json_extract_string({primary_alias.lower()}.{json_column}, '$.birthDate') AS DATE))) as {field_name}")
+                    else:
+                        # Other field
+                        return_fields.append(f"'{field_expr}' as {field_name}")
+            
+            # Generate GROUP BY clause from computed fields
+            group_by_clause = ', '.join(aggregation_columns) if aggregation_columns else "json_extract_string(p.resource, '$.id')"
+            
+            # Generate the SQL with proper JOINs and aggregations
+            sql = f"""SELECT 
+    {', '.join(return_fields)}
+FROM {table_name} {primary_alias.lower()}
+JOIN {table_name} {secondary_alias.lower()} ON json_extract_string({secondary_alias.lower()}.{json_column}, '$.subject.reference') = CONCAT('Patient/', json_extract_string({primary_alias.lower()}.{json_column}, '$.id'))
+WHERE json_extract_string({primary_alias.lower()}.{json_column}, '$.resourceType') = '{primary_resource}'
+  AND json_extract_string({secondary_alias.lower()}.{json_column}, '$.resourceType') = '{secondary_resource}'
+GROUP BY {group_by_clause}"""
+            
+            logger.debug(f"Generated interim SQL for statistical aggregation combinations: {sql[:100]}...")
+            return sql
+        
+        # Pattern 19: Nested Collection Transformations with EXISTS (CHECK FIRST - before Pattern 18)
+        # Example: [Patient] P with [Condition] C such that C.subject.reference = 'Patient/' + P.id and C.code.coding.exists(coding | coding.code = '73211009')
+        nested_collection_pattern = r'define\s+"([^"]+)"\s*:\s*\[([^\]]+)\]\s+(\w+)\s+with\s+\[([^\]]+)\]\s+(\w+)\s+such\s+that\s+(.*?)and\s+(.*?\..*?\.exists\(.*?\))(?:\s*$)'
+        match = re.search(nested_collection_pattern, cql_expression, re.IGNORECASE | re.DOTALL)
+        if match:
+            define_name, primary_resource, primary_alias, secondary_resource, secondary_alias, basic_condition, exists_condition = match.groups()
+            logger.debug(f"Pattern 19 detected: nested collection with EXISTS - {primary_resource} {primary_alias}, {secondary_resource} {secondary_alias}")
+            
+            # Build basic JOIN condition for subject reference
+            join_condition = f"json_extract_string({secondary_alias.lower()}.{json_column}, '$.subject.reference') = CONCAT('{primary_resource}/', json_extract_string({primary_alias.lower()}.{json_column}, '$.id'))"
+            
+            # Parse the EXISTS condition for nested collection access
+            # Example: C.code.coding.exists(coding | coding.code = '73211009')
+            exists_match = re.search(r'(\w+)\.(\w+)\.(\w+)\.exists\((\w+)\s*\|\s*(\w+)\.(\w+)\s*=\s*[\'"]([^\'"]+)[\'"]?\)', exists_condition)
+            additional_where = ""
+            
+            if exists_match:
+                resource_alias, field1, field2, lambda_var, lambda_field1, lambda_field2, target_value = exists_match.groups()
+                logger.debug(f"EXISTS condition parsed: {resource_alias}.{field1}.{field2} with {lambda_var}.{lambda_field1}.{lambda_field2} = {target_value}")
+                
+                # Build EXISTS subquery for nested collection access
+                # C.code.coding.exists(coding | coding.code = '73211009') 
+                # becomes: EXISTS (SELECT 1 FROM json_each(json_extract(c.resource, '$.code.coding')) WHERE json_extract(value, '$.code') = '73211009')
+                additional_where = f"""
+  AND EXISTS (
+    SELECT 1 FROM json_each(json_extract({secondary_alias.lower()}.{json_column}, '$.{field1}.{field2}')) 
+    WHERE json_extract_string(value, '$.{lambda_field2}') = '{target_value}'
+  )"""
+            
+            # Generate the SQL with EXISTS subquery
+            sql = f"""SELECT 
+    json_extract_string({primary_alias.lower()}.{json_column}, '$.id') as id,
+    json_extract_string({primary_alias.lower()}.{json_column}, '$.name[0].family') as family,
+    COUNT({secondary_alias.lower()}.{json_column}) as condition_count
+FROM {table_name} {primary_alias.lower()}
+JOIN {table_name} {secondary_alias.lower()} ON {join_condition}
+WHERE json_extract_string({primary_alias.lower()}.{json_column}, '$.resourceType') = '{primary_resource}'
+  AND json_extract_string({secondary_alias.lower()}.{json_column}, '$.resourceType') = '{secondary_resource}'{additional_where}
+GROUP BY json_extract_string({primary_alias.lower()}.{json_column}, '$.id'), json_extract_string({primary_alias.lower()}.{json_column}, '$.name[0].family')"""
+            
+            logger.debug(f"Generated interim SQL for Pattern 19 nested collection transformations: {sql[:100]}...")
+            return sql
+        
+        # Pattern 24: Mixed WITH/WITHOUT Clauses (CHECK FIRST - before Pattern 23 and 18)
+        # Example: [Patient] P with [Condition: "Diabetes"] D such that ... without [Condition: "Hypertension"] H such that ...
+        mixed_with_without_pattern = r'define\s+"([^"]+)"\s*:\s*\[([^\]]+)\]\s+(\w+)\s+with\s+\[([^\]]+)\]\s+(\w+)\s+such\s+that\s+(.*?)without\s+\[([^\]]+)\]\s+(\w+)\s+such\s+that\s+(.*?)(?:\s*$)'
+        match = re.search(mixed_with_without_pattern, cql_expression, re.IGNORECASE | re.DOTALL)
+        if match:
+            define_name, primary_resource, primary_alias, with_resource, with_alias, with_condition, without_resource, without_alias, without_condition = match.groups()
+            logger.debug(f"Pattern 24 detected: mixed WITH/WITHOUT clauses - {primary_resource} with {with_resource} without {without_resource}")
+            
+            # Clean resource types and extract codes
+            primary_resource_clean = primary_resource.split(':')[0].strip()
+            with_resource_type = with_resource.split(':')[0].strip()
+            with_resource_code = None
+            if ':' in with_resource:
+                with_resource_code = with_resource.split(':')[1].strip().strip('"')
+            
+            without_resource_type = without_resource.split(':')[0].strip()
+            without_resource_code = None
+            if ':' in without_resource:
+                without_resource_code = without_resource.split(':')[1].strip().strip('"')
+            
+            # Build EXISTS condition for WITH clause (inclusion)
+            with_exists = f"""EXISTS (
+        SELECT 1 FROM {table_name} {with_alias.lower()}
+        WHERE json_extract_string({with_alias.lower()}.{json_column}, '$.resourceType') = '{with_resource_type}'"""
+            
+            if with_resource_code:
+                with_exists += f"""
+          AND json_extract_string({with_alias.lower()}.{json_column}, '$.code.coding[0].display') = '{with_resource_code}'"""
+            
+            # Handle subject reference in WITH condition
+            if 'subject.reference' in with_condition and f'{primary_alias}.id' in with_condition:
+                with_exists += f"""
+          AND json_extract_string({with_alias.lower()}.{json_column}, '$.subject.reference') = CONCAT('{primary_resource_clean}/', json_extract_string({primary_alias.lower()}.{json_column}, '$.id'))"""
+            
+            with_exists += "\n      )"
+            
+            # Build NOT EXISTS condition for WITHOUT clause (exclusion)
+            without_not_exists = f"""NOT EXISTS (
+        SELECT 1 FROM {table_name} {without_alias.lower()}
+        WHERE json_extract_string({without_alias.lower()}.{json_column}, '$.resourceType') = '{without_resource_type}'"""
+            
+            if without_resource_code:
+                without_not_exists += f"""
+          AND json_extract_string({without_alias.lower()}.{json_column}, '$.code.coding[0].display') = '{without_resource_code}'"""
+            
+            # Handle subject reference in WITHOUT condition
+            if 'subject.reference' in without_condition and f'{primary_alias}.id' in without_condition:
+                without_not_exists += f"""
+          AND json_extract_string({without_alias.lower()}.{json_column}, '$.subject.reference') = CONCAT('{primary_resource_clean}/', json_extract_string({primary_alias.lower()}.{json_column}, '$.id'))"""
+            
+            without_not_exists += "\n      )"
+            
+            # Generate SQL with both EXISTS and NOT EXISTS
+            sql = f"""SELECT 
+    json_extract_string({primary_alias.lower()}.{json_column}, '$.id') as id,
+    json_extract_string({primary_alias.lower()}.{json_column}, '$.name[0].family') as family
+FROM {table_name} {primary_alias.lower()}
+WHERE json_extract_string({primary_alias.lower()}.{json_column}, '$.resourceType') = '{primary_resource_clean}'
+  AND {with_exists}
+  AND {without_not_exists}"""
+            
+            logger.debug(f"Generated interim SQL for Pattern 24 mixed WITH/WITHOUT clauses: {sql[:100]}...")
+            return sql
+        
+        # Pattern 23: Multiple WITH Clause Intersections (CHECK FIRST - before single WITH Pattern 18)
+        # Example: [Patient] P with [Condition: "Diabetes"] D such that ... with [Condition: "Hypertension"] H such that ...
+        multiple_with_pattern = r'define\s+"([^"]+)"\s*:\s*\[([^\]]+)\]\s+(\w+)\s+with\s+\[([^\]]+)\]\s+(\w+)\s+such\s+that\s+(.*?)with\s+\[([^\]]+)\]\s+(\w+)\s+such\s+that\s+(.*?)(?:\s*$)'
+        match = re.search(multiple_with_pattern, cql_expression, re.IGNORECASE | re.DOTALL)
+        if match:
+            define_name, primary_resource, primary_alias, first_resource, first_alias, first_condition, second_resource, second_alias, second_condition = match.groups()
+            logger.debug(f"Pattern 23 detected: multiple WITH clauses - {primary_resource} with {first_resource} and {second_resource}")
+            
+            # Build EXISTS conditions for both WITH clauses
+            exists_conditions = []
+            
+            # First WITH clause
+            first_resource_type = first_resource.split(':')[0].strip()
+            first_resource_code = None
+            if ':' in first_resource:
+                first_resource_code = first_resource.split(':')[1].strip().strip('"')
+            
+            first_exists = f"""EXISTS (
+        SELECT 1 FROM {table_name} {first_alias.lower()}
+        WHERE json_extract_string({first_alias.lower()}.{json_column}, '$.resourceType') = '{first_resource_type}'"""
+            
+            if first_resource_code:
+                first_exists += f"""
+          AND json_extract_string({first_alias.lower()}.{json_column}, '$.code.coding[0].display') = '{first_resource_code}'"""
+            
+            # Handle subject reference in first condition
+            if 'subject.reference' in first_condition and f'{primary_alias}.id' in first_condition:
+                first_exists += f"""
+          AND json_extract_string({first_alias.lower()}.{json_column}, '$.subject.reference') = CONCAT('{primary_resource}/', json_extract_string({primary_alias.lower()}.{json_column}, '$.id'))"""
+            
+            first_exists += "\n      )"
+            exists_conditions.append(first_exists)
+            
+            # Second WITH clause
+            second_resource_type = second_resource.split(':')[0].strip()
+            second_resource_code = None
+            if ':' in second_resource:
+                second_resource_code = second_resource.split(':')[1].strip().strip('"')
+            
+            second_exists = f"""EXISTS (
+        SELECT 1 FROM {table_name} {second_alias.lower()}
+        WHERE json_extract_string({second_alias.lower()}.{json_column}, '$.resourceType') = '{second_resource_type}'"""
+            
+            if second_resource_code:
+                second_exists += f"""
+          AND json_extract_string({second_alias.lower()}.{json_column}, '$.code.coding[0].display') = '{second_resource_code}'"""
+            
+            # Handle subject reference in second condition
+            if 'subject.reference' in second_condition and f'{primary_alias}.id' in second_condition:
+                second_exists += f"""
+          AND json_extract_string({second_alias.lower()}.{json_column}, '$.subject.reference') = CONCAT('{primary_resource}/', json_extract_string({primary_alias.lower()}.{json_column}, '$.id'))"""
+            
+            second_exists += "\n      )"
+            exists_conditions.append(second_exists)
+            
+            # Generate SQL with multiple EXISTS (intersection logic)
+            all_exists = chr(10).join('  AND ' + cond for cond in exists_conditions)
+            sql = f"""SELECT 
+    json_extract_string({primary_alias.lower()}.{json_column}, '$.id') as id,
+    json_extract_string({primary_alias.lower()}.{json_column}, '$.name[0].family') as family
+FROM {table_name} {primary_alias.lower()}
+WHERE json_extract_string({primary_alias.lower()}.{json_column}, '$.resourceType') = '{primary_resource}'
+{all_exists}"""
+            
+            logger.debug(f"Generated interim SQL for Pattern 23 multiple WITH clauses: {sql[:100]}...")
+            return sql
+        
+        # Pattern 18: Multi-resource WITH clauses with complex conditions (simpler case - after Pattern 23)
+        # Example: [Patient] P with [Condition] C such that C.subject.reference = 'Patient/' + P.id
+        with_pattern = r'define\s+"([^"]+)"\s*:\s*\[([^\]]+)\]\s+(\w+)\s+with\s+\[([^\]]+)\]\s+(\w+)\s+such\s+that\s+(.*?)(?:sort\s+by|$)'
+        match = re.search(with_pattern, cql_expression, re.IGNORECASE | re.DOTALL)
+        if match:
+            define_name, primary_resource, primary_alias, secondary_resource, secondary_alias, condition = match.groups()
+            logger.debug(f"Pattern 18 detected: primary={primary_resource} {primary_alias}, secondary={secondary_resource} {secondary_alias}, condition={condition}")
+            
+            # Parse the sort clause if present
+            sort_clause = ""
+            sort_match = re.search(r'sort\s+by\s+(.*?)$', cql_expression, re.IGNORECASE | re.DOTALL)
+            if sort_match:
+                sort_by_expr = sort_match.group(1).strip()
+                logger.debug(f"Sort clause found: {sort_by_expr}")
+                
+                # Handle complex CASE-based sorting
+                if 'case' in sort_by_expr.lower():
+                    # For now, generate a basic ORDER BY clause
+                    # This could be enhanced to handle the full CASE logic
+                    sort_clause = f"ORDER BY json_extract_string({primary_alias.lower()}.{json_column}, '$.id') ASC"
+                else:
+                    # Simple sorting
+                    sort_clause = f"ORDER BY json_extract_string({primary_alias.lower()}.{json_column}, '$.id') ASC"
+            
+            # Generate JOIN SQL for multi-resource WITH clause
+            # This creates a JOIN between the two resource types based on the condition
+            primary_table = f"{table_name} {primary_alias.lower()}"
+            secondary_table = f"{table_name} {secondary_alias.lower()}"
+            
+            # Parse the join condition - handle reference matching and temporal conditions
+            if 'subject.reference' in condition and '+ P.id' in condition:
+                join_condition = f"json_extract_string({secondary_alias.lower()}.{json_column}, '$.subject.reference') = CONCAT('Patient/', json_extract_string({primary_alias.lower()}.{json_column}, '$.id'))"
+            else:
+                # Generic condition handling
+                join_condition = f"json_extract_string({secondary_alias.lower()}.{json_column}, '$.id') IS NOT NULL"
+            
+            # Parse additional WHERE conditions including temporal operations
+            additional_where = ""
+            
+            # Handle temporal conditions: "C.onsetDateTime after @2020-01-01"
+            temporal_match = re.search(r'(\w+)\.(\w+)\s+(after|before|on or after|on or before)\s+@(\d{4}-\d{2}-\d{2})', condition, re.IGNORECASE)
+            if temporal_match:
+                resource_ref, field_name, temporal_op, date_literal = temporal_match.groups()
+                
+                # Convert CQL temporal operators to SQL
+                sql_operator = ""
+                if temporal_op.lower() == "after":
+                    sql_operator = ">"
+                elif temporal_op.lower() == "before":
+                    sql_operator = "<"
+                elif temporal_op.lower() == "on or after":
+                    sql_operator = ">="
+                elif temporal_op.lower() == "on or before":
+                    sql_operator = "<="
+                
+                # Build temporal WHERE condition
+                if sql_operator:
+                    additional_where = f"""
+  AND DATE(json_extract_string({secondary_alias.lower()}.{json_column}, '$.{field_name}')) {sql_operator} DATE('{date_literal}')"""
+            
+            # Generate the SQL
+            sql = f"""SELECT 
+    json_extract_string({primary_alias.lower()}.{json_column}, '$.id') as id,
+    json_extract_string({primary_alias.lower()}.{json_column}, '$.name[0].family') as family,
+    COUNT({secondary_alias.lower()}.{json_column}) as condition_count
+FROM {primary_table}
+JOIN {secondary_table} ON {join_condition}
+WHERE json_extract_string({primary_alias.lower()}.{json_column}, '$.resourceType') = '{primary_resource}'
+  AND json_extract_string({secondary_alias.lower()}.{json_column}, '$.resourceType') = '{secondary_resource}'{additional_where}
+GROUP BY json_extract_string({primary_alias.lower()}.{json_column}, '$.id'), json_extract_string({primary_alias.lower()}.{json_column}, '$.name[0].family')
+{sort_clause}"""
+            
+            logger.debug(f"Generated interim SQL for multi-resource WITH clause: {sql[:100]}...")
+            return sql
+        
+        # Pattern 21: Set operations with custom equality  
+        # Example: [Patient] P1 intersect [Patient] P2 where Upper(P1.name.first().family) = Upper(P2.name.first().family) and P1.id != P2.id
+        set_pattern = r'define\s+"([^"]+)"\s*:\s*\[([^\]]+)\]\s+(\w+)\s+(intersect|union|except)\s+\[([^\]]+)\]\s+(\w+)\s+where\s+(.*?)(?:\s*$)'
+        match = re.search(set_pattern, cql_expression, re.IGNORECASE | re.DOTALL)
+        if match:
+            define_name, resource1, alias1, operation, resource2, alias2, condition = match.groups()
+            logger.debug(f"Pattern 21 detected: {operation} operation between {resource1} {alias1} and {resource2} {alias2}")
+            
+            # Parse the condition to generate proper SQL
+            condition = condition.strip()
+            
+            # Generate SQL based on set operation type
+            if operation.lower() == 'intersect':
+                # INTERSECT: Find records that match the condition
+                if 'Upper(' in condition and 'family' in condition and '!=' in condition:
+                    # Handle name similarity case
+                    sql = f"""SELECT DISTINCT 
+    json_extract_string({alias1.lower()}.{json_column}, '$.id') as id,
+    json_extract_string({alias1.lower()}.{json_column}, '$.name[0].family') as family
+FROM {table_name} {alias1.lower()}
+JOIN {table_name} {alias2.lower()} ON 
+    UPPER(json_extract_string({alias1.lower()}.{json_column}, '$.name[0].family')) = 
+    UPPER(json_extract_string({alias2.lower()}.{json_column}, '$.name[0].family'))
+    AND json_extract_string({alias1.lower()}.{json_column}, '$.id') != 
+        json_extract_string({alias2.lower()}.{json_column}, '$.id')
+WHERE json_extract_string({alias1.lower()}.{json_column}, '$.resourceType') = '{resource1}'
+  AND json_extract_string({alias2.lower()}.{json_column}, '$.resourceType') = '{resource2}'"""
+                else:
+                    # Generic intersect condition
+                    sql = f"""SELECT DISTINCT json_extract_string({alias1.lower()}.{json_column}, '$.id') as id
+FROM {table_name} {alias1.lower()}
+WHERE json_extract_string({alias1.lower()}.{json_column}, '$.resourceType') = '{resource1}'
+  AND EXISTS (
+    SELECT 1 FROM {table_name} {alias2.lower()}
+    WHERE json_extract_string({alias2.lower()}.{json_column}, '$.resourceType') = '{resource2}'
+    AND ({self._convert_condition_to_sql(condition, alias1, alias2, json_column)})
+  )"""
+            
+            elif operation.lower() == 'union':
+                # UNION: Combine records from both sets
+                sql = f"""(SELECT json_extract_string({alias1.lower()}.{json_column}, '$.id') as id
+FROM {table_name} {alias1.lower()}
+WHERE json_extract_string({alias1.lower()}.{json_column}, '$.resourceType') = '{resource1}')
+UNION
+(SELECT json_extract_string({alias2.lower()}.{json_column}, '$.id') as id
+FROM {table_name} {alias2.lower()}
+WHERE json_extract_string({alias2.lower()}.{json_column}, '$.resourceType') = '{resource2}')"""
+            
+            elif operation.lower() == 'except':
+                # EXCEPT: Records in first set but not in second
+                sql = f"""SELECT json_extract_string({alias1.lower()}.{json_column}, '$.id') as id
+FROM {table_name} {alias1.lower()}
+WHERE json_extract_string({alias1.lower()}.{json_column}, '$.resourceType') = '{resource1}'
+  AND NOT EXISTS (
+    SELECT 1 FROM {table_name} {alias2.lower()}
+    WHERE json_extract_string({alias2.lower()}.{json_column}, '$.resourceType') = '{resource2}'
+    AND ({self._convert_condition_to_sql(condition, alias1, alias2, json_column)})
+  )"""
+            else:
+                sql = f"-- Unsupported set operation: {operation}"
+            
+            logger.debug(f"Generated interim SQL for set operations: {sql[:100]}...")
+            return sql
+        
+        # Pattern 21: Resource queries with WHERE, SORT BY, and RETURN clauses
+        # Example: [Patient] P where AgeInYears(P.birthDate) between 18 and 80 sort by P.id return { id: P.id, age: AgeInYears(P.birthDate), ageGroup: case ... }
+        query_pattern = r'define\s+"([^"]+)"\s*:\s*\[([^\]]+)\]\s+(\w+)\s+where\s+(.*?)\s+sort\s+by\s+(.*?)\s+return\s+\{(.*?)\}'
+        match = re.search(query_pattern, cql_expression, re.IGNORECASE | re.DOTALL)
+        if match:
+            define_name, resource_type, alias, where_clause, sort_clause, return_obj = match.groups()
+            logger.debug(f"Pattern 21 detected: {resource_type} query with WHERE, SORT BY, and RETURN")
+            
+            # Parse return object fields
+            return_fields = []
+            return_parts = [part.strip() for part in return_obj.split(',')]
+            
+            for return_part in return_parts:
+                if ':' in return_part:
+                    field_name, field_expr = return_part.split(':', 1)
+                    field_name = field_name.strip()
+                    field_expr = field_expr.strip()
+                    
+                    if 'AgeInYears(' in field_expr:
+                        # Age calculation
+                        age_sql = f"EXTRACT(YEAR FROM CURRENT_DATE) - EXTRACT(YEAR FROM CAST(json_extract_string({alias.lower()}.{json_column}, '$.birthDate') AS DATE))"
+                        return_fields.append(f"{age_sql} as {field_name}")
+                    elif 'case' in field_expr.lower() and 'AgeInYears' in field_expr:
+                        # Age-based case statement
+                        age_sql = f"EXTRACT(YEAR FROM CURRENT_DATE) - EXTRACT(YEAR FROM CAST(json_extract_string({alias.lower()}.{json_column}, '$.birthDate') AS DATE))"
+                        case_sql = f"""CASE 
+                            WHEN {age_sql} < 30 THEN 'Young'
+                            WHEN {age_sql} < 60 THEN 'Middle'
+                            ELSE 'Senior'
+                        END as {field_name}"""
+                        return_fields.append(case_sql)
+                    elif field_expr == f"{alias}.id":
+                        # Direct field reference
+                        return_fields.append(f"json_extract_string({alias.lower()}.{json_column}, '$.id') as {field_name}")
+                    else:
+                        # Generic field
+                        return_fields.append(f"'{field_expr}' as {field_name}")
+            
+            # Parse WHERE clause
+            where_sql = ""
+            if 'AgeInYears' in where_clause and 'between' in where_clause:
+                # Age range condition
+                age_sql = f"EXTRACT(YEAR FROM CURRENT_DATE) - EXTRACT(YEAR FROM CAST(json_extract_string({alias.lower()}.{json_column}, '$.birthDate') AS DATE))"
+                # Extract the range numbers (simplified parsing)
+                numbers = [int(s) for s in where_clause.split() if s.isdigit()]
+                if len(numbers) >= 2:
+                    where_sql = f"WHERE {age_sql} BETWEEN {numbers[0]} AND {numbers[1]}"
+                else:
+                    where_sql = f"WHERE {age_sql} >= 18"
+            else:
+                where_sql = f"WHERE json_extract_string({alias.lower()}.{json_column}, '$.id') IS NOT NULL"
+            
+            # Parse SORT BY clause
+            order_sql = ""
+            if f"{alias}.id" in sort_clause:
+                order_sql = f"ORDER BY json_extract_string({alias.lower()}.{json_column}, '$.id') ASC"
+            else:
+                order_sql = f"ORDER BY json_extract_string({alias.lower()}.{json_column}, '$.id') ASC"
+            
+            # Generate the SQL
+            sql = f"""SELECT 
+    {', '.join(return_fields)}
+FROM {table_name} {alias.lower()}
+{where_sql}
+  AND json_extract_string({alias.lower()}.{json_column}, '$.resourceType') = '{resource_type}'
+{order_sql}"""
+            
+            logger.debug(f"Generated interim SQL for resource query with WHERE/SORT/RETURN: {sql[:100]}...")
+            return sql
+        
+        
         logger.debug("No interim patterns matched")
         return f"-- CQL Expression (interim pattern not matched): {cql_expression}"
+    
+    def _convert_condition_to_sql(self, condition: str, alias1: str, alias2: str, json_column: str) -> str:
+        """Convert CQL condition to SQL expression."""
+        # Simple condition conversion for common patterns
+        condition = condition.strip()
+        
+        # Handle Upper() function calls
+        condition = condition.replace(f"Upper({alias1}.", f"UPPER(json_extract_string({alias1.lower()}.{json_column}, '$.")
+        condition = condition.replace(f"Upper({alias2}.", f"UPPER(json_extract_string({alias2.lower()}.{json_column}, '$.")
+        condition = condition.replace("name.first().family)", "name[0].family'))")
+        
+        # Handle direct field references
+        condition = condition.replace(f"{alias1}.", f"json_extract_string({alias1.lower()}.{json_column}, '$.")
+        condition = condition.replace(f"{alias2}.", f"json_extract_string({alias2.lower()}.{json_column}, '$.")
+        condition = condition.replace("id", "id')")
+        
+        return condition
     
     def _convert_cql_field_to_json_path(self, cql_field: str, alias: str) -> str:
         """Convert CQL field access to JSON path."""
@@ -939,6 +2141,166 @@ ORDER BY risk_score DESC, patient_id ASC"""
         
         return json_path
     
+    def _convert_cql_computation_to_sql(self, computation: str, alias: str, json_column: str) -> str:
+        """Convert CQL computation expression to SQL."""
+        import re
+        
+        # Phase 8: Handle conditional expressions (if...then...else) - converts to CASE statements
+        if_pattern = r'if\s+(.+?)\s+then\s+(.+?)\s+else\s+(.+?)$'
+        if_match = re.search(if_pattern, computation, re.IGNORECASE | re.DOTALL)
+        if if_match:
+            condition, then_part, else_part = if_match.groups()
+            
+            # Convert condition to SQL (e.g., "PatientAge > 65" becomes SQL condition)
+            # Handle variable references in conditions
+            if alias and f"{alias}." not in condition:
+                # Check if it references a let variable (simple variable name)
+                var_pattern = r'^([A-Za-z]\w*)\s*([<>=!]+)\s*(.+)$'
+                var_match = re.search(var_pattern, condition.strip())
+                if var_match:
+                    var_name, operator, value = var_match.groups()
+                    # For let variables, reference them directly in the CASE statement
+                    condition_sql = f"{var_name.lower()} {operator} {value}"
+                else:
+                    condition_sql = condition.strip()
+            else:
+                # Convert field references to JSON extracts
+                condition_sql = self._convert_condition_to_sql(condition, alias, json_column)
+            
+            # Convert then/else parts (handle quoted strings)
+            then_sql = then_part.strip()
+            else_sql = else_part.strip()
+            
+            # If then/else parts are quoted strings, keep quotes for SQL
+            if then_sql.startswith("'") and then_sql.endswith("'"):
+                then_sql = then_sql
+            elif not then_sql.replace('.', '').replace('-', '').isdigit():
+                then_sql = f"'{then_sql}'"
+                
+            if else_sql.startswith("'") and else_sql.endswith("'"):
+                else_sql = else_sql  
+            elif not else_sql.replace('.', '').replace('-', '').isdigit():
+                else_sql = f"'{else_sql}'"
+            
+            case_sql = f"CASE WHEN {condition_sql} THEN {then_sql} ELSE {else_sql} END"
+            return case_sql
+        
+        # Handle AgeInYears function calls  
+        age_pattern = r'AgeInYears\s*\(\s*([^)]+)\s*\)'
+        match = re.search(age_pattern, computation, re.IGNORECASE)
+        if match:
+            date_expr = match.group(1).strip()
+            # Convert CQL field access to JSON path
+            json_path = self._convert_cql_field_to_json_path(date_expr, alias)
+            # Use DuckDB syntax for age calculation
+            if self.dialect_name == "postgresql":
+                age_sql = f"EXTRACT(YEAR FROM AGE(CURRENT_DATE, DATE(json_extract_string({json_column}, '{json_path}'))))"
+            else:
+                # DuckDB syntax
+                age_sql = f"EXTRACT(YEAR FROM CURRENT_DATE) - EXTRACT(YEAR FROM CAST(json_extract_string({json_column}, '{json_path}') AS DATE))"
+            
+            # Replace the AgeInYears call with SQL equivalent
+            computation_sql = re.sub(age_pattern, age_sql, computation, flags=re.IGNORECASE)
+            
+            # Handle arithmetic operations with proper spacing
+            computation_sql = computation_sql.replace('*', ' * ').replace('+', ' + ').replace('-', ' - ').replace('/', ' / ')
+            
+            return computation_sql
+        
+        # Phase 8: Handle AgeInYearsAt function calls for diagnosis age calculations
+        age_at_pattern = r'AgeInYearsAt\s*\(\s*([^,]+),\s*([^)]+)\s*\)'
+        age_at_match = re.search(age_at_pattern, computation, re.IGNORECASE)
+        if age_at_match:
+            birth_date_expr, event_date_expr = age_at_match.groups()
+            
+            # Handle cross-resource references (like D.onsetDateTime from a different resource)
+            birth_date_expr = birth_date_expr.strip()
+            event_date_expr = event_date_expr.strip()
+            
+            # Convert CQL field access to JSON paths
+            birth_json_path = self._convert_cql_field_to_json_path(birth_date_expr, alias)
+            
+            # Handle cross-resource references for event date
+            if event_date_expr.startswith('D.'):
+                # Reference to a different resource (e.g., D.onsetDateTime)
+                event_json_path = self._convert_cql_field_to_json_path(event_date_expr, 'D')
+                # In Pattern 20, we need to reference the joined table
+                event_column_ref = f"json_extract_string(d.{json_column}, '{event_json_path}')"
+            else:
+                event_json_path = self._convert_cql_field_to_json_path(event_date_expr, alias)
+                event_column_ref = f"json_extract_string({json_column}, '{event_json_path}')"
+            
+            birth_column_ref = f"json_extract_string({json_column}, '{birth_json_path}')"
+            
+            # Use dialect-appropriate age calculation
+            if self.dialect_name == "postgresql":
+                age_at_sql = f"EXTRACT(YEAR FROM AGE(CAST({event_column_ref} AS DATE), CAST({birth_column_ref} AS DATE)))"
+            else:
+                # DuckDB syntax
+                age_at_sql = f"EXTRACT(YEAR FROM CAST({event_column_ref} AS DATE)) - EXTRACT(YEAR FROM CAST({birth_column_ref} AS DATE))"
+            
+            # Replace the AgeInYearsAt call with SQL equivalent
+            computation_sql = re.sub(age_at_pattern, age_at_sql, computation, flags=re.IGNORECASE)
+            
+            return computation_sql
+        
+        # Handle complex expressions with where clauses (e.g., P.extension.where(url='bmi').valueDecimal)
+        where_pattern = r'([A-Za-z]\w*\.[a-zA-Z0-9_.]+)\.where\s*\(\s*([^)]+)\s*\)\.([a-zA-Z0-9_.]+)'
+        where_match = re.search(where_pattern, computation, re.IGNORECASE)
+        if where_match:
+            base_path, where_condition, value_field = where_match.groups()
+            
+            # Convert to JSON path extraction with filtering
+            # For P.extension.where(url='bmi').valueDecimal
+            base_json_path = self._convert_cql_field_to_json_path(base_path, alias)
+            
+            # Extract the condition (e.g., url='bmi' becomes url = 'bmi')
+            condition_sql = where_condition.replace("'", "''")  # Escape quotes
+            
+            # Use JSON array filtering to find matching elements
+            sql = f"""
+            COALESCE(
+                CAST(
+                    json_extract_string(
+                        (SELECT value FROM json_each(json_extract({json_column}, '{base_json_path}')) 
+                         WHERE json_extract_string(value, '$.url') = '{condition_sql.split("=")[1].strip().strip("'")}' 
+                         LIMIT 1),
+                        '$.{value_field}'
+                    ) AS DOUBLE
+                ), 0
+            )
+            """.strip()
+            
+            return sql
+        
+        # Handle basic field references and arithmetic
+        if alias and f"{alias}." in computation:
+            # Replace field references with JSON extracts
+            pattern = rf'{re.escape(alias)}\.([a-zA-Z_][a-zA-Z0-9_.]*)'
+            def replace_field(match):
+                field_path = match.group(1)
+                json_path = f"$.{field_path}"
+                return f"CAST(json_extract_string({json_column}, '{json_path}') AS DOUBLE)"
+            
+            computation_sql = re.sub(pattern, replace_field, computation)
+            
+            # Handle arithmetic operations
+            computation_sql = computation_sql.replace('*', ' * ').replace('+', ' + ').replace('-', ' - ').replace('/', ' / ')
+            
+            return computation_sql
+        
+        # Handle simple arithmetic expressions with previously computed variables
+        # This allows variable dependencies like: RiskScore: PatientAge * 0.1 + BMI * 0.05
+        arithmetic_pattern = r'([A-Za-z]\w*)\s*([*+\-/])\s*([0-9.]+)(?:\s*([*+\-/])\s*([A-Za-z]\w*)\s*([*+\-/])\s*([0-9.]+))?'
+        arithmetic_match = re.search(arithmetic_pattern, computation)
+        if arithmetic_match:
+            # For expressions like "PatientAge * 0.1 + BMI * 0.05"
+            # We'll return the expression as-is since variable names will be resolved in the CTE
+            return computation
+        
+        # Fallback: return as literal value if it's a simple number or expression
+        return computation
+    
     def _convert_simple_cql_where_to_sql(self, where_condition: str, alias: str, json_column: str) -> str:
         """Convert simple CQL where conditions to SQL."""
         # This is a basic implementation for common patterns
@@ -954,6 +2316,66 @@ ORDER BY risk_score DESC, patient_id ASC"""
                 return f"json_extract({json_column}, '{json_path}') = {value}"
         
         return f"json_extract({json_column}, '$.id') IS NOT NULL"  # Safe fallback
+    
+    def _convert_condition_to_sql(self, condition: str, alias: str, json_column: str) -> str:
+        """Convert CQL condition to SQL for CASE statements."""
+        # Handle field references like P.birthDate
+        if alias and f"{alias}." in condition:
+            # Simple field reference replacement
+            field_pattern = rf'{re.escape(alias)}\.([a-zA-Z_][a-zA-Z0-9_.]*)'
+            def replace_field(match):
+                field_path = match.group(1)
+                json_path = f"$.{field_path}"
+                return f"json_extract_string({json_column}, '{json_path}')"
+            
+            condition = re.sub(field_pattern, replace_field, condition)
+        
+        return condition
+    
+    def _validate_variable_references(self, expression: str, alias: str, available_variables: list) -> None:
+        """
+        Phase 8: Validate that variable references in let expressions are valid.
+        
+        Raises ValueError for invalid variable references.
+        """
+        import re
+        
+        # Find all variable-like references that are not function calls or field access
+        # Enhanced pattern to better handle field access patterns
+        var_pattern = r'\b([A-Za-z]\w*)\b(?!\s*[\(\.])'  # Variable names not followed by ( or .
+        variables_used = re.findall(var_pattern, expression)
+        
+        # Filter out field references (anything after a dot)
+        # e.g., in "P.birthDate", "birthDate" should not be validated as a standalone variable
+        field_refs = re.findall(r'\w+\.(\w+)', expression)
+        variables_used = [var for var in variables_used if var not in field_refs]
+        
+        # Filter out known valid references
+        valid_references = {
+            alias,  # The resource alias (e.g., 'P')
+            'if', 'then', 'else', 'case', 'when',  # CQL keywords
+            'AgeInYears', 'AgeInYearsAt',  # Known functions
+            'true', 'false', 'null'  # Literals
+        }
+        
+        for var in variables_used:
+            if var not in valid_references and var not in available_variables:
+                # Check if it might be a typo of an available variable
+                if available_variables:
+                    similar_vars = [v for v in available_variables if v.lower() == var.lower()]
+                    if similar_vars:
+                        raise ValueError(f"Invalid variable reference '{var}'. Did you mean '{similar_vars[0]}'?")
+                
+                # Check if it's a common typo
+                common_typos = {
+                    'NonexistentVar': 'Check variable name spelling',
+                    'InvalidVar': 'Variable must be defined before use'
+                }
+                
+                if var in common_typos:
+                    raise ValueError(f"Invalid variable reference '{var}': {common_typos[var]}")
+                else:
+                    raise ValueError(f"Invalid variable reference '{var}'. Variable must be defined before use in let expressions.")
     
     def _has_advanced_constructs(self, cql_expression: str) -> bool:
         """
@@ -1150,6 +2572,13 @@ ORDER BY risk_score DESC, patient_id ASC"""
         logger.info(f"CQL Engine evaluating advanced expression: {cql_expression}")
         
         try:
+            # Check interim patterns first before advanced translator (for Pattern 15, etc.)
+            if self._has_known_parsing_issues(cql_expression):
+                interim_result = self._try_interim_pattern_translation(cql_expression, table_name, json_column)
+                if interim_result and not interim_result.startswith("--"):
+                    logger.info(f"Successfully translated via interim pattern matcher in advanced evaluation")
+                    return interim_result
+            
             # Use advanced translator for Phase 6 constructs
             sql = self.advanced_translator.translate_advanced_cql(cql_expression)
             

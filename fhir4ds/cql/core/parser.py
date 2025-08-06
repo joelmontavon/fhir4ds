@@ -288,7 +288,7 @@ class CQLParser(FHIRPathParser):
         # Optional default value
         default_value = None
         if self.match_keyword('default'):
-            default_value = self.parse_expression()
+            default_value = self.parse_union_expression()
         
         return ParameterNode(param_name, param_type, default_value)
     
@@ -319,7 +319,7 @@ class CQLParser(FHIRPathParser):
             raise self.error("Expected ':' after define name")
         
         # Parse expression
-        expression = self.parse_expression()
+        expression = self.parse_union_expression()
         
         return DefineNode(define_name, expression, access_level)
     
@@ -361,7 +361,7 @@ class CQLParser(FHIRPathParser):
             # Could be identifier or from clause
             if self.current_token.value.lower() == 'from':
                 self.advance()  # consume 'from'
-                source = self.parse_expression()
+                source = self.parse_union_expression()
                 # Check for alias
                 if self.current_token and self.current_token.type == TokenType.IDENTIFIER:
                     aliases.append(self.consume_identifier())
@@ -378,12 +378,12 @@ class CQLParser(FHIRPathParser):
         # Parse optional where clause
         where_clause = None
         if self.match_keyword('where'):
-            where_clause = self.parse_expression()
+            where_clause = self.parse_union_expression()
         
         # Parse optional return clause
         return_clause = None
         if self.match_keyword('return'):
-            return_clause = self.parse_expression()
+            return_clause = self.parse_union_expression()
         
         # Parse optional sort clause
         sort_clause = None
@@ -405,13 +405,13 @@ class CQLParser(FHIRPathParser):
         if not self.match(TokenType.COLON):
             raise self.error("Expected ':' in with clause")
         
-        expression = self.parse_expression()
+        expression = self.parse_union_expression()
         return WithClauseNode(identifier, expression)
     
     def parse_sort_clause(self) -> SortClauseNode:
         """Parse sort clause: 'by' expression ('asc' | 'desc')?."""
         if self.match_keyword('by'):
-            expression = self.parse_expression()
+            expression = self.parse_union_expression()
             
             direction = "ASC"
             if self.match_keyword('asc'):
@@ -442,10 +442,10 @@ class CQLParser(FHIRPathParser):
         # Parse arguments
         args = []
         if not self.check(TokenType.RPAREN):
-            args.append(self.parse_expression())
+            args.append(self.parse_union_expression())
             
             while self.match(TokenType.COMMA):
-                args.append(self.parse_expression())
+                args.append(self.parse_union_expression())
         
         if not self.match(TokenType.RPAREN):
             raise self.error("Expected ')' to close clinical function")
@@ -456,7 +456,7 @@ class CQLParser(FHIRPathParser):
         """Parse temporal expressions like 'during', 'overlaps', etc."""
         logger.debug("Parsing temporal expression")
         
-        left = self.parse_expression()
+        left = self.parse_union_expression()
         
         # Check for temporal operators
         if self.current_token and self.current_token.type == TokenType.IDENTIFIER:
@@ -464,12 +464,19 @@ class CQLParser(FHIRPathParser):
             
             if operator in ['during', 'overlaps', 'before', 'after', 'meets', 'starts', 'ends', 'includes']:
                 self.advance()  # consume operator
-                right = self.parse_expression()
+                right = self.parse_union_expression()
                 
                 # Create binary operation node for temporal operation
                 return BinaryOpNode(left, operator, right)
         
         return left
+    
+    def match(self, token_type: TokenType) -> bool:
+        """Check if current token matches the specified type and advance if it does."""
+        if self.current_token and self.current_token.type == token_type:
+            self.advance()
+            return True
+        return False
     
     def match_keyword(self, keyword: str) -> bool:
         """Check if current token matches a keyword."""
@@ -488,6 +495,15 @@ class CQLParser(FHIRPathParser):
             return value
         else:
             raise self.error("Expected identifier")
+    
+    def parse_primary_expression(self) -> ASTNode:
+        """Override FHIRPath primary expression parsing to handle CQL resource retrieval."""
+        # Check for CQL resource retrieval syntax [ResourceType]
+        if self.current_token and self.current_token.type == TokenType.LBRACKET:
+            return self.parse_retrieve()
+        else:
+            # Fall back to parent FHIRPath parsing for other cases
+            return super().parse_primary_expression()
     
     def is_simple_fhirpath_expression(self, expression: str) -> bool:
         """
@@ -616,7 +632,7 @@ class CQLParser(FHIRPathParser):
                     self.tokens = tokens
                     self.current = 0
                     # Try to parse as CQL expression first
-                    return self.parse_expression()
+                    return self.parse_union_expression()
                 except Exception:
                     # If CQL parsing fails, fall back to FHIRPath
                     lexer = FHIRPathLexer(text)
@@ -835,7 +851,8 @@ class CQLParser(FHIRPathParser):
             lexer = CQLLexer(text)
             tokens = lexer.tokenize()
             self.tokens = tokens
-            self.current = 0
+            self.position = 0
+            self.current_token = tokens[0] if tokens else None
             
             # Check if this is a complete library or just a define statement
             if text.strip().lower().startswith('library'):
@@ -848,7 +865,7 @@ class CQLParser(FHIRPathParser):
                     raise self.error("Expected 'define' keyword")
             else:
                 # Try to parse as general CQL expression
-                return self.parse_expression()
+                return self.parse_union_expression()
                 
         except Exception as e:
             logger.warning(f"CQL define parsing failed: {e}, falling back to FHIRPath")
@@ -877,7 +894,8 @@ class CQLParser(FHIRPathParser):
             lexer = CQLLexer(text)
             tokens = lexer.tokenize()
             self.tokens = tokens
-            self.current = 0
+            self.position = 0
+            self.current_token = tokens[0] if tokens else None
             
             # Parse as query expression
             return self.parse_query_expression()

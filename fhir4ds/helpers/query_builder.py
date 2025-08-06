@@ -477,7 +477,7 @@ class FHIRQueryBuilder:
                 {"name": "intent", "path": "intent", "type": "code"},
                 {"name": "authored_on", "path": "authoredOn", "type": "dateTime"}
             ])
-            .where("status in ('active', 'completed')"))
+            .where("status = 'active' or status = 'completed'"))
     
     @staticmethod
     def patient_contacts() -> QueryBuilder:
