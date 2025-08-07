@@ -36,27 +36,74 @@ class ClinicalFunctions:
             dialect=dialect
         )
     
-    def in_valueset(self, code_expr: str, system_expr: str, valueset: str) -> str:
+    def in_valueset(self, code_expr: str, system_expr: str, valueset: str, 
+                   version: str = None) -> str:
         """
-        Check if code is in valueset (CQL: code in "ValueSet") with caching.
+        Check if code is in valueset (CQL: code in "ValueSet") with enhanced caching.
         
         Args:
             code_expr: SQL expression for the code
             system_expr: SQL expression for the code system  
             valueset: ValueSet identifier
+            version: Specific version of ValueSet (optional)
             
         Returns:
             SQL expression for valueset membership check
         """
-        logger.debug(f"Generating valueset check: code in {valueset}")
+        logger.debug(f"Generating enhanced valueset check: code in {valueset}")
         
         try:
-            # Use terminology functions to generate SQL with caching
-            return self.terminology.in_valueset_sql(code_expr, system_expr, valueset)
+            # Use enhanced terminology functions to generate SQL with caching
+            return self.terminology.in_valueset_sql(code_expr, system_expr, valueset, version)
         except Exception as e:
             logger.error(f"Failed to generate valueset SQL for {valueset}: {e}")
-            # Fallback to basic implementation
-            return f"-- ValueSet check: {code_expr} in '{valueset}' (error: {e})"
+            # Return safe fallback that doesn't break query execution
+            return f"({code_expr} IS NOT NULL AND {system_expr} IS NOT NULL AND FALSE /* ValueSet error: {valueset} */)"
+    
+    def batch_in_valueset(self, code_system_pairs: List[str], valueset: str) -> str:
+        """
+        Batch check multiple codes against a valueset for performance.
+        
+        Args:
+            code_system_pairs: List of "code|system" strings
+            valueset: ValueSet identifier
+            
+        Returns:
+            SQL expression for batch valueset membership check
+        """
+        logger.debug(f"Generating batch valueset check for {len(code_system_pairs)} codes")
+        
+        try:
+            # Parse code|system pairs
+            parsed_pairs = []
+            for pair in code_system_pairs:
+                if '|' in pair:
+                    code, system = pair.split('|', 1)
+                    parsed_pairs.append({'code': code, 'system': system})
+            
+            if not parsed_pairs:
+                return "FALSE"
+            
+            # Get validation results
+            validation_results = self.terminology.batch_validate_codes(parsed_pairs, valueset)
+            
+            # Generate SQL condition based on results
+            valid_pairs = [pair for pair, is_valid in validation_results.items() if is_valid]
+            
+            if not valid_pairs:
+                return "FALSE"
+            
+            # Convert back to SQL conditions
+            conditions = []
+            for pair in valid_pairs:
+                code, system = pair.split('|', 1)
+                conditions.append(f"(code = '{code}' AND system = '{system}')")
+            
+            return f"({' OR '.join(conditions)})"
+            
+        except Exception as e:
+            logger.error(f"Failed to generate batch valueset SQL: {e}")
+            return "FALSE"
     
     @staticmethod
     def code_in_codesystem(code: str, codesystem: str) -> str:
@@ -166,6 +213,65 @@ class ClinicalFunctions:
             return f"CAST(DATEDIFF('month', DATE({start_date}), DATE({end_date})) AS INTEGER)"
         else:  # days (default)
             return f"CAST(DATEDIFF('day', DATE({start_date}), DATE({end_date})) AS INTEGER)"
+    
+    def get_terminology_cache_stats(self) -> Dict[str, Any]:
+        """
+        Get comprehensive terminology cache statistics.
+        
+        Returns:
+            Detailed cache statistics
+        """
+        return self.terminology.get_cache_stats()
+    
+    def subsumes_code(self, parent_code: str, parent_system: str, 
+                     child_code: str, child_system: str) -> str:
+        """
+        Check if parent code subsumes child code (SQL generation).
+        
+        Args:
+            parent_code: Parent code
+            parent_system: Parent code system
+            child_code: Child code
+            child_system: Child code system
+            
+        Returns:
+            SQL expression for subsumption check
+        """
+        logger.debug(f"Generating subsumption SQL: {parent_code} subsumes {child_code}")
+        
+        try:
+            # Use terminology functions for subsumption
+            if parent_system == child_system:
+                result = self.terminology.subsumes(parent_code, child_code, parent_system)
+                return "TRUE" if result else "FALSE"
+            else:
+                # Different code systems - generally false unless there's a mapping
+                return "FALSE"
+        except Exception as e:
+            logger.error(f"Failed to check subsumption: {e}")
+            return "FALSE"
+    
+    def expand_valueset_to_sql_condition(self, valueset_url: str, 
+                                       code_column: str = "code", 
+                                       system_column: str = "system") -> str:
+        """
+        Generate SQL WHERE condition from ValueSet expansion.
+        
+        Args:
+            valueset_url: ValueSet URL to expand
+            code_column: Column name for codes
+            system_column: Column name for systems
+            
+        Returns:
+            SQL WHERE condition for ValueSet membership
+        """
+        logger.debug(f"Generating SQL condition for ValueSet {valueset_url}")
+        
+        try:
+            return self.terminology.in_valueset_sql(code_column, system_column, valueset_url)
+        except Exception as e:
+            logger.error(f"Failed to generate SQL condition for {valueset_url}: {e}")
+            return "FALSE"
 
 class TerminologyFunctions:
     """
@@ -367,49 +473,99 @@ class TerminologyFunctions:
             logger.error(f"Failed to check subsumption {parent_code} -> {child_code}: {e}")
             return False
     
-    def in_valueset_sql(self, code_expr: str, system_expr: str, valueset_url: str) -> str:
+    def in_valueset_sql(self, code_expr: str, system_expr: str, valueset_url: str, 
+                        version: str = None, use_cache: bool = True) -> str:
         """
-        Generate SQL for CQL 'in' valueset operation with caching support.
+        Generate SQL for CQL 'in' valueset operation with enhanced caching and error handling.
         
         This method generates SQL that can be used in CQL expressions to check
-        if a code is in a valueset, utilizing the cached expansion.
+        if a code is in a valueset, utilizing the cached expansion and optimized SQL generation.
         
         Args:
             code_expr: SQL expression for the code
             system_expr: SQL expression for the code system
             valueset_url: ValueSet URL
+            version: Specific version of ValueSet (optional)
+            use_cache: Whether to use cached expansion (default: True)
             
         Returns:
             SQL expression for valueset membership check
         """
-        logger.debug(f"Generating SQL for valueset check: code in {valueset_url}")
+        logger.debug(f"Generating enhanced SQL for valueset check: code in {valueset_url}")
         
         try:
             # Expand the valueset to get all codes
-            codes = self.expand_valueset(valueset_url)
+            codes = self.expand_valueset(valueset_url, version)
             
             if not codes:
                 logger.warning(f"No codes found in valueset {valueset_url}")
-                return "FALSE"
+                # Return a condition that will be false but doesn't break SQL
+                return f"({code_expr} IS NULL AND {system_expr} IS NULL AND FALSE)"
             
-            # Generate SQL IN clause with all codes from the expansion
-            code_system_pairs = []
-            for concept in codes:
-                if concept.get('code') and concept.get('system'):
-                    code_system_pairs.append(
-                        f"({code_expr} = '{concept['code']}' AND {system_expr} = '{concept['system']}')"
-                    )
-            
-            if not code_system_pairs:
-                return "FALSE"
-            
-            # Create OR condition for all code/system pairs
-            sql_condition = " OR ".join(code_system_pairs)
-            return f"({sql_condition})"
+            # Optimize for small vs large valuesets
+            if len(codes) <= 50:
+                # Small valueset - use direct OR conditions
+                return self._generate_small_valueset_sql(codes, code_expr, system_expr)
+            else:
+                # Large valueset - use optimized IN clauses or temp table approach
+                return self._generate_large_valueset_sql(codes, code_expr, system_expr, valueset_url)
             
         except Exception as e:
             logger.error(f"Failed to generate SQL for valueset {valueset_url}: {e}")
-            return "FALSE"
+            # Return safe fallback that doesn't break query execution
+            return f"({code_expr} IS NOT NULL AND {system_expr} IS NOT NULL AND FALSE /* ValueSet error: {e} */)"
+    
+    def _generate_small_valueset_sql(self, codes: List[Dict], code_expr: str, system_expr: str) -> str:
+        """Generate SQL for small valuesets using OR conditions."""
+        code_system_pairs = []
+        for concept in codes:
+            if concept.get('code') and concept.get('system'):
+                # Escape single quotes in codes and systems
+                escaped_code = concept['code'].replace("'", "''")
+                escaped_system = concept['system'].replace("'", "''")
+                code_system_pairs.append(
+                    f"({code_expr} = '{escaped_code}' AND {system_expr} = '{escaped_system}')"
+                )
+        
+        if not code_system_pairs:
+            return f"({code_expr} IS NULL AND {system_expr} IS NULL AND FALSE)"
+        
+        # Create OR condition for all code/system pairs
+        sql_condition = " OR ".join(code_system_pairs)
+        return f"({sql_condition})"
+    
+    def _generate_large_valueset_sql(self, codes: List[Dict], code_expr: str, system_expr: str, 
+                                   valueset_url: str) -> str:
+        """Generate optimized SQL for large valuesets using IN clauses."""
+        # Group codes by system for better performance
+        codes_by_system = {}
+        for concept in codes:
+            if concept.get('code') and concept.get('system'):
+                system = concept['system']
+                if system not in codes_by_system:
+                    codes_by_system[system] = []
+                codes_by_system[system].append(concept['code'])
+        
+        if not codes_by_system:
+            return f"({code_expr} IS NULL AND {system_expr} IS NULL AND FALSE)"
+        
+        # Generate system-specific IN clauses
+        system_conditions = []
+        for system, code_list in codes_by_system.items():
+            escaped_system = system.replace("'", "''")
+            escaped_codes = []
+            for code in code_list:
+                escaped_code = code.replace("'", "''")
+                escaped_codes.append(f"'{escaped_code}'")
+            codes_in_clause = ", ".join(escaped_codes)
+            
+            system_conditions.append(
+                f"({system_expr} = '{escaped_system}' AND {code_expr} IN ({codes_in_clause}))"
+            )
+        
+        # Combine all system conditions
+        sql_condition = " OR ".join(system_conditions)
+        return f"({sql_condition})"
     
     def get_cache_stats(self) -> Dict[str, Any]:
         """
@@ -421,6 +577,127 @@ class TerminologyFunctions:
         if self.client and hasattr(self.client, 'get_cache_stats'):
             return self.client.get_cache_stats()
         return {"caching_enabled": False}
+    
+    def batch_validate_codes(self, code_system_pairs: List[Dict[str, str]], 
+                            valueset_url: str = None) -> Dict[str, bool]:
+        """
+        Batch validate multiple codes for better performance.
+        
+        Args:
+            code_system_pairs: List of {'code': str, 'system': str} dictionaries
+            valueset_url: Optional ValueSet URL for additional validation
+            
+        Returns:
+            Dictionary mapping code|system to validation result
+        """
+        logger.debug(f"Batch validating {len(code_system_pairs)} codes")
+        
+        results = {}
+        
+        for pair in code_system_pairs:
+            code = pair.get('code')
+            system = pair.get('system')
+            
+            if not code or not system:
+                continue
+            
+            key = f"{code}|{system}"
+            try:
+                results[key] = self.validate_code(code, system, valueset_url)
+            except Exception as e:
+                logger.error(f"Failed to validate {key}: {e}")
+                results[key] = False
+        
+        return results
+    
+    def expand_valueset_with_filters(self, valueset_url: str, filters: Dict[str, Any] = None,
+                                   include_inactive: bool = False) -> List[Dict[str, Any]]:
+        """
+        Expand valueset with additional filtering options.
+        
+        Args:
+            valueset_url: ValueSet URL
+            filters: Additional filters (e.g., {'property': 'status', 'value': 'active'})
+            include_inactive: Whether to include inactive codes
+            
+        Returns:
+            Filtered list of codes
+        """
+        logger.debug(f"Expanding valueset {valueset_url} with filters")
+        
+        # Get base expansion
+        codes = self.expand_valueset(valueset_url)
+        
+        if not filters and include_inactive:
+            return codes
+        
+        # Apply filters
+        filtered_codes = []
+        for concept in codes:
+            # Apply custom filters if provided
+            if filters:
+                include_code = True
+                for filter_key, filter_value in filters.items():
+                    concept_value = concept.get(filter_key)
+                    if concept_value != filter_value:
+                        include_code = False
+                        break
+                
+                if not include_code:
+                    continue
+            
+            # Handle inactive codes
+            if not include_inactive:
+                # Assume codes are active unless explicitly marked inactive
+                status = concept.get('status', 'active')
+                if status == 'inactive':
+                    continue
+            
+            filtered_codes.append(concept)
+        
+        logger.debug(f"Filtered to {len(filtered_codes)} codes")
+        return filtered_codes
+    
+    def get_concept_relationships(self, code: str, system: str, 
+                                relationship_type: str = 'all') -> List[Dict[str, Any]]:
+        """
+        Get concept relationships (subsumption, equivalence, etc.).
+        
+        Args:
+            code: Source code
+            system: Code system URL
+            relationship_type: Type of relationships ('parent', 'child', 'equivalent', 'all')
+            
+        Returns:
+            List of related concepts
+        """
+        logger.debug(f"Getting {relationship_type} relationships for {code} in {system}")
+        
+        if not self.client:
+            logger.warning("No terminology client available for concept relationships")
+            return []
+        
+        try:
+            # This would require extension of the base client interface
+            if hasattr(self.client, 'get_concept_relationships'):
+                return self.client.get_concept_relationships(code, system, relationship_type)
+            
+            # Fallback: use basic subsumption checking for parent/child relationships
+            relationships = []
+            
+            if relationship_type in ['parent', 'all']:
+                # This would need to be implemented based on specific terminology service
+                pass
+            
+            if relationship_type in ['child', 'all']:
+                # This would need to be implemented based on specific terminology service
+                pass
+            
+            return relationships
+            
+        except Exception as e:
+            logger.error(f"Failed to get concept relationships for {code}: {e}")
+            return []
 
 class ClinicalLogicFunctions:
     """

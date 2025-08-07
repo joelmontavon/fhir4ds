@@ -5,7 +5,7 @@ This engine orchestrates CQL parsing, translation to FHIRPath, and execution
 using the existing FHIR4DS infrastructure.
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import logging
 
 from ...fhirpath.core.generator import SQLGenerator
@@ -20,7 +20,9 @@ from ..functions.math_functions import CQLMathFunctionHandler
 from ..functions.nullological_functions import CQLNullologicalFunctionHandler
 from ..functions.datetime_functions import CQLDateTimeFunctionHandler
 from ..functions.interval_functions import CQLIntervalFunctionHandler
+from ..functions.collection_functions import CQLCollectionFunctionHandler
 from .unified_registry import UnifiedFunctionRegistry
+from .library_manager import CQLLibraryManager, LibraryMetadata, LibraryVersion
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +58,10 @@ class CQLEngine:
         self.translator = CQLTranslator(self.dialect_name)
         self.advanced_parser = AdvancedCQLParser()  # Phase 6: Advanced constructs
         self.advanced_translator = AdvancedCQLTranslator(self.dialect_name)  # Phase 6: Advanced SQL generation
-        self.libraries = {}  # Will hold loaded libraries
+        self.libraries = {}  # Legacy library storage - maintained for compatibility
+        
+        # Phase 6: Advanced library management system
+        self.library_manager = CQLLibraryManager(cache_size=50)
         
         # Enhanced context management
         self.context_manager = CQLContextManager()
@@ -83,11 +88,12 @@ class CQLEngine:
         )
         logger.info(f"CQL Engine initialized with UnifiedFunctionRegistry: {self.unified_registry.get_registry_stats()['total_functions']} functions available")
         
-        # Mathematical, nullological, date/time, and interval function handlers  
+        # Mathematical, nullological, date/time, interval, and collection function handlers  
         self.math_functions = CQLMathFunctionHandler(self.dialect_name)
         self.nullological_functions = CQLNullologicalFunctionHandler(self.dialect_name)
         self.datetime_functions = CQLDateTimeFunctionHandler(self.dialect_name)
         self.interval_functions = CQLIntervalFunctionHandler(self.dialect_name)
+        self.collection_functions = CQLCollectionFunctionHandler(self, db_connection)
         
         # Make all function handlers available to translator
         self.translator.terminology = self.terminology
@@ -96,6 +102,7 @@ class CQLEngine:
         self.translator.nullological_functions = self.nullological_functions
         self.translator.datetime_functions = self.datetime_functions
         self.translator.interval_functions = self.interval_functions
+        self.translator.collection_functions = self.collection_functions
         
         # Provide unified registry access to translator for enhanced function routing
         self.translator.unified_registry = self.unified_registry
@@ -336,6 +343,41 @@ class CQLEngine:
         if pattern21_match:
             logger.debug(f"Pattern 21 detected in _has_known_parsing_issues: {pattern21_match.group()[:100]}")
             return True
+        
+        # Pattern 9.5: Simple tuple construction (NEW - Phase 1.1)
+        # Route simple literal tuples to interim pattern handler for proper CQLTuple processing
+        if re.search(r'define\s+"[^"]+"\s*:\s*\{\s*\w+:\s*[\'"\d]', cql_expression, re.IGNORECASE):
+            # Check if it's a simple literal tuple (no function calls, no resource queries)
+            tuple_match = re.search(r'define\s+"[^"]+"\s*:\s*\{\s*([^}]+)\s*\}', cql_expression, re.IGNORECASE | re.DOTALL)
+            if tuple_match:
+                tuple_body = tuple_match.group(1)
+                has_functions = bool(re.search(r'\w+\s*\([^)]*\)', tuple_body, re.IGNORECASE))
+                has_resource_queries = bool(re.search(r'\[[^\]]+\]', tuple_body, re.IGNORECASE))
+                
+                if not has_functions and not has_resource_queries:
+                    logger.debug(f"Routing simple tuple to interim pattern handler")
+                    return True
+        
+        # Pattern 9.6: Simple list construction (NEW - Phase 1.3)
+        # Route simple literal lists to interim pattern handler for proper CQLList processing
+        # Examples: define "SimpleList": { 'a', 'b', 'c' } or define "Numbers": { 1, 2, 3 }
+        if re.search(r'define\s+"[^"]+"\s*:\s*\{\s*[\'"\d][^:]*?\}', cql_expression, re.IGNORECASE):
+            # Check if it's a simple literal list (no field:value pairs, no functions, no resource queries)
+            list_match = re.search(r'define\s+"[^"]+"\s*:\s*\{\s*([^}]+)\s*\}', cql_expression, re.IGNORECASE | re.DOTALL)
+            if list_match:
+                list_body = list_match.group(1)
+                
+                # Check if it contains colon (indicates tuple, not list)
+                has_colons = ':' in list_body
+                has_functions = bool(re.search(r'\w+\s*\([^)]*\)', list_body, re.IGNORECASE))
+                has_resource_queries = bool(re.search(r'\[[^\]]+\]', list_body, re.IGNORECASE))
+                
+                # Must be a comma-separated list of values without colons
+                if not has_colons and not has_functions and not has_resource_queries:
+                    # Verify it looks like a list (comma-separated values)
+                    if ',' in list_body:
+                        logger.debug(f"Routing simple list to interim pattern handler")
+                        return True
             
         return False
     
@@ -840,6 +882,120 @@ WHERE json_extract({json_column}, '$.resourceType') = '{resource_type}'"""
             
             logger.debug(f"Generated interim SQL for temporal relationship: {sql[:100]}...")
             return sql
+        
+        # Pattern 9.5: Simple Tuple Construction (NEW - Phase 1.1)
+        # Handle simple literal tuple construction like: define "Simple Tuple": { name: 'John', age: 25 }
+        # This should be handled BEFORE complex object construction patterns
+        simple_tuple_pattern = r'define\s+"([^"]+)"\s*:\s*\{\s*([^}]+)\s*\}'
+        tuple_match = re.search(simple_tuple_pattern, cql_expression, re.IGNORECASE | re.DOTALL)
+        if tuple_match:
+            define_name, tuple_body = tuple_match.groups()
+            
+            # Check if this is a simple literal tuple (no function calls, no resource queries)
+            has_functions = bool(re.search(r'\w+\s*\([^)]*\)', tuple_body, re.IGNORECASE))
+            has_resource_queries = bool(re.search(r'\[[^\]]+\]', tuple_body, re.IGNORECASE))
+            
+            if not has_functions and not has_resource_queries:
+                # This is a simple literal tuple - use CQLTuple type system
+                from .types import CQLTuple
+                
+                # Parse tuple fields
+                tuple_fields = {}
+                # Simple field parsing: field_name: 'value' or field_name: number
+                field_matches = re.findall(r'(\w+):\s*(\'[^\']*\'|\d+\.?\d*)', tuple_body, re.IGNORECASE)
+                
+                for field_name, field_value in field_matches:
+                    # Clean up field value
+                    if field_value.startswith("'") and field_value.endswith("'"):
+                        tuple_fields[field_name] = field_value[1:-1]  # Remove quotes
+                    else:
+                        # Try to convert to number
+                        try:
+                            if '.' in field_value:
+                                tuple_fields[field_name] = float(field_value)
+                            else:
+                                tuple_fields[field_name] = int(field_value)
+                        except ValueError:
+                            tuple_fields[field_name] = field_value
+                
+                if tuple_fields:
+                    # Create CQLTuple and generate SQL
+                    tuple_obj = CQLTuple(tuple_fields)
+                    tuple_sql = tuple_obj.to_sql(self.dialect_name)
+                    
+                    sql = f"SELECT {tuple_sql} as result"
+                    
+                    logger.info(f"Generated simple tuple SQL for '{define_name}': {sql[:100]}...")
+                    return sql
+        
+        # Pattern 9.6: Simple List Construction (NEW - Phase 1.3)
+        # Handle simple literal list construction like: define "SimpleList": { 'a', 'b', 'c' }
+        simple_list_pattern = r'define\s+"([^"]+)"\s*:\s*\{\s*([^}]+)\s*\}'
+        list_match = re.search(simple_list_pattern, cql_expression, re.IGNORECASE | re.DOTALL)
+        if list_match:
+            define_name, list_body = list_match.groups()
+            
+            # Check if this is a simple literal list (no colons, no function calls, no resource queries)
+            has_colons = ':' in list_body
+            has_functions = bool(re.search(r'\w+\s*\([^)]*\)', list_body, re.IGNORECASE))
+            has_resource_queries = bool(re.search(r'\[[^\]]+\]', list_body, re.IGNORECASE))
+            
+            if not has_colons and not has_functions and not has_resource_queries and ',' in list_body:
+                # This is a simple literal list - use CQLList type system
+                from .types import CQLList
+                
+                # Parse list elements
+                list_elements = []
+                element_type = str  # Default to string
+                
+                # Simple element parsing: 'value', 'value2' or number, number2
+                # Split by comma but preserve quoted strings
+                elements = []
+                current_element = ""
+                in_quotes = False
+                
+                for char in list_body:
+                    if char == "'" and (not current_element or current_element[-1] != '\\'):
+                        in_quotes = not in_quotes
+                        current_element += char
+                    elif char == ',' and not in_quotes:
+                        elements.append(current_element.strip())
+                        current_element = ""
+                    else:
+                        current_element += char
+                
+                if current_element.strip():
+                    elements.append(current_element.strip())
+                
+                # Process each element
+                for element in elements:
+                    element = element.strip()
+                    if element.startswith("'") and element.endswith("'"):
+                        # String element
+                        list_elements.append(element[1:-1])  # Remove quotes
+                        element_type = str
+                    else:
+                        # Try to convert to number
+                        try:
+                            if '.' in element:
+                                list_elements.append(float(element))
+                                element_type = float
+                            else:
+                                list_elements.append(int(element))
+                                element_type = int
+                        except ValueError:
+                            # Treat as string
+                            list_elements.append(element)
+                            element_type = str
+                
+                if list_elements:
+                    # Create CQLList and generate SQL
+                    list_obj = CQLList(element_type, list_elements)
+                    list_sql = list_obj.to_sql(self.dialect_name)
+                    sql = f"SELECT {list_sql} as result"
+                    
+                    logger.info(f"Generated simple list SQL for '{define_name}': {sql[:100]}...")
+                    return sql
         
         # Pattern 10: Complex Object Construction and Let Expressions
         # Part A: Object/Tuple construction with multiple statistical functions
@@ -2595,44 +2751,78 @@ FROM {table_name} {alias.lower()}
             logger.error(f"Advanced CQL evaluation failed: {e}")
             return f"-- Advanced CQL Expression (error: {e}): {cql_expression}"
     
-    def load_library(self, library_name: str, library_content: str) -> Dict[str, Any]:
+    def load_library(self, library_name: str, library_content: str, 
+                    metadata: Optional[LibraryMetadata] = None) -> Dict[str, Any]:
         """
-        Load and parse CQL library.
+        Load and parse CQL library with enhanced dependency and version management.
         
         Args:
             library_name: Name of the library
             library_content: CQL library content
+            metadata: Optional library metadata for advanced features
             
         Returns:
             Parsed library information
         """
-        logger.info(f"Loading CQL library: {library_name}")
+        logger.info(f"Loading CQL library: {library_name} with advanced management")
         
         try:
-            # Parse library
-            lexer = CQLLexer(library_content)
-            tokens = lexer.tokenize()
-            self.parser.tokens = tokens
-            self.parser.current = 0
+            # Use advanced library manager for loading
+            loaded_library = self.library_manager.load_library(library_name, library_content, metadata)
             
-            library_ast = self.parser.parse_library()
-            
-            # Translate library definitions
-            translated_library = self.translator.translate_library(library_ast)
-            
-            # Store library
+            # Maintain legacy compatibility
+            translated_library = loaded_library.translated_content
             self.libraries[library_name] = translated_library
             
             # Add library to evaluation context
             self.evaluation_context.add_library(library_name, translated_library)
             
-            return translated_library
+            # Try to resolve dependencies for all loaded libraries
+            try:
+                self.library_manager.resolve_all_dependencies()
+                logger.info("Successfully resolved library dependencies")
+            except ValueError as dep_error:
+                logger.warning(f"Dependency resolution incomplete: {dep_error}")
+            
+            return {
+                'name': library_name,
+                'version': str(loaded_library.metadata.version),
+                'dependencies': len(loaded_library.metadata.dependencies),
+                'parameters': len(loaded_library.metadata.parameters),
+                'definitions': translated_library.get('definitions', {}),
+                'load_time': loaded_library.load_time.isoformat(),
+                'dependencies_resolved': loaded_library.dependencies_resolved
+            }
             
         except Exception as e:
-            logger.error(f"Library loading failed: {e}")
-            # Store as raw content for now
-            self.libraries[library_name] = library_content
-            return {'name': library_name, 'content': library_content, 'error': str(e)}
+            logger.error(f"Advanced library loading failed, falling back to legacy method: {e}")
+            
+            # Fallback to legacy library loading
+            try:
+                # Parse library
+                lexer = CQLLexer(library_content)
+                tokens = lexer.tokenize()
+                self.parser.tokens = tokens
+                self.parser.current = 0
+                
+                library_ast = self.parser.parse_library()
+                
+                # Translate library definitions
+                translated_library = self.translator.translate_library(library_ast)
+                
+                # Store library
+                self.libraries[library_name] = translated_library
+                
+                # Add library to evaluation context
+                self.evaluation_context.add_library(library_name, translated_library)
+                
+                return translated_library
+                
+            except Exception as fallback_error:
+                logger.error(f"Library loading failed completely: {fallback_error}")
+                # Store as raw content for compatibility
+                self.libraries[library_name] = library_content
+                return {'name': library_name, 'content': library_content, 'error': str(fallback_error)}
     
     def set_context(self, context: str):
         """Set evaluation context with enhanced context management."""
@@ -2709,13 +2899,111 @@ FROM {table_name} {alias.lower()}
         return self.evaluation_context.get_parameter(name)
     
     def get_library_definition(self, library_name: str, definition_name: str) -> Optional[Any]:
-        """Get definition from loaded library."""
+        """Get definition from loaded library with enhanced library manager support."""
+        # Try enhanced library manager first
+        definition = self.library_manager.get_library_definition(library_name, definition_name)
+        if definition is not None:
+            return definition
+        
+        # Fallback to legacy method
         if library_name in self.libraries:
             library = self.libraries[library_name]
             if isinstance(library, dict) and 'definitions' in library:
                 definitions = library['definitions']
                 return definitions.get(definition_name)
         return None
+    
+    def set_library_parameter(self, library_name: str, parameter_name: str, value: Any) -> bool:
+        """
+        Set parameter value for a loaded library.
+        
+        Args:
+            library_name: Name of the library
+            parameter_name: Name of the parameter
+            value: Parameter value
+            
+        Returns:
+            True if parameter was set successfully
+        """
+        return self.library_manager.set_library_parameter(library_name, parameter_name, value)
+    
+    def list_library_definitions(self, library_name: str, access_level: str = "PUBLIC") -> List[str]:
+        """
+        List all accessible definitions in a library.
+        
+        Args:
+            library_name: Name of the library
+            access_level: Access level filter (PUBLIC, PRIVATE, PROTECTED)
+            
+        Returns:
+            List of definition names
+        """
+        return self.library_manager.list_library_definitions(library_name, access_level)
+    
+    def get_library_stats(self) -> Dict[str, Any]:
+        """Get comprehensive library management statistics."""
+        return self.library_manager.get_library_stats()
+    
+    def resolve_library_dependencies(self) -> List[str]:
+        """
+        Resolve dependencies for all loaded libraries.
+        
+        Returns:
+            List of library names in dependency order
+            
+        Raises:
+            ValueError: If dependency resolution fails
+        """
+        return self.library_manager.resolve_all_dependencies()
+    
+    def create_library_metadata(self, name: str, version_str: str, 
+                              description: str = None, dependencies: List[Dict] = None,
+                              parameters: List[Dict] = None) -> LibraryMetadata:
+        """
+        Create library metadata for advanced library loading.
+        
+        Args:
+            name: Library name
+            version_str: Version string (e.g., "1.0.0")
+            description: Library description
+            dependencies: List of dependency dictionaries
+            parameters: List of parameter dictionaries
+            
+        Returns:
+            LibraryMetadata object
+        """
+        from .library_manager import LibraryDependency, LibraryParameter
+        
+        metadata = LibraryMetadata(
+            name=name,
+            version=LibraryVersion.parse(version_str),
+            description=description
+        )
+        
+        # Add dependencies
+        if dependencies:
+            for dep_dict in dependencies:
+                dependency = LibraryDependency(
+                    library_name=dep_dict['name'],
+                    version_constraint=dep_dict.get('version', '>=0.0.0'),
+                    alias=dep_dict.get('alias'),
+                    required=dep_dict.get('required', True)
+                )
+                metadata.dependencies.append(dependency)
+        
+        # Add parameters
+        if parameters:
+            for param_dict in parameters:
+                parameter = LibraryParameter(
+                    name=param_dict['name'],
+                    parameter_type=param_dict.get('type', 'String'),
+                    default_value=param_dict.get('default'),
+                    required=param_dict.get('required', True),
+                    description=param_dict.get('description')
+                )
+                metadata.parameters.append(parameter)
+        
+        return metadata
     
     def get_terminology_cache_stats(self) -> Dict[str, Any]:
         """

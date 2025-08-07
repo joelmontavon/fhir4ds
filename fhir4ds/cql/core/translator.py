@@ -15,6 +15,7 @@ from ..functions.math_functions import CQLMathFunctionHandler
 from ..functions.nullological_functions import CQLNullologicalFunctionHandler
 from ..functions.datetime_functions import CQLDateTimeFunctionHandler
 from ..functions.interval_functions import CQLIntervalFunctionHandler
+from .types import CQLTuple, CQLChoice, CQLList, CQLQuantity, CQLRatio, type_system
 
 logger = logging.getLogger(__name__)
 
@@ -175,8 +176,11 @@ class CQLTranslator:
         
         # If it's already a FHIRPath AST node, check if it's a function call that needs translation
         if not isinstance(cql_ast, CQLASTNode):
+            # Check if it's a CQL type instance first
+            if isinstance(cql_ast, (CQLTuple, CQLChoice, CQLList, CQLQuantity, CQLRatio)):
+                return self._translate_cql_type(cql_ast)
             # Handle FHIRPath function calls that might be CQL functions
-            if isinstance(cql_ast, FunctionCallNode):
+            elif isinstance(cql_ast, FunctionCallNode):
                 func_name = cql_ast.name.lower()
                 # First check unified registry if available, then fall back to function_registry
                 if hasattr(self, 'unified_registry') and self.unified_registry.can_handle_function(func_name):
@@ -206,6 +210,8 @@ class CQLTranslator:
             return self._translate_let_clause(cql_ast)
         elif isinstance(cql_ast, BinaryOpNode) and self._is_temporal_operator(cql_ast.operator):
             return self._translate_temporal_operation(cql_ast)
+        elif isinstance(cql_ast, (CQLTuple, CQLChoice, CQLList, CQLQuantity, CQLRatio)):
+            return self._translate_cql_type(cql_ast)
         elif isinstance(cql_ast, FunctionCallNode):
             # Handle all function calls - first check if it's a clinical function
             if self._is_clinical_function(cql_ast.name):
@@ -806,6 +812,30 @@ class CQLTranslator:
         temporal_ops = ['during', 'overlaps', 'before', 'after', 'meets', 'starts', 'ends', 'includes', '+', '-']
         return operator.lower() in temporal_ops
         
+    def _translate_cql_type(self, cql_type_instance) -> Any:
+        """
+        Translate CQL type instances to SQL expressions.
+        
+        Args:
+            cql_type_instance: Instance of CQLTuple, CQLChoice, etc.
+            
+        Returns:
+            LiteralNode containing the SQL for the type
+        """
+        logger.debug(f"Translating CQL type: {type(cql_type_instance).__name__}")
+        
+        try:
+            # Generate SQL using the type's to_sql method
+            sql_expression = cql_type_instance.to_sql(self.dialect)
+            
+            # Return as a literal SQL expression
+            return LiteralNode(value=sql_expression, type='sql')
+            
+        except Exception as e:
+            logger.error(f"Error translating CQL type {type(cql_type_instance).__name__}: {e}")
+            # Fall back to string representation
+            return LiteralNode(value=str(cql_type_instance), type='string')
+
     def _is_clinical_function(self, function_name: str) -> bool:
         """Check if function is a clinical function."""
         clinical_funcs = ['ageinyears', 'ageinmonths', 'mostrecent', 'averagevalue', 'withinnormalrange']
