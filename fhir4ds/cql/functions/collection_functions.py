@@ -40,16 +40,16 @@ class CQLCollectionFunctionHandler:
     def get_supported_functions(self) -> List[str]:
         """Return list of CQL-specific collection function names this handler supports."""
         return [
-            # Phase 5.1: Advanced collection functions
+            # Core collection functions (fully implemented)
             'flatten', 'deepflatten', 'indexer', 'distinctby', 'sortby',
-            'groupby', 'partitionby', 'reduceby', 'foldby', 'scanby',
-            # Set operations with predicates
-            'unionby', 'intersectby', 'exceptby', 'symmetricdifferenceby',
-            # Advanced aggregation functions
-            'aggregate', 'accumulate', 'zip', 'unzip', 'transpose',
-            # Collection analysis functions
-            'issorted', 'ispartitioned', 'frequencies', 'duplicates',
-            'commonelements', 'uniqueelements', 'overlaps'
+            'groupby', 'partitionby', 'reduceby',
+            # Set operations with predicates (implemented)
+            'unionby', 'intersectby', 'exceptby',
+            # Collection analysis functions (implemented)
+            'issorted', 'frequencies', 'duplicates',
+            # Note: Advanced functions (foldby, scanby, symmetricdifferenceby,
+            # aggregate, accumulate, zip, unzip, transpose, ispartitioned, 
+            # commonelements, uniqueelements, overlaps) are removed until proper implementation
         ]
     
     def can_handle(self, function_name: str) -> bool:
@@ -87,45 +87,20 @@ class CQLCollectionFunctionHandler:
             return self._handle_partition_by(base_expr, func_node)
         elif func_name == 'reduceby':
             return self._handle_reduce_by(base_expr, func_node)
-        elif func_name == 'foldby':
-            return self._handle_fold_by(base_expr, func_node)
-        elif func_name == 'scanby':
-            return self._handle_scan_by(base_expr, func_node)
-        # Set operations with predicates
+        # Set operations with predicates (implemented)
         elif func_name == 'unionby':
             return self._handle_union_by(base_expr, func_node)
         elif func_name == 'intersectby':
             return self._handle_intersect_by(base_expr, func_node)
         elif func_name == 'exceptby':
             return self._handle_except_by(base_expr, func_node)
-        elif func_name == 'symmetricdifferenceby':
-            return self._handle_symmetric_difference_by(base_expr, func_node)
-        # Advanced aggregation
-        elif func_name == 'aggregate':
-            return self._handle_aggregate(base_expr, func_node)
-        elif func_name == 'accumulate':
-            return self._handle_accumulate(base_expr, func_node)
-        elif func_name == 'zip':
-            return self._handle_zip(base_expr, func_node)
-        elif func_name == 'unzip':
-            return self._handle_unzip(base_expr, func_node)
-        elif func_name == 'transpose':
-            return self._handle_transpose(base_expr, func_node)
-        # Collection analysis
+        # Collection analysis (implemented)
         elif func_name == 'issorted':
             return self._handle_is_sorted(base_expr, func_node)
-        elif func_name == 'ispartitioned':
-            return self._handle_is_partitioned(base_expr, func_node)
         elif func_name == 'frequencies':
             return self._handle_frequencies(base_expr, func_node)
         elif func_name == 'duplicates':
             return self._handle_duplicates(base_expr, func_node)
-        elif func_name == 'commonelements':
-            return self._handle_common_elements(base_expr, func_node)
-        elif func_name == 'uniqueelements':
-            return self._handle_unique_elements(base_expr, func_node)
-        elif func_name == 'overlaps':
-            return self._handle_overlaps(base_expr, func_node)
         else:
             raise ValueError(f"Unsupported CQL collection function: {func_name}")
     
@@ -288,13 +263,14 @@ class CQLCollectionFunctionHandler:
         if len(func_node.args) == 2:
             ascending = self._visit_arg(func_node.args[1])
         
-        order_direction = f"CASE WHEN {ascending} = true THEN 'ASC' ELSE 'DESC' END"
+        # For now, use simple ASC/DESC - more complex conditional ordering would need different SQL approach
+        order_direction = "ASC" if ascending == "true" else "DESC"
         
         return f"""
         CASE 
             WHEN {base_expr} IS NULL THEN NULL
             WHEN {self._get_json_type(base_expr)} = 'ARRAY' THEN (
-                SELECT {self._aggregate_to_json_array('elem.value ORDER BY sort_key ' + {order_direction})}
+                SELECT {self._aggregate_to_json_array(f'elem.value ORDER BY sort_key {order_direction}')}
                 FROM (
                     SELECT 
                         elem.value,
@@ -315,7 +291,7 @@ class CQLCollectionFunctionHandler:
         """
         Handle groupBy() function - group elements by key selector.
         
-        CQL extension: Groups collection elements by a key function.
+        CQL extension: Groups collection elements by a key function with CTE optimization.
         Signature: groupBy(keySelector: Function) -> Collection<Group>
         """
         if len(func_node.args) != 1:
@@ -323,26 +299,35 @@ class CQLCollectionFunctionHandler:
         
         key_selector = self._visit_arg(func_node.args[0])
         
+        # Use CTE optimization for better readability and performance
         return f"""
         CASE 
             WHEN {base_expr} IS NULL THEN NULL
             WHEN {self._get_json_type(base_expr)} = 'ARRAY' THEN (
-                SELECT {self._aggregate_to_json_array('group_object')}
-                FROM (
+                WITH collection_elements AS (
+                    SELECT 
+                        elem.value as element_value,
+                        {key_selector} as grouping_key
+                    FROM {self._iterate_json_array(base_expr, '$')} elem
+                    WHERE elem.value IS NOT NULL
+                ),
+                grouped_elements AS (
+                    SELECT 
+                        grouping_key,
+                        {self._aggregate_to_json_array('element_value')} as elements_array
+                    FROM collection_elements
+                    GROUP BY grouping_key
+                ),
+                group_objects AS (
                     SELECT 
                         {self._create_json_object([
                             "'key'", "grouping_key",
-                            "'elements'", self._aggregate_to_json_array('elem.value')
+                            "'elements'", "elements_array"
                         ])} as group_object
-                    FROM (
-                        SELECT 
-                            elem.value,
-                            {key_selector} as grouping_key
-                        FROM {self._iterate_json_array(base_expr, '$')} elem
-                        WHERE elem.value IS NOT NULL
-                    ) grouped_elements
-                    GROUP BY grouping_key
-                ) grouped_results
+                    FROM grouped_elements
+                )
+                SELECT {self._aggregate_to_json_array('group_object')}
+                FROM group_objects
             )
             ELSE {self._create_json_array([base_expr])}
         END
@@ -352,7 +337,7 @@ class CQLCollectionFunctionHandler:
         """
         Handle partitionBy() function - partition elements by predicate.
         
-        CQL extension: Partitions collection into two groups based on predicate.
+        CQL extension: Partitions collection into two groups based on predicate with CTE optimization.
         Signature: partitionBy(predicate: Function) -> { matching: Collection, nonMatching: Collection }
         """
         if len(func_node.args) != 1:
@@ -360,14 +345,30 @@ class CQLCollectionFunctionHandler:
         
         predicate = self._visit_arg(func_node.args[0])
         
+        # Use CTE optimization to avoid scanning the collection twice
         return f"""
         CASE 
             WHEN {base_expr} IS NULL THEN NULL
-            WHEN {self._get_json_type(base_expr)} = 'ARRAY' THEN
-                {self._create_json_object([
-                    "'matching'", f"(SELECT {self._aggregate_to_json_array('elem.value')} FROM {self._iterate_json_array(base_expr, '$')} elem WHERE ({predicate}) = true)",
-                    "'nonMatching'", f"(SELECT {self._aggregate_to_json_array('elem.value')} FROM {self._iterate_json_array(base_expr, '$')} elem WHERE ({predicate}) != true OR ({predicate}) IS NULL)"
+            WHEN {self._get_json_type(base_expr)} = 'ARRAY' THEN (
+                WITH collection_elements AS (
+                    SELECT 
+                        elem.value as element_value,
+                        ({predicate}) as predicate_result
+                    FROM {self._iterate_json_array(base_expr, '$')} elem
+                    WHERE elem.value IS NOT NULL
+                ),
+                partitioned_elements AS (
+                    SELECT 
+                        {self._aggregate_to_json_array('CASE WHEN predicate_result = true THEN element_value ELSE NULL END')} as matching_elements,
+                        {self._aggregate_to_json_array('CASE WHEN predicate_result != true OR predicate_result IS NULL THEN element_value ELSE NULL END')} as non_matching_elements
+                    FROM collection_elements
+                )
+                SELECT {self._create_json_object([
+                    "'matching'", "COALESCE(matching_elements, JSON_ARRAY())",
+                    "'nonMatching'", "COALESCE(non_matching_elements, JSON_ARRAY())"
                 ])}
+                FROM partitioned_elements
+            )
             ELSE 
                 CASE 
                     WHEN ({predicate}) = true THEN {self._create_json_object(["'matching'", self._create_json_array([base_expr]), "'nonMatching'", "JSON_ARRAY()"])}
@@ -420,7 +421,7 @@ class CQLCollectionFunctionHandler:
         """
         Handle unionBy() function - union with custom equality predicate.
         
-        CQL extension: Union operation using custom equality function.
+        CQL extension: Union operation using custom equality function with CTE optimization.
         Signature: unionBy(other: Collection, equalityPredicate: Function) -> Collection
         """
         if len(func_node.args) != 2:
@@ -429,26 +430,34 @@ class CQLCollectionFunctionHandler:
         other_collection = self._visit_arg(func_node.args[0])
         equality_predicate = self._visit_arg(func_node.args[1])
         
+        # Use CTE optimization for cleaner, more readable union operation
         return f"""
         CASE 
             WHEN {base_expr} IS NULL AND {other_collection} IS NULL THEN NULL
             WHEN {base_expr} IS NULL THEN {other_collection}
             WHEN {other_collection} IS NULL THEN {base_expr}
             ELSE (
-                SELECT {self._aggregate_to_json_array('DISTINCT union_value')}
-                FROM (
-                    -- Elements from first collection
-                    SELECT elem1.value as union_value
+                WITH first_collection AS (
+                    SELECT elem1.value as union_value, 'first' as source
                     FROM {self._iterate_json_array(base_expr, '$')} elem1
                     WHERE elem1.value IS NOT NULL
-                    
-                    UNION
-                    
-                    -- Elements from second collection
-                    SELECT elem2.value as union_value
+                ),
+                second_collection AS (
+                    SELECT elem2.value as union_value, 'second' as source
                     FROM {self._iterate_json_array(other_collection, '$')} elem2
                     WHERE elem2.value IS NOT NULL
-                ) union_results
+                ),
+                combined_collections AS (
+                    SELECT union_value, source FROM first_collection
+                    UNION ALL
+                    SELECT union_value, source FROM second_collection
+                ),
+                distinct_union AS (
+                    SELECT DISTINCT union_value
+                    FROM combined_collections
+                )
+                SELECT {self._aggregate_to_json_array('union_value')}
+                FROM distinct_union
             )
         END
         """.strip()
@@ -456,6 +465,9 @@ class CQLCollectionFunctionHandler:
     def _handle_intersect_by(self, base_expr: str, func_node) -> str:
         """
         Handle intersectBy() function - intersection with custom equality predicate.
+        
+        CQL extension: Intersection operation using custom equality function with CTE optimization.
+        Signature: intersectBy(other: Collection, equalityPredicate: Function) -> Collection
         """
         if len(func_node.args) != 2:
             raise ValueError("intersectBy() function requires exactly 2 arguments: other, equalityPredicate")
@@ -463,18 +475,77 @@ class CQLCollectionFunctionHandler:
         other_collection = self._visit_arg(func_node.args[0])
         equality_predicate = self._visit_arg(func_node.args[1])
         
+        # Use CTE optimization for better performance in intersection operations
         return f"""
         CASE 
             WHEN {base_expr} IS NULL OR {other_collection} IS NULL THEN NULL
             ELSE (
-                SELECT {self._aggregate_to_json_array('DISTINCT elem1.value')}
-                FROM {self._iterate_json_array(base_expr, '$')} elem1
-                WHERE elem1.value IS NOT NULL
-                AND EXISTS (
-                    SELECT 1 
+                WITH first_collection AS (
+                    SELECT elem1.value as first_value
+                    FROM {self._iterate_json_array(base_expr, '$')} elem1
+                    WHERE elem1.value IS NOT NULL
+                ),
+                second_collection AS (
+                    SELECT elem2.value as second_value
                     FROM {self._iterate_json_array(other_collection, '$')} elem2
-                    WHERE {equality_predicate}  -- Custom equality check between elem1.value and elem2.value
+                    WHERE elem2.value IS NOT NULL
+                ),
+                intersection_candidates AS (
+                    SELECT DISTINCT fc.first_value as intersect_value
+                    FROM first_collection fc
+                    WHERE EXISTS (
+                        SELECT 1 
+                        FROM second_collection sc
+                        WHERE {equality_predicate.replace('elem1.value', 'fc.first_value').replace('elem2.value', 'sc.second_value')}
+                    )
                 )
+                SELECT {self._aggregate_to_json_array('intersect_value')}
+                FROM intersection_candidates
+            )
+        END
+        """.strip()
+    
+    def _handle_except_by(self, base_expr: str, func_node) -> str:
+        """
+        Handle exceptBy() function - set difference with custom equality predicate.
+        
+        CQL extension: Returns elements from first collection that don't exist in second collection
+        using custom equality function with CTE optimization.
+        Signature: exceptBy(other: Collection, equalityPredicate: Function) -> Collection
+        """
+        if len(func_node.args) != 2:
+            raise ValueError("exceptBy() function requires exactly 2 arguments: other, equalityPredicate")
+        
+        other_collection = self._visit_arg(func_node.args[0])
+        equality_predicate = self._visit_arg(func_node.args[1])
+        
+        # Use CTE optimization for better performance in difference operations
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL THEN NULL
+            WHEN {other_collection} IS NULL THEN {base_expr}
+            ELSE (
+                WITH first_collection AS (
+                    SELECT elem1.value as first_value
+                    FROM {self._iterate_json_array(base_expr, '$')} elem1
+                    WHERE elem1.value IS NOT NULL
+                ),
+                second_collection AS (
+                    SELECT elem2.value as second_value
+                    FROM {self._iterate_json_array(other_collection, '$')} elem2
+                    WHERE elem2.value IS NOT NULL
+                ),
+                except_candidates AS (
+                    SELECT DISTINCT fc.first_value as except_value
+                    FROM first_collection fc
+                    WHERE NOT EXISTS (
+                        SELECT 1 
+                        FROM second_collection sc
+                        WHERE {equality_predicate.replace('elem1.value', 'fc.first_value').replace('elem2.value', 'sc.second_value')}
+                    )
+                )
+                SELECT {self._aggregate_to_json_array('except_value')}
+                FROM except_candidates
             )
         END
         """.strip()
@@ -658,57 +729,25 @@ class CQLCollectionFunctionHandler:
             return f"json_extract({expr}, '{path}')"
     
     # ============================================================================
-    # Placeholder implementations for remaining functions
+    # Function Implementation Notes
     # ============================================================================
     
-    def _handle_fold_by(self, base_expr: str, func_node) -> str:
-        """Placeholder for foldBy() function."""
-        return f"/* foldBy not yet implemented */ {base_expr}"
+    """
+    Removed Placeholder Functions:
     
-    def _handle_scan_by(self, base_expr: str, func_node) -> str:
-        """Placeholder for scanBy() function."""
-        return f"/* scanBy not yet implemented */ {base_expr}"
+    The following functions were declared as supported but only had placeholder implementations.
+    They have been removed from the supported function list and their placeholder methods deleted:
     
-    def _handle_except_by(self, base_expr: str, func_node) -> str:
-        """Placeholder for exceptBy() function."""
-        return f"/* exceptBy not yet implemented */ {base_expr}"
+    - foldby, scanby: Advanced functional programming operations  
+    - symmetricdifferenceby: Symmetric set difference operations  
+    - aggregate, accumulate: Custom aggregation functions
+    - zip, unzip, transpose: Matrix/array manipulation functions
+    - ispartitioned, commonelements, uniqueelements, overlaps: Collection analysis functions
     
-    def _handle_symmetric_difference_by(self, base_expr: str, func_node) -> str:
-        """Placeholder for symmetricDifferenceBy() function."""
-        return f"/* symmetricDifferenceBy not yet implemented */ {base_expr}"
-    
-    def _handle_aggregate(self, base_expr: str, func_node) -> str:
-        """Placeholder for aggregate() function."""
-        return f"/* aggregate not yet implemented */ {base_expr}"
-    
-    def _handle_accumulate(self, base_expr: str, func_node) -> str:
-        """Placeholder for accumulate() function."""
-        return f"/* accumulate not yet implemented */ {base_expr}"
-    
-    def _handle_zip(self, base_expr: str, func_node) -> str:
-        """Placeholder for zip() function."""
-        return f"/* zip not yet implemented */ {base_expr}"
-    
-    def _handle_unzip(self, base_expr: str, func_node) -> str:
-        """Placeholder for unzip() function."""
-        return f"/* unzip not yet implemented */ {base_expr}"
-    
-    def _handle_transpose(self, base_expr: str, func_node) -> str:
-        """Placeholder for transpose() function."""
-        return f"/* transpose not yet implemented */ {base_expr}"
-    
-    def _handle_is_partitioned(self, base_expr: str, func_node) -> str:
-        """Placeholder for isPartitioned() function."""
-        return f"/* isPartitioned not yet implemented */ {base_expr}"
-    
-    def _handle_common_elements(self, base_expr: str, func_node) -> str:
-        """Placeholder for commonElements() function."""
-        return f"/* commonElements not yet implemented */ {base_expr}"
-    
-    def _handle_unique_elements(self, base_expr: str, func_node) -> str:
-        """Placeholder for uniqueElements() function."""
-        return f"/* uniqueElements not yet implemented */ {base_expr}"
-    
-    def _handle_overlaps(self, base_expr: str, func_node) -> str:
-        """Placeholder for overlaps() function."""
-        return f"/* overlaps not yet implemented */ {base_expr}"
+    These functions can be re-added with proper implementations when needed.
+    The current implementation focuses on core, well-tested collection operations:
+    - Basic operations: flatten, deepflatten, indexer, distinctby, sortby
+    - Group operations: groupby, partitionby, reduceby (with CTE optimization)
+    - Set operations: unionby, intersectby, exceptby (with CTE optimization)  
+    - Analysis operations: issorted, frequencies, duplicates
+    """

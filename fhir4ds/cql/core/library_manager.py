@@ -12,12 +12,30 @@ Phase 6: Library Management System Implementation
 """
 
 import logging
+from functools import lru_cache
+from weakref import WeakValueDictionary
 from typing import Dict, List, Optional, Any, Set, Tuple
 from dataclasses import dataclass
 from packaging import version
 import json
 import hashlib
 from datetime import datetime, timezone
+
+
+# Custom Exception Classes for Library Management
+class LibraryError(Exception):
+    """Exception for library management errors."""
+    pass
+
+
+class LibraryDependencyError(LibraryError):
+    """Exception for library dependency resolution errors."""
+    pass
+
+
+class LibraryVersionError(LibraryError):
+    """Exception for library versioning errors."""
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -240,47 +258,82 @@ class DependencyResolver:
 
 
 class LibraryCache:
-    """Caches loaded libraries for performance optimization."""
+    """Caches loaded libraries using standard library LRU cache with WeakValueDictionary for memory management."""
     
     def __init__(self, max_size: int = 100):
         self.max_size = max_size
-        self.cache: Dict[str, LoadedLibrary] = {}
-        self.access_order: List[str] = []
+        # Use WeakValueDictionary for automatic memory cleanup
+        self._cache: WeakValueDictionary[str, LoadedLibrary] = WeakValueDictionary()
+        # Track access statistics manually since functools.lru_cache doesn't work with methods
+        self._hits = 0
+        self._misses = 0
+        self._access_order: List[str] = []
+        
+        # Create internal LRU cache function
+        self._lru_cache = lru_cache(maxsize=max_size)(self._cache_lookup)
+    
+    def _cache_lookup(self, key: str) -> Optional[LoadedLibrary]:
+        """Internal cache lookup function for LRU cache."""
+        return self._cache.get(key)
     
     def get(self, key: str) -> Optional[LoadedLibrary]:
-        """Get library from cache, updating access order."""
-        if key in self.cache:
-            # Update access order (LRU)
-            self.access_order.remove(key)
-            self.access_order.append(key)
-            return self.cache[key]
-        return None
+        """Get library from cache with LRU eviction and statistics tracking."""
+        result = self._lru_cache(key)
+        if result is not None:
+            self._hits += 1
+            # Update access order for statistics
+            if key in self._access_order:
+                self._access_order.remove(key)
+            self._access_order.append(key)
+        else:
+            self._misses += 1
+        return result
     
     def put(self, key: str, library: LoadedLibrary):
-        """Add library to cache with LRU eviction."""
-        if key in self.cache:
-            # Update existing entry
-            self.access_order.remove(key)
-        elif len(self.cache) >= self.max_size:
-            # Evict least recently used
-            lru_key = self.access_order.pop(0)
-            del self.cache[lru_key]
+        """Add library to cache with automatic LRU eviction."""
+        # Store in weak reference dictionary for memory management
+        self._cache[key] = library
         
-        self.cache[key] = library
-        self.access_order.append(key)
+        # Clear the LRU cache to reset with new data
+        self._lru_cache.cache_clear()
+        
+        # Recreate the LRU cache with updated max size
+        self._lru_cache = lru_cache(maxsize=self.max_size)(self._cache_lookup)
+        
+        # Update access order
+        if key in self._access_order:
+            self._access_order.remove(key)
+        self._access_order.append(key)
+        
+        # Maintain manual size limit for WeakValueDictionary
+        while len(self._access_order) > self.max_size:
+            oldest_key = self._access_order.pop(0)
+            if oldest_key in self._cache:
+                del self._cache[oldest_key]
     
     def clear(self):
-        """Clear all cached libraries."""
-        self.cache.clear()
-        self.access_order.clear()
+        """Clear all cached libraries and reset statistics."""
+        self._cache.clear()
+        self._access_order.clear()
+        self._lru_cache.cache_clear()
+        self._hits = 0
+        self._misses = 0
     
     def stats(self) -> Dict[str, Any]:
-        """Get cache statistics."""
+        """Get comprehensive cache statistics including LRU cache info."""
+        lru_info = self._lru_cache.cache_info()
         return {
-            'size': len(self.cache),
+            'size': len(self._cache),
             'max_size': self.max_size,
-            'libraries': list(self.cache.keys()),
-            'access_order': self.access_order.copy()
+            'libraries': list(self._cache.keys()),
+            'access_order': self._access_order.copy(),
+            'hits': self._hits,
+            'misses': self._misses,
+            'hit_rate': self._hits / (self._hits + self._misses) if (self._hits + self._misses) > 0 else 0.0,
+            'lru_hits': lru_info.hits,
+            'lru_misses': lru_info.misses,
+            'lru_maxsize': lru_info.maxsize,
+            'lru_currsize': lru_info.currsize
         }
 
 
@@ -513,14 +566,38 @@ class CQLLibraryManager:
         )
     
     def _parse_and_translate_library(self, name: str, content: str) -> Tuple[Any, Dict[str, Any]]:
-        """Parse and translate library content (placeholder for integration with existing system)."""
-        # This would integrate with the existing CQLParser and CQLTranslator
-        # For now, return minimal structure
-        ast = {"type": "library", "name": name, "content": content}
-        translated = {
-            "name": name,
-            "definitions": {},
-            "parameters": {},
-            "context": "Patient"
-        }
-        return ast, translated
+        """Parse and translate library content using existing CQLParser and CQLTranslator."""
+        from .parser import CQLParser, CQLLexer
+        from .translator import CQLTranslator
+        
+        try:
+            # Step 1: Tokenize the CQL content
+            logger.debug(f"Tokenizing CQL library content for {name}")
+            lexer = CQLLexer(content)
+            tokens = lexer.tokenize()
+            
+            # Step 2: Parse the tokens into an AST
+            logger.debug(f"Parsing CQL library {name}")
+            parser = CQLParser(tokens)
+            ast = parser.parse_library()
+            
+            # Step 3: Translate the AST to executable format
+            logger.debug(f"Translating CQL library {name}")
+            translator = CQLTranslator(dialect=getattr(self, 'dialect', 'duckdb'))
+            translated = translator.translate_library(ast)
+            
+            logger.info(f"Successfully parsed and translated CQL library: {name}")
+            return ast, translated
+            
+        except ValueError as e:
+            logger.error(f"Parse error in CQL library {name}: {e}")
+            raise LibraryError(f"Failed to parse CQL library {name}: {e}")
+        except AttributeError as e:
+            logger.error(f"Translation error in CQL library {name}: {e}")
+            raise LibraryError(f"Failed to translate CQL library {name}: {e}")
+        except ImportError as e:
+            logger.error(f"Missing dependencies for CQL parsing/translation: {e}")
+            raise LibraryError(f"CQL parser/translator dependencies not available: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error processing CQL library {name}: {e}")
+            raise LibraryError(f"Unexpected error in library processing for {name}: {e}")

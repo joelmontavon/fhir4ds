@@ -24,14 +24,26 @@ logger = logging.getLogger(__name__)
 
 
 class CQLBaseType(ABC):
-    """Base class for all CQL types."""
+    """Base class for all CQL types with dialect-specific SQL generation."""
     
     def __init__(self, value: Any = None):
         self.value = value
     
-    @abstractmethod
     def to_sql(self, dialect: str = "duckdb") -> str:
-        """Convert type instance to SQL representation."""
+        """Convert type instance to SQL representation using dialect pattern."""
+        if dialect.lower() in ["postgresql", "postgres"]:
+            return self._to_postgresql_sql()
+        else:  # DuckDB is default
+            return self._to_duckdb_sql()
+    
+    @abstractmethod
+    def _to_duckdb_sql(self) -> str:
+        """Generate DuckDB-specific SQL representation."""
+        pass
+    
+    @abstractmethod
+    def _to_postgresql_sql(self) -> str:
+        """Generate PostgreSQL-specific SQL representation."""
         pass
     
     @abstractmethod
@@ -69,40 +81,44 @@ class CQLTuple(CQLBaseType):
         """Get field value by name."""
         return self.fields.get(name)
     
-    def to_sql(self, dialect: str = "duckdb") -> str:
+    def _to_duckdb_sql(self) -> str:
         """
-        Convert tuple to SQL JSON object construction.
+        Generate DuckDB-specific SQL for tuple construction.
         
-        Example:
-        { name: 'John', age: 25 } -> 
-        DuckDB: {'name': 'John', 'age': 25}
-        PostgreSQL: json_build_object('name', 'John', 'age', 25)
+        Example: { name: 'John', age: 25 } -> {'name': 'John', 'age': 25}
         """
         if not self.fields:
-            return "'{}'" if dialect == "duckdb" else "json_build_object()"
+            return "'{}'"
         
-        if dialect == "postgresql":
-            # PostgreSQL json_build_object format
-            pairs = []
-            for key, value in self.fields.items():
-                # Handle different value types
-                if isinstance(value, str) and not value.startswith('('):  # String literal
-                    sql_value = f"'{value}'"
-                else:  # Expression or SQL
-                    sql_value = str(value)
-                pairs.extend([f"'{key}'", sql_value])
-            return f"json_build_object({', '.join(pairs)})"
+        # DuckDB struct literal format  
+        pairs = []
+        for key, value in self.fields.items():
+            if isinstance(value, str) and not value.startswith('('):  # String literal
+                sql_value = f"'{value}'"
+            else:  # Expression or SQL
+                sql_value = str(value)
+            pairs.append(f"'{key}': {sql_value}")
+        return f"{{{', '.join(pairs)}}}"
+    
+    def _to_postgresql_sql(self) -> str:
+        """
+        Generate PostgreSQL-specific SQL for tuple construction.
         
-        else:  # DuckDB format
-            # DuckDB struct literal format  
-            pairs = []
-            for key, value in self.fields.items():
-                if isinstance(value, str) and not value.startswith('('):  # String literal
-                    sql_value = f"'{value}'"
-                else:  # Expression or SQL
-                    sql_value = str(value)
-                pairs.append(f"'{key}': {sql_value}")
-            return f"{{{', '.join(pairs)}}}"
+        Example: { name: 'John', age: 25 } -> json_build_object('name', 'John', 'age', 25)
+        """
+        if not self.fields:
+            return "json_build_object()"
+        
+        # PostgreSQL json_build_object format
+        pairs = []
+        for key, value in self.fields.items():
+            # Handle different value types
+            if isinstance(value, str) and not value.startswith('('):  # String literal
+                sql_value = f"'{value}'"
+            else:  # Expression or SQL
+                sql_value = str(value)
+            pairs.extend([f"'{key}'", sql_value])
+        return f"json_build_object({', '.join(pairs)})"
     
     def to_sql_access(self, field_name: str, base_expr: str, dialect: str = "duckdb") -> str:
         """
@@ -173,22 +189,31 @@ class CQLChoice(CQLBaseType):
         """Check if current value is of specified type."""
         return self.active_type == check_type
     
-    def to_sql(self, dialect: str = "duckdb") -> str:
+    def _to_duckdb_sql(self) -> str:
         """
-        Convert choice to SQL.
+        Generate DuckDB-specific SQL for choice type.
         
-        For runtime, we use tagged unions with type information.
+        Uses tagged unions with type information.
         """
         if self.value is None:
             return "NULL"
         
-        # Create tagged union object
+        # Create tagged union object in DuckDB format
         type_name = self.active_type.__name__ if self.active_type else "unknown"
+        return f"{{'type': '{type_name}', 'value': {self.value}}}"
+    
+    def _to_postgresql_sql(self) -> str:
+        """
+        Generate PostgreSQL-specific SQL for choice type.
         
-        if dialect == "postgresql":
-            return f"json_build_object('type', '{type_name}', 'value', {self.value})"
-        else:  # DuckDB
-            return f"{{'type': '{type_name}', 'value': {self.value}}}"
+        Uses tagged unions with type information.
+        """
+        if self.value is None:
+            return "NULL"
+        
+        # Create tagged union object in PostgreSQL format
+        type_name = self.active_type.__name__ if self.active_type else "unknown"
+        return f"json_build_object('type', '{type_name}', 'value', {self.value})"
     
     def validate(self) -> bool:
         """Validate choice type."""
@@ -230,8 +255,8 @@ class CQLList(CQLBaseType):
         self.elements.append(element)
         return self
     
-    def to_sql(self, dialect: str = "duckdb") -> str:
-        """Convert list to SQL array."""
+    def _to_duckdb_sql(self) -> str:
+        """Generate DuckDB-specific SQL for list type."""
         if not self.elements:
             return "[]"  # Empty array
         
@@ -244,6 +269,21 @@ class CQLList(CQLBaseType):
                 sql_elements.append(str(element))
         
         return f"[{', '.join(sql_elements)}]"
+    
+    def _to_postgresql_sql(self) -> str:
+        """Generate PostgreSQL-specific SQL for list type."""
+        if not self.elements:
+            return "ARRAY[]"  # Empty array in PostgreSQL syntax
+        
+        # Convert elements to SQL
+        sql_elements = []
+        for element in self.elements:
+            if isinstance(element, str):
+                sql_elements.append(f"'{element}'")
+            else:
+                sql_elements.append(str(element))
+        
+        return f"ARRAY[{', '.join(sql_elements)}]"
     
     def validate(self) -> bool:
         """Validate list type."""
@@ -272,12 +312,13 @@ class CQLQuantity(CQLBaseType):
         self.unit = unit
         super().__init__({'value': value, 'unit': unit})
     
-    def to_sql(self, dialect: str = "duckdb") -> str:
-        """Convert quantity to SQL object."""
-        if dialect == "postgresql":
-            return f"json_build_object('value', {self.numeric_value}, 'unit', '{self.unit}')"
-        else:  # DuckDB
-            return f"{{'value': {self.numeric_value}, 'unit': '{self.unit}'}}"
+    def _to_duckdb_sql(self) -> str:
+        """Generate DuckDB-specific SQL for quantity type."""
+        return f"{{'value': {self.numeric_value}, 'unit': '{self.unit}'}}"
+    
+    def _to_postgresql_sql(self) -> str:
+        """Generate PostgreSQL-specific SQL for quantity type."""
+        return f"json_build_object('value', {self.numeric_value}, 'unit', '{self.unit}')"
     
     def validate(self) -> bool:
         """Validate quantity."""
@@ -306,15 +347,17 @@ class CQLRatio(CQLBaseType):
         self.denominator = denominator
         super().__init__({'numerator': numerator, 'denominator': denominator})
     
-    def to_sql(self, dialect: str = "duckdb") -> str:
-        """Convert ratio to SQL object."""
-        num_sql = self.numerator.to_sql(dialect)
-        den_sql = self.denominator.to_sql(dialect)
-        
-        if dialect == "postgresql":
-            return f"json_build_object('numerator', {num_sql}, 'denominator', {den_sql})"
-        else:  # DuckDB
-            return f"{{'numerator': {num_sql}, 'denominator': {den_sql}}}"
+    def _to_duckdb_sql(self) -> str:
+        """Generate DuckDB-specific SQL for ratio type."""
+        num_sql = self.numerator._to_duckdb_sql()
+        den_sql = self.denominator._to_duckdb_sql()
+        return f"{{'numerator': {num_sql}, 'denominator': {den_sql}}}"
+    
+    def _to_postgresql_sql(self) -> str:
+        """Generate PostgreSQL-specific SQL for ratio type."""
+        num_sql = self.numerator._to_postgresql_sql()
+        den_sql = self.denominator._to_postgresql_sql()
+        return f"json_build_object('numerator', {num_sql}, 'denominator', {den_sql})"
     
     def validate(self) -> bool:
         """Validate ratio."""
