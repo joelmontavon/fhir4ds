@@ -15,6 +15,7 @@ from ..functions.math_functions import CQLMathFunctionHandler
 from ..functions.nullological_functions import CQLNullologicalFunctionHandler
 from ..functions.datetime_functions import CQLDateTimeFunctionHandler
 from ..functions.interval_functions import CQLIntervalFunctionHandler
+from .types import CQLTuple, CQLChoice, CQLList, CQLQuantity, CQLRatio, type_system
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,16 @@ class CQLTranslator:
             'sum': self.math_functions,
             'avg': self.math_functions,
             'average': self.math_functions,
+            'count': self.math_functions,
+            'first': self.math_functions,
+            'last': self.math_functions,
+            # CQL statistical functions
+            'stddev': self.math_functions,
+            'stdev': self.math_functions,
+            'variance': self.math_functions,
+            'median': self.math_functions,
+            'mode': self.math_functions,
+            'percentile': self.math_functions,
             'predecessor': self.math_functions,
             'successor': self.math_functions,
             # All FHIRPath math functions are inherited
@@ -86,6 +97,18 @@ class CQLTranslator:
             'second': self.datetime_functions,
             'date': self.datetime_functions,
             'time': self.datetime_functions,
+            
+            # Component extraction functions
+            'year_from': self.datetime_functions,
+            'month_from': self.datetime_functions,
+            'day_from': self.datetime_functions,
+            'hour_from': self.datetime_functions,
+            'minute_from': self.datetime_functions,
+            'second_from': self.datetime_functions,
+            'date_from': self.datetime_functions,
+            # CQL datetime functions
+            'ageinyears': self.datetime_functions,
+            'time_from': self.datetime_functions,
             'years_between': self.datetime_functions,
             'months_between': self.datetime_functions,
             'days_between': self.datetime_functions,
@@ -151,8 +174,19 @@ class CQLTranslator:
         """
         logger.debug(f"Translating CQL AST: {type(cql_ast)}")
         
-        # If it's already a FHIRPath AST node, return as-is
+        # If it's already a FHIRPath AST node, check if it's a function call that needs translation
         if not isinstance(cql_ast, CQLASTNode):
+            # Check if it's a CQL type instance first
+            if isinstance(cql_ast, (CQLTuple, CQLChoice, CQLList, CQLQuantity, CQLRatio)):
+                return self._translate_cql_type(cql_ast)
+            # Handle FHIRPath function calls that might be CQL functions
+            elif isinstance(cql_ast, FunctionCallNode):
+                func_name = cql_ast.name.lower()
+                # First check unified registry if available, then fall back to function_registry
+                if hasattr(self, 'unified_registry') and self.unified_registry.can_handle_function(func_name):
+                    return self._translate_function_via_registry(cql_ast)
+                elif func_name in self.function_registry:
+                    return self._translate_general_function(cql_ast)
             return cql_ast
             
         # Handle CQL-specific nodes
@@ -176,8 +210,15 @@ class CQLTranslator:
             return self._translate_let_clause(cql_ast)
         elif isinstance(cql_ast, BinaryOpNode) and self._is_temporal_operator(cql_ast.operator):
             return self._translate_temporal_operation(cql_ast)
-        elif isinstance(cql_ast, FunctionCallNode) and self._is_clinical_function(cql_ast.name):
-            return self._translate_clinical_function(cql_ast)
+        elif isinstance(cql_ast, (CQLTuple, CQLChoice, CQLList, CQLQuantity, CQLRatio)):
+            return self._translate_cql_type(cql_ast)
+        elif isinstance(cql_ast, FunctionCallNode):
+            # Handle all function calls - first check if it's a clinical function
+            if self._is_clinical_function(cql_ast.name):
+                return self._translate_clinical_function(cql_ast)
+            else:
+                # Handle general function calls using the function registry
+                return self._translate_general_function(cql_ast)
         else:
             logger.warning(f"Unknown CQL AST node type: {type(cql_ast)}")
             return cql_ast
@@ -508,6 +549,12 @@ class CQLTranslator:
         # Use comprehensive interval functions for temporal operations
         op_lower = binary_op.operator.lower()
         
+        # Handle arithmetic operations with temporal units (e.g., + 1 year, - 3 months)
+        # Note: These are now handled by the parser as function calls (add_years, etc.)
+        if op_lower in ['+', '-']:
+            # This path may not be reached now due to enhanced parsing
+            logger.debug(f"Basic arithmetic operation {op_lower} - may need special handling")
+        
         if op_lower in self.interval_functions.function_map:
             # Direct mapping to interval function
             handler = self.interval_functions.function_map[op_lower]
@@ -565,12 +612,230 @@ class CQLTranslator:
         else:
             # Return as regular function call for functions not yet implemented
             return FunctionCallNode(func_name, args)
+    
+    def _translate_general_function(self, func_call: FunctionCallNode) -> Any:
+        """
+        Translate general CQL functions using the function registry.
+        
+        Args:
+            func_call: FunctionCallNode for general function
+            
+        Returns:
+            Translated function call or SQL expression
+        """
+        logger.debug(f"Translating general function: {func_call.name}")
+        
+        func_name = func_call.name.lower()
+        
+        # Enhanced handling for statistical functions with complex arguments
+        if func_name in ['stddev', 'stdev', 'variance', 'median', 'mode', 'percentile']:
+            return self._translate_statistical_function_with_query(func_call)
+        
+        args = [self.translate_expression(arg) for arg in func_call.args]
+        
+        # Look up function in registry
+        if func_name in self.function_registry:
+            handler = self.function_registry[func_name]
+            try:
+                # Call the appropriate handler method based on handler type
+                if hasattr(handler, 'generate_cql_datetime_function_sql'):
+                    # DateTime function handler - use specific method
+                    return handler.generate_cql_datetime_function_sql(func_name, args, self.dialect)
+                elif hasattr(handler, 'generate_nullological_function_sql'):
+                    # Nullological function handler - use specific method
+                    return handler.generate_nullological_function_sql(func_name, args, self.dialect)
+                elif hasattr(handler, 'generate_function_sql'):
+                    # Generic function handler
+                    return handler.generate_function_sql(func_name, args, self.dialect)
+                elif hasattr(handler, func_name):
+                    # Call the specific function method directly
+                    method = getattr(handler, func_name)
+                    return method(*args)
+                else:
+                    logger.warning(f"Handler for {func_name} found but no method available")
+                    return FunctionCallNode(func_name, args)
+            except Exception as e:
+                logger.error(f"Error calling function handler for {func_name}: {e}")
+                return FunctionCallNode(func_name, args)
+        else:
+            logger.warning(f"Function {func_name} not found in registry")
+            return FunctionCallNode(func_name, args)
+    
+    def _translate_statistical_function_with_query(self, func_call: FunctionCallNode) -> Any:
+        """
+        Translate statistical functions that have complex query arguments.
+        
+        Handles patterns like:
+        - StdDev([Observation: "Systolic Blood Pressure"] O return O.valueQuantity.value)
+        - Count([Patient] P where P.active = true)
+        
+        Args:
+            func_call: FunctionCallNode for statistical function with query
+            
+        Returns:
+            Enhanced FunctionCallNode with proper query structure
+        """
+        logger.debug(f"Translating statistical function with query: {func_call.name}")
+        
+        func_name = func_call.name.lower()
+        
+        # Process each argument carefully
+        processed_args = []
+        for arg in func_call.args:
+            if isinstance(arg, QueryNode):
+                # This is a resource query with potential return clause
+                logger.debug(f"Processing QueryNode for {func_name}")
+                
+                # Translate the query components
+                source_expr = self.translate_expression(arg.source)
+                
+                # Build the query chain: source -> where -> return
+                query_expr = source_expr
+                
+                # Apply where clause if present
+                if arg.where_clause:
+                    where_expr = self.translate_expression(arg.where_clause)
+                    query_expr = FunctionCallNode("where", [query_expr, where_expr])
+                
+                # Apply return clause - this is crucial for statistical functions
+                if arg.return_clause:
+                    return_expr = self.translate_expression(arg.return_clause)
+                    query_expr = FunctionCallNode("select", [query_expr, return_expr])
+                else:
+                    # If no explicit return clause, default to extracting the resource itself
+                    logger.debug(f"No return clause found for {func_name}, using default resource selection")
+                
+                processed_args.append(query_expr)
+                
+            else:
+                # Regular argument, translate normally
+                processed_args.append(self.translate_expression(arg))
+        
+        # Now call the function handler with the properly structured arguments
+        if func_name in self.function_registry:
+            handler = self.function_registry[func_name]
+            try:
+                # For statistical functions, prefer the unified registry if available
+                if hasattr(self, 'unified_registry') and self.unified_registry.can_handle_function(func_name):
+                    return self._translate_function_via_registry(FunctionCallNode(func_name, processed_args))
+                
+                # Otherwise use standard handler
+                if hasattr(handler, func_name):
+                    method = getattr(handler, func_name)
+                    return method(*processed_args)
+                elif hasattr(handler, 'generate_function_sql'):
+                    return handler.generate_function_sql(func_name, processed_args, self.dialect)
+                else:
+                    logger.warning(f"No appropriate method found for statistical function {func_name}")
+                    return FunctionCallNode(func_name, processed_args)
+                    
+            except Exception as e:
+                logger.error(f"Error translating statistical function {func_name}: {e}")
+                return FunctionCallNode(func_name, processed_args)
+        else:
+            logger.warning(f"Statistical function {func_name} not found in registry")
+            return FunctionCallNode(func_name, processed_args)
+
+    def _translate_function_via_registry(self, func_call: FunctionCallNode) -> Any:
+        """
+        Translate CQL functions using the unified function registry.
+        
+        Args:
+            func_call: FunctionCallNode for function call
+            
+        Returns:
+            Translated function call with enhanced routing
+        """
+        logger.debug(f"Translating function via unified registry: {func_call.name}")
+        
+        func_name = func_call.name.lower()
+        args = [self.translate_expression(arg) for arg in func_call.args]
+        
+        if not hasattr(self, 'unified_registry') or not self.unified_registry:
+            logger.warning("Unified registry not available, falling back to standard function registry")
+            return self._translate_general_function(func_call)
+        
+        try:
+            # Get handler from unified registry
+            handler = self.unified_registry.get_handler_for_function(func_name)
+            if not handler:
+                logger.warning(f"No handler found in unified registry for {func_name}")
+                return FunctionCallNode(func_name, args)
+            
+            # Get handler info for debugging
+            handler_info = self.unified_registry.get_handler_info(func_name)
+            logger.debug(f"Using {handler_info['handler_name']} handler for {func_name}")
+            
+            # Try different handler method patterns
+            if hasattr(handler, 'function_map') and func_name in handler.function_map:
+                # Use function map for direct method access
+                func_method = handler.function_map[func_name]
+                logger.debug(f"Calling {func_name} via function map")
+                result = func_method(*args)
+                
+                # Return LiteralNode for SQL expressions, or create FunctionCallNode
+                if hasattr(result, 'value') and hasattr(result, 'type'):
+                    # This is a LiteralNode with SQL
+                    return result
+                else:
+                    # Return as literal value
+                    return LiteralNode(value=str(result), type='value')
+                    
+            elif hasattr(handler, func_name):
+                # Call method directly by name
+                func_method = getattr(handler, func_name)
+                logger.debug(f"Calling {func_name} via direct method")
+                result = func_method(*args)
+                
+                if hasattr(result, 'value') and hasattr(result, 'type'):
+                    return result
+                else:
+                    return LiteralNode(value=str(result), type='value')
+                    
+            elif hasattr(handler, 'generate_cql_function_sql'):
+                # Use generic SQL generation method
+                logger.debug(f"Calling {func_name} via generate_cql_function_sql")
+                sql = handler.generate_cql_function_sql(func_name, args, self.dialect)
+                return LiteralNode(value=sql, type='sql')
+                
+            else:
+                logger.warning(f"Handler found but no callable method for {func_name}")
+                return FunctionCallNode(func_name, args)
+                
+        except Exception as e:
+            logger.error(f"Error translating function {func_name} via unified registry: {e}")
+            # Fall back to standard function registry
+            return self._translate_general_function(func_call)
             
     def _is_temporal_operator(self, operator: str) -> bool:
         """Check if operator is a temporal operator."""
-        temporal_ops = ['during', 'overlaps', 'before', 'after', 'meets', 'starts', 'ends', 'includes']
+        temporal_ops = ['during', 'overlaps', 'before', 'after', 'meets', 'starts', 'ends', 'includes', '+', '-']
         return operator.lower() in temporal_ops
         
+    def _translate_cql_type(self, cql_type_instance) -> Any:
+        """
+        Translate CQL type instances to SQL expressions.
+        
+        Args:
+            cql_type_instance: Instance of CQLTuple, CQLChoice, etc.
+            
+        Returns:
+            LiteralNode containing the SQL for the type
+        """
+        logger.debug(f"Translating CQL type: {type(cql_type_instance).__name__}")
+        
+        try:
+            # Generate SQL using the type's to_sql method
+            sql_expression = cql_type_instance.to_sql(self.dialect)
+            
+            # Return as a literal SQL expression
+            return LiteralNode(value=sql_expression, type='sql')
+            
+        except Exception as e:
+            logger.error(f"Error translating CQL type {type(cql_type_instance).__name__}: {e}")
+            # Fall back to string representation
+            return LiteralNode(value=str(cql_type_instance), type='string')
+
     def _is_clinical_function(self, function_name: str) -> bool:
         """Check if function is a clinical function."""
         clinical_funcs = ['ageinyears', 'ageinmonths', 'mostrecent', 'averagevalue', 'withinnormalrange']

@@ -307,12 +307,12 @@ class Templates:
                     {"name": "status", "path": "status", "type": "code"}
                 ],
                 "where": [
-                    {"path": "status = 'final'"},
-                    {"path": f"code.coding.system = '{code_system}'"}
+                    {"path": "status = 'final'"}
                 ]
             }]
         }
         
+        # Add code filtering when specific code is requested
         if code:
             view_def["select"][0]["where"].append({"path": f"code.coding.code = '{code}'"})
         
@@ -358,8 +358,7 @@ class Templates:
                 ],
                 "where": [
                     {"path": "status = 'final'"},
-                    {"path": "category.coding.system = 'http://terminology.hl7.org/CodeSystem/observation-category'"},
-                    {"path": "category.coding.code = 'vital-signs'"}
+                    {"path": "category.coding.code = 'vital-signs' or category.coding.display = 'vital-signs'"}
                 ]
             }]
         }
@@ -398,8 +397,7 @@ class Templates:
         """
         where_clauses = [
             {"path": "status = 'final'"},
-            {"path": "category.coding.system = 'http://terminology.hl7.org/CodeSystem/observation-category'"},
-            {"path": "category.coding.code = 'laboratory'"}
+            {"path": "category.coding.code = 'laboratory' or category.coding.display = 'laboratory'"}
         ]
         
         if date_range_start:
@@ -471,7 +469,7 @@ class Templates:
                     {"name": "authored_date", "path": "authoredOn", "type": "dateTime"}
                 ],
                 "where": [
-                    {"path": "status in ('active', 'completed')"},
+                    {"path": "status = 'active' or status = 'completed'"},
                     {"path": "intent = 'order'"}
                 ]
             }]
@@ -569,8 +567,7 @@ class Templates:
                 ],
                 "where": [
                     {"path": "status = 'final'"},
-                    {"path": "code.coding.code = '4548-4'"},  # HbA1c LOINC code
-                    {"path": "code.coding.system = 'http://loinc.org'"}
+                    {"path": "code.coding.code = '4548-4' or code.coding.display = 'Hemoglobin A1c/Hemoglobin.total in Blood'"}
                 ]
             }]
         }
@@ -600,12 +597,12 @@ class Templates:
             >>> diabetes_codes = ["E11.9", "E10.9"]  # Type 2 and Type 1 diabetes
             >>> view_def = Templates.cohort_identification(diabetes_codes)
         """
-        # Build condition filter
+        # Build condition filter using OR syntax (FHIRPath doesn't support IN clause)
         if len(conditions) == 1:
             condition_filter = f"code.coding.code = '{conditions[0]}'"
         else:
-            condition_list = "', '".join(conditions)
-            condition_filter = f"code.coding.code in ('{condition_list}')"
+            condition_filters = [f"code.coding.code = '{condition}'" for condition in conditions]
+            condition_filter = " or ".join(condition_filters)
         
         return {
             "resourceType": "ViewDefinition",
@@ -757,12 +754,12 @@ class TemplateLibrary:
         return sorted(matching_templates, key=lambda t: t.name)
     
     @staticmethod
-    def validate_template(template_name: str) -> Dict[str, Any]:
+    def validate_template(template) -> Dict[str, Any]:
         """
         Validate a template and return validation results.
         
         Args:
-            template_name: Name of template to validate
+            template: Template name (str) or ViewDefinition object (dict) to validate
             
         Returns:
             Dictionary with validation results
@@ -771,19 +768,34 @@ class TemplateLibrary:
             >>> result = TemplateLibrary.validate_template("patient_demographics")
             >>> if result["valid"]:
             ...     print("Template is valid")
+            >>> 
+            >>> # Or validate a template object directly
+            >>> template_obj = Templates.patient_demographics()
+            >>> result = TemplateLibrary.validate_template(template_obj)
         """
         try:
-            # Get template method
-            template_method = getattr(Templates, template_name, None)
-            if not template_method:
+            # Handle both string template names and template objects
+            if isinstance(template, str):
+                # Get template method by name
+                template_method = getattr(Templates, template, None)
+                if not template_method:
+                    return {
+                        "valid": False,
+                        "errors": [f"Template '{template}' not found"],
+                        "warnings": []
+                    }
+                
+                # Try to generate ViewDefinition
+                view_def = template_method()
+            elif isinstance(template, dict):
+                # Use the provided ViewDefinition object directly
+                view_def = template
+            else:
                 return {
                     "valid": False,
-                    "errors": [f"Template '{template_name}' not found"],
+                    "errors": [f"Template must be a string name or ViewDefinition dict, got {type(template)}"],
                     "warnings": []
                 }
-            
-            # Try to generate ViewDefinition
-            view_def = template_method()
             
             # Basic validation
             errors = []

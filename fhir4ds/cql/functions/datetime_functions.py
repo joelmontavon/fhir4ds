@@ -9,6 +9,7 @@ Addresses Phase 4.2 critical gap - achieving 80%+ date/time compliance (currentl
 
 import logging
 from typing import Any, List, Dict, Union, Optional
+from ...fhirpath.parser.ast_nodes import LiteralNode
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,16 @@ class CQLDateTimeFunctionHandler:
             'date': self.date_from,
             'time': self.time_from,
             
+            # Component extraction functions with explicit '_from' suffix
+            'year_from': self.year_from,
+            'month_from': self.month_from,
+            'day_from': self.day_from,
+            'hour_from': self.hour_from,
+            'minute_from': self.minute_from,
+            'second_from': self.second_from,
+            'date_from': self.date_from,
+            'time_from': self.time_from,
+            
             # Duration calculation functions
             'years_between': self.years_between,
             'months_between': self.months_between,
@@ -48,6 +59,9 @@ class CQLDateTimeFunctionHandler:
             'hours_between': self.hours_between,
             'minutes_between': self.minutes_between,
             'seconds_between': self.seconds_between,
+            
+            # Age calculation functions
+            'ageinyears': self.age_in_years,
             
             # Difference calculation functions (boundary crossings)
             'difference_in_years': self.difference_in_years,
@@ -86,32 +100,62 @@ class CQLDateTimeFunctionHandler:
     
     # Component Extraction Functions
     
-    def year_from(self, datetime_expr: Any) -> str:
+    def year_from(self, datetime_expr: Any) -> LiteralNode:
         """
         CQL 'year from' operator - extract year component from date/datetime.
         
         Example: year from @2023-12-25T10:30:00 → 2023
         """
         logger.debug("Generating CQL year from operation")
-        return f"EXTRACT(YEAR FROM CAST({datetime_expr} AS TIMESTAMP))"
+        
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        datetime_val = extract_value(datetime_expr)
+        sql = f"EXTRACT(YEAR FROM CAST({datetime_val} AS TIMESTAMP))"
+        return LiteralNode(value=sql, type='sql')
     
-    def month_from(self, datetime_expr: Any) -> str:
+    def month_from(self, datetime_expr: Any) -> LiteralNode:
         """
         CQL 'month from' operator - extract month component from date/datetime.
         
         Example: month from @2023-12-25T10:30:00 → 12
         """
         logger.debug("Generating CQL month from operation")
-        return f"EXTRACT(MONTH FROM CAST({datetime_expr} AS TIMESTAMP))"
+        
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        datetime_val = extract_value(datetime_expr)
+        sql = f"EXTRACT(MONTH FROM CAST({datetime_val} AS TIMESTAMP))"
+        return LiteralNode(value=sql, type='sql')
     
-    def day_from(self, datetime_expr: Any) -> str:
+    def day_from(self, datetime_expr: Any) -> LiteralNode:
         """
         CQL 'day from' operator - extract day component from date/datetime.
         
         Example: day from @2023-12-25T10:30:00 → 25
         """
         logger.debug("Generating CQL day from operation")
-        return f"EXTRACT(DAY FROM CAST({datetime_expr} AS TIMESTAMP))"
+        
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        datetime_val = extract_value(datetime_expr)
+        sql = f"EXTRACT(DAY FROM CAST({datetime_val} AS TIMESTAMP))"
+        return LiteralNode(value=sql, type='sql')
     
     def hour_from(self, datetime_expr: Any) -> str:
         """
@@ -160,7 +204,7 @@ class CQLDateTimeFunctionHandler:
     
     # Duration Calculation Functions
     
-    def years_between(self, start_expr: Any, end_expr: Any) -> str:
+    def years_between(self, start_expr: Any, end_expr: Any) -> LiteralNode:
         """
         CQL 'years between' function - calculate number of years between dates.
         
@@ -168,16 +212,57 @@ class CQLDateTimeFunctionHandler:
         """
         logger.debug("Generating CQL years between operation")
         
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        start_val = extract_value(start_expr)
+        end_val = extract_value(end_expr)
+        
         if self.dialect == "postgresql":
-            return f"""
-            EXTRACT(YEAR FROM AGE(CAST({end_expr} AS TIMESTAMP), CAST({start_expr} AS TIMESTAMP)))
-            """.strip()
+            sql = f"EXTRACT(YEAR FROM AGE(CAST({end_val} AS TIMESTAMP), CAST({start_val} AS TIMESTAMP)))"
         else:  # DuckDB
-            return f"""
-            DATE_DIFF('year', CAST({start_expr} AS TIMESTAMP), CAST({end_expr} AS TIMESTAMP))
-            """.strip()
+            sql = f"DATE_DIFF('year', CAST({start_val} AS TIMESTAMP), CAST({end_val} AS TIMESTAMP))"
+            
+        return LiteralNode(value=sql, type='sql')
     
-    def months_between(self, start_expr: Any, end_expr: Any) -> str:
+    def age_in_years(self, birthdate_expr: Any) -> LiteralNode:
+        """
+        CQL 'AgeInYears' function - calculate age in years from birthdate to today.
+        
+        Args:
+            birthdate_expr: Birthdate expression (Date or DateTime)
+            
+        Returns:
+            LiteralNode with SQL expression for age in years
+            
+        Example: AgeInYears(@1990-06-15) → current age in years
+        """
+        logger.debug("Generating CQL AgeInYears operation")
+        
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        birthdate_val = extract_value(birthdate_expr)
+        
+        # Calculate age from birthdate to current date
+        if self.dialect == "postgresql":
+            # PostgreSQL: Use AGE function to get interval, then extract years
+            sql = f"EXTRACT(YEAR FROM AGE(CURRENT_DATE, CAST({birthdate_val} AS DATE)))"
+        else:  # DuckDB
+            # DuckDB: Use DATEDIFF to calculate years between birthdate and today
+            sql = f"DATE_DIFF('year', CAST({birthdate_val} AS DATE), CURRENT_DATE)"
+            
+        return LiteralNode(value=sql, type='sql')
+    
+    def months_between(self, start_expr: Any, end_expr: Any) -> LiteralNode:
         """
         CQL 'months between' function - calculate number of months between dates.
         
@@ -185,17 +270,24 @@ class CQLDateTimeFunctionHandler:
         """
         logger.debug("Generating CQL months between operation")
         
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        start_val = extract_value(start_expr)
+        end_val = extract_value(end_expr)
+        
         if self.dialect == "postgresql":
-            return f"""
-            (EXTRACT(YEAR FROM AGE(CAST({end_expr} AS TIMESTAMP), CAST({start_expr} AS TIMESTAMP))) * 12 +
-             EXTRACT(MONTH FROM AGE(CAST({end_expr} AS TIMESTAMP), CAST({start_expr} AS TIMESTAMP))))
-            """.strip()
+            sql = f"(EXTRACT(YEAR FROM AGE(CAST({end_val} AS TIMESTAMP), CAST({start_val} AS TIMESTAMP))) * 12 + EXTRACT(MONTH FROM AGE(CAST({end_val} AS TIMESTAMP), CAST({start_val} AS TIMESTAMP))))"
         else:  # DuckDB
-            return f"""
-            DATE_DIFF('month', CAST({start_expr} AS TIMESTAMP), CAST({end_expr} AS TIMESTAMP))
-            """.strip()
+            sql = f"DATE_DIFF('month', CAST({start_val} AS TIMESTAMP), CAST({end_val} AS TIMESTAMP))"
+            
+        return LiteralNode(value=sql, type='sql')
     
-    def days_between(self, start_expr: Any, end_expr: Any) -> str:
+    def days_between(self, start_expr: Any, end_expr: Any) -> LiteralNode:
         """
         CQL 'days between' function - calculate number of days between dates.
         
@@ -203,14 +295,22 @@ class CQLDateTimeFunctionHandler:
         """
         logger.debug("Generating CQL days between operation")
         
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        start_val = extract_value(start_expr)
+        end_val = extract_value(end_expr)
+        
         if self.dialect == "postgresql":
-            return f"""
-            EXTRACT(DAY FROM (CAST({end_expr} AS TIMESTAMP) - CAST({start_expr} AS TIMESTAMP)))
-            """.strip()
+            sql = f"EXTRACT(DAY FROM (CAST({end_val} AS TIMESTAMP) - CAST({start_val} AS TIMESTAMP)))"
         else:  # DuckDB
-            return f"""
-            DATE_DIFF('day', CAST({start_expr} AS TIMESTAMP), CAST({end_expr} AS TIMESTAMP))
-            """.strip()
+            sql = f"DATE_DIFF('day', CAST({start_val} AS TIMESTAMP), CAST({end_val} AS TIMESTAMP))"
+            
+        return LiteralNode(value=sql, type='sql')
     
     def hours_between(self, start_expr: Any, end_expr: Any) -> str:
         """
@@ -334,7 +434,7 @@ class CQLDateTimeFunctionHandler:
     
     # Temporal Constructors
     
-    def datetime_constructor(self, *args: Any) -> str:
+    def datetime_constructor(self, *args: Any) -> LiteralNode:
         """
         CQL DateTime constructor - create DateTime from components.
         
@@ -347,70 +447,130 @@ class CQLDateTimeFunctionHandler:
         """
         logger.debug(f"Generating CQL DateTime constructor with {len(args)} arguments")
         
+        # Helper function to extract value from AST node or return as-is
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return str(arg.value)
+            else:
+                return str(arg)
+        
         if len(args) == 1:
             # DateTime(year)
-            return f"CAST(CONCAT({args[0]}, '-01-01') AS TIMESTAMP)"
+            year = extract_value(args[0])
+            sql = f"CAST('{year}-01-01' AS TIMESTAMP)"
+            return LiteralNode(value=sql, type='sql')
         elif len(args) == 2:
             # DateTime(year, month)
-            return f"CAST(CONCAT({args[0]}, '-', LPAD(CAST({args[1]} AS VARCHAR), 2, '0'), '-01') AS TIMESTAMP)"
+            year = extract_value(args[0])
+            month = int(extract_value(args[1]))
+            sql = f"CAST('{year}-{month:02d}-01' AS TIMESTAMP)"
+            return LiteralNode(value=sql, type='sql')
         elif len(args) == 3:
             # DateTime(year, month, day)
-            return f"""CAST(CONCAT({args[0]}, '-', 
-                      LPAD(CAST({args[1]} AS VARCHAR), 2, '0'), '-',
-                      LPAD(CAST({args[2]} AS VARCHAR), 2, '0')) AS TIMESTAMP)"""
+            year = extract_value(args[0])
+            month = int(extract_value(args[1]))
+            day = int(extract_value(args[2]))
+            sql = f"CAST('{year}-{month:02d}-{day:02d}' AS TIMESTAMP)"
+            return LiteralNode(value=sql, type='sql')
         elif len(args) == 5:
             # DateTime(year, month, day, hour, minute)
-            return f"""CAST(CONCAT({args[0]}, '-', 
-                      LPAD(CAST({args[1]} AS VARCHAR), 2, '0'), '-',
-                      LPAD(CAST({args[2]} AS VARCHAR), 2, '0'), 'T',
-                      LPAD(CAST({args[3]} AS VARCHAR), 2, '0'), ':',
-                      LPAD(CAST({args[4]} AS VARCHAR), 2, '0'), ':00') AS TIMESTAMP)"""
+            year = extract_value(args[0])
+            month = int(extract_value(args[1]))
+            day = int(extract_value(args[2]))
+            hour = int(extract_value(args[3]))
+            minute = int(extract_value(args[4]))
+            sql = f"CAST('{year}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:00' AS TIMESTAMP)"
+            return LiteralNode(value=sql, type='sql')
         elif len(args) == 6:
             # DateTime(year, month, day, hour, minute, second)
-            return f"""CAST(CONCAT({args[0]}, '-', 
-                      LPAD(CAST({args[1]} AS VARCHAR), 2, '0'), '-',
-                      LPAD(CAST({args[2]} AS VARCHAR), 2, '0'), 'T',
-                      LPAD(CAST({args[3]} AS VARCHAR), 2, '0'), ':',
-                      LPAD(CAST({args[4]} AS VARCHAR), 2, '0'), ':',
-                      LPAD(CAST({args[5]} AS VARCHAR), 2, '0')) AS TIMESTAMP)"""
+            year = extract_value(args[0])
+            month = int(extract_value(args[1]))
+            day = int(extract_value(args[2]))
+            hour = int(extract_value(args[3]))
+            minute = int(extract_value(args[4]))
+            second = int(extract_value(args[5]))
+            sql = f"CAST('{year}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:{second:02d}' AS TIMESTAMP)"
+            return LiteralNode(value=sql, type='sql')
         else:
             raise ValueError(f"DateTime constructor supports 1-6 arguments, got {len(args)}")
     
-    def date_constructor(self, *args: Any) -> str:
+    def date_constructor(self, *args: Any) -> LiteralNode:
         """
         CQL Date constructor - create Date from components.
         
         Supports:
+        - Date(year) → @year
+        - Date(year, month) → @year-month  
         - Date(year, month, day) → @year-month-day
         """
         logger.debug(f"Generating CQL Date constructor with {len(args)} arguments")
         
-        if len(args) == 3:
-            return f"""CAST(CONCAT({args[0]}, '-', 
-                      LPAD(CAST({args[1]} AS VARCHAR), 2, '0'), '-',
-                      LPAD(CAST({args[2]} AS VARCHAR), 2, '0')) AS DATE)"""
+        # Helper function to extract value from AST node or return as-is
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return str(arg.value)
+            else:
+                return str(arg)
+        
+        if len(args) == 1:
+            # Date(year)
+            year = extract_value(args[0])
+            sql = f"CAST('{year}-01-01' AS DATE)"
+            return LiteralNode(value=sql, type='sql')
+        elif len(args) == 2:
+            # Date(year, month)
+            year = extract_value(args[0])
+            month = int(extract_value(args[1]))
+            sql = f"CAST('{year}-{month:02d}-01' AS DATE)"
+            return LiteralNode(value=sql, type='sql')
+        elif len(args) == 3:
+            # Date(year, month, day)
+            year = extract_value(args[0])
+            month = int(extract_value(args[1]))
+            day = int(extract_value(args[2]))
+            sql = f"CAST('{year}-{month:02d}-{day:02d}' AS DATE)"
+            return LiteralNode(value=sql, type='sql')
         else:
-            raise ValueError(f"Date constructor requires exactly 3 arguments, got {len(args)}")
+            raise ValueError(f"Date constructor supports 1-3 arguments, got {len(args)}")
     
-    def time_constructor(self, *args: Any) -> str:
+    def time_constructor(self, *args: Any) -> LiteralNode:
         """
         CQL Time constructor - create Time from components.
         
         Supports:
-        - Time(hour, minute) → @Thour:minute
+        - Time(hour) → @Thour:00:00
+        - Time(hour, minute) → @Thour:minute:00
         - Time(hour, minute, second) → @Thour:minute:second
         """
         logger.debug(f"Generating CQL Time constructor with {len(args)} arguments")
         
-        if len(args) == 2:
-            return f"""CAST(CONCAT(LPAD(CAST({args[0]} AS VARCHAR), 2, '0'), ':',
-                      LPAD(CAST({args[1]} AS VARCHAR), 2, '0'), ':00') AS TIME)"""
+        # Helper function to extract value from AST node or return as-is
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return str(arg.value)
+            else:
+                return str(arg)
+        
+        if len(args) == 1:
+            # Time(hour)
+            hour = int(extract_value(args[0]))
+            sql = f"CAST('{hour:02d}:00:00' AS TIME)"
+            return LiteralNode(value=sql, type='sql')
+        elif len(args) == 2:
+            # Time(hour, minute)
+            hour = int(extract_value(args[0]))
+            minute = int(extract_value(args[1]))
+            sql = f"CAST('{hour:02d}:{minute:02d}:00' AS TIME)"
+            return LiteralNode(value=sql, type='sql')
         elif len(args) == 3:
-            return f"""CAST(CONCAT(LPAD(CAST({args[0]} AS VARCHAR), 2, '0'), ':',
-                      LPAD(CAST({args[1]} AS VARCHAR), 2, '0'), ':',
-                      LPAD(CAST({args[2]} AS VARCHAR), 2, '0')) AS TIME)"""
+            # Time(hour, minute, second)
+            hour = int(extract_value(args[0]))
+            minute = int(extract_value(args[1]))
+            second = int(extract_value(args[2]))
+            sql = f"CAST('{hour:02d}:{minute:02d}:{second:02d}' AS TIME)"
+            return LiteralNode(value=sql, type='sql')
         else:
-            raise ValueError(f"Time constructor requires 2-3 arguments, got {len(args)}")
+            raise ValueError(f"Time constructor supports 1-3 arguments, got {len(args)}")
     
     # Current Date/Time Functions (Enhanced)
     
@@ -431,32 +591,68 @@ class CQLDateTimeFunctionHandler:
     
     # Temporal Arithmetic Functions
     
-    def add_years(self, datetime_expr: Any, years: Any) -> str:
+    def add_years(self, datetime_expr: Any, years: Any) -> LiteralNode:
         """Add years to a date/datetime."""
         logger.debug("Generating CQL add years operation")
         
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        years_val = extract_value(years)
+        datetime_val = extract_value(datetime_expr)
+        
         if self.dialect == "postgresql":
-            return f"(CAST({datetime_expr} AS TIMESTAMP) + INTERVAL '{years} years')"
+            sql = f"(CAST({datetime_val} AS TIMESTAMP) + INTERVAL '{years_val} years')"
         else:  # DuckDB
-            return f"(CAST({datetime_expr} AS TIMESTAMP) + INTERVAL ({years}) YEAR)"
+            sql = f"(CAST({datetime_val} AS TIMESTAMP) + INTERVAL ({years_val}) YEAR)"
+            
+        return LiteralNode(value=sql, type='sql')
     
-    def add_months(self, datetime_expr: Any, months: Any) -> str:
+    def add_months(self, datetime_expr: Any, months: Any) -> LiteralNode:
         """Add months to a date/datetime."""
         logger.debug("Generating CQL add months operation")
         
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        months_val = extract_value(months)
+        datetime_val = extract_value(datetime_expr)
+        
         if self.dialect == "postgresql":
-            return f"(CAST({datetime_expr} AS TIMESTAMP) + INTERVAL '{months} months')"
+            sql = f"(CAST({datetime_val} AS TIMESTAMP) + INTERVAL '{months_val} months')"
         else:  # DuckDB
-            return f"(CAST({datetime_expr} AS TIMESTAMP) + INTERVAL ({months}) MONTH)"
+            sql = f"(CAST({datetime_val} AS TIMESTAMP) + INTERVAL ({months_val}) MONTH)"
+            
+        return LiteralNode(value=sql, type='sql')
     
-    def add_days(self, datetime_expr: Any, days: Any) -> str:
+    def add_days(self, datetime_expr: Any, days: Any) -> LiteralNode:
         """Add days to a date/datetime."""
         logger.debug("Generating CQL add days operation")
         
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        days_val = extract_value(days)
+        datetime_val = extract_value(datetime_expr)
+        
         if self.dialect == "postgresql":
-            return f"(CAST({datetime_expr} AS TIMESTAMP) + INTERVAL '{days} days')"
+            sql = f"(CAST({datetime_val} AS TIMESTAMP) + INTERVAL '{days_val} days')"
         else:  # DuckDB
-            return f"(CAST({datetime_expr} AS TIMESTAMP) + INTERVAL ({days}) DAY)"
+            sql = f"(CAST({datetime_val} AS TIMESTAMP) + INTERVAL ({days_val}) DAY)"
+            
+        return LiteralNode(value=sql, type='sql')
     
     def add_hours(self, datetime_expr: Any, hours: Any) -> str:
         """Add hours to a datetime."""

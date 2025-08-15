@@ -85,8 +85,9 @@ class AdvancedCQLTranslator:
         """Translate a query with with/without relationships to SQL."""
         logger.debug(f"Translating query with relationships: {query_node.primary_query}")
         
-        # Extract primary table from resource query
+        # Extract primary table and resource type from resource query
         primary_table = self._extract_table_name(query_node.primary_query)
+        primary_resource_type = self._extract_resource_type(query_node.primary_query)
         primary_alias = query_node.alias
         
         # Build SELECT clause
@@ -97,6 +98,10 @@ class AdvancedCQLTranslator:
         
         # Build WHERE conditions
         where_conditions = []
+        
+        # Add primary resource type filter for FHIR4DS
+        primary_resource_filter = f"JSON_EXTRACT_STRING({primary_alias}.resource, '$.resourceType') = '{primary_resource_type}'"
+        where_conditions.append(primary_resource_filter)
         
         # Add with clauses (EXISTS conditions)
         for with_clause in query_node.with_clauses:
@@ -137,14 +142,20 @@ class AdvancedCQLTranslator:
         related_table = self._extract_table_name(with_clause.related_query)
         related_alias = with_clause.source_alias
         
+        # Extract resource type from the related query for filtering
+        resource_type = self._extract_resource_type(with_clause.related_query)
+        
         # Process the condition to reference the correct aliases
         condition = self._process_relationship_condition(
             with_clause.condition, primary_alias, related_alias
         )
         
+        # Add resource type filter for FHIR4DS
+        resource_filter = f"JSON_EXTRACT_STRING({related_alias}.resource, '$.resourceType') = '{resource_type}'"
+        
         exists_sql = f"""EXISTS (
             SELECT 1 FROM {related_table} {related_alias}
-            WHERE {condition}
+            WHERE {resource_filter} AND {condition}
         )"""
         
         return exists_sql.strip()
@@ -154,14 +165,20 @@ class AdvancedCQLTranslator:
         related_table = self._extract_table_name(without_clause.related_query)
         related_alias = without_clause.source_alias
         
+        # Extract resource type from the related query for filtering
+        resource_type = self._extract_resource_type(without_clause.related_query)
+        
         # Process the condition to reference the correct aliases
         condition = self._process_relationship_condition(
             without_clause.condition, primary_alias, related_alias
         )
         
+        # Add resource type filter for FHIR4DS
+        resource_filter = f"JSON_EXTRACT_STRING({related_alias}.resource, '$.resourceType') = '{resource_type}'"
+        
         not_exists_sql = f"""NOT EXISTS (
             SELECT 1 FROM {related_table} {related_alias}
-            WHERE {condition}
+            WHERE {resource_filter} AND {condition}
         )"""
         
         return not_exists_sql.strip()
@@ -171,9 +188,11 @@ class AdvancedCQLTranslator:
         variable_name = let_expr.variable_name
         expression = let_expr.expression
         
-        # For now, create a simple CTE with the expression
-        # In a full implementation, this would evaluate the CQL expression
-        cte_sql = f"{variable_name} AS (SELECT {expression} as {variable_name}_value)"
+        # Process the CQL expression to make it SQL compatible
+        # This is a simplified version - full implementation would use proper CQL->SQL translation
+        sql_expression = self._process_cql_expression_to_sql(expression)
+        
+        cte_sql = f"{variable_name} AS (SELECT {sql_expression} as {variable_name}_value)"
         
         return cte_sql
     
@@ -185,7 +204,21 @@ class AdvancedCQLTranslator:
             resource_query: Resource query string
             
         Returns:
-            Corresponding table name
+            Corresponding table name (always fhir_resources for FHIR4DS)
+        """
+        # FHIR4DS uses a single fhir_resources table with JSON data
+        # All FHIR resources are stored in the same table and filtered by resourceType
+        return "fhir_resources"
+    
+    def _extract_resource_type(self, resource_query: str) -> str:
+        """
+        Extract FHIR resource type from a resource query like [Condition: "Diabetes"].
+        
+        Args:
+            resource_query: Resource query string
+            
+        Returns:
+            FHIR resource type name
         """
         # Remove brackets and extract resource type
         if resource_query.startswith('[') and resource_query.endswith(']'):
@@ -197,19 +230,7 @@ class AdvancedCQLTranslator:
             else:
                 resource_type = content.strip()
             
-            # Convert to table name (simple mapping for now)
-            table_mapping = {
-                'Patient': 'patient',
-                'Condition': 'condition',
-                'Observation': 'observation',
-                'MedicationRequest': 'medication_request',
-                'MedicationDispense': 'medication_dispense',
-                'Encounter': 'encounter',
-                'Procedure': 'procedure',
-                'DiagnosticReport': 'diagnostic_report'
-            }
-            
-            return table_mapping.get(resource_type, resource_type.lower())
+            return resource_type
         
         return resource_query
     
@@ -273,6 +294,48 @@ class AdvancedCQLTranslator:
         condition = condition.replace(' <= ', ' <= ')  # Already SQL compatible
         
         return condition
+    
+    def _process_cql_expression_to_sql(self, expression: str) -> str:
+        """
+        Process a CQL expression to make it SQL compatible.
+        
+        Args:
+            expression: CQL expression string
+            
+        Returns:
+            SQL-compatible expression string
+        """
+        # Handle common CQL patterns and convert to SQL
+        # This is a simplified version - full implementation would use proper CQL->SQL translation
+        import re
+        
+        # Handle FHIRPath expressions first (more specific patterns)
+        # Pattern: P.extension.where(url='value').field
+        fhirpath_pattern = r'(\w+)\.extension\.where\(url=\'([^\']+)\'\)\.(\w+)'
+        def replace_fhirpath(match):
+            alias = match.group(1)
+            url_value = match.group(2)  # e.g., 'bmi'
+            target_field = match.group(3)  # e.g., 'valueDecimal'
+            
+            # Convert to JSON path for FHIR extension lookup
+            # Simplified JSON extraction for FHIR extensions
+            return f"JSON_EXTRACT({alias}.resource, '$.extension[0].{target_field}')"
+        
+        expression = re.sub(fhirpath_pattern, replace_fhirpath, expression)
+        
+        # Replace CQL function calls with SQL equivalents
+        expression = expression.replace("AgeInYears(", "EXTRACT(YEAR FROM AGE(")
+        
+        # Handle simple field access like P.birthDate (but not function calls)
+        field_access_pattern = r'(\w+)\.(\w+)(?!\(|\.)'
+        def replace_field_access(match):
+            alias = match.group(1)
+            field = match.group(2)
+            return f"JSON_EXTRACT_STRING({alias}.resource, '$.{field}')"
+        
+        expression = re.sub(field_access_pattern, replace_field_access, expression)
+        
+        return expression
     
     def _translate_standard_cql(self, cql_text: str) -> str:
         """Translate standard CQL (fallback for non-advanced constructs)."""

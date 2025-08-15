@@ -26,12 +26,12 @@ class DateTimeFunctionHandler(BaseFunctionHandler):
         
     def get_supported_functions(self) -> List[str]:
         """Return list of datetime function names this handler supports."""
-        return ['now', 'today', 'timeofday']
+        return ['now', 'today', 'timeofday', 'lowboundary', 'highboundary']
 
     def can_handle(self, function_name: str) -> bool:
         """Check if this handler can process the given function."""
         datetime_functions = {
-            'now', 'today', 'timeofday'
+            'now', 'today', 'timeofday', 'lowboundary', 'highboundary'
         }
         return function_name.lower() in datetime_functions
     
@@ -55,6 +55,10 @@ class DateTimeFunctionHandler(BaseFunctionHandler):
             return self._handle_today(base_expr, func_node)
         elif func_name == 'timeofday':
             return self._handle_timeofday(base_expr, func_node)
+        elif func_name == 'lowboundary':
+            return self._handle_low_boundary(base_expr, func_node)
+        elif func_name == 'highboundary':
+            return self._handle_high_boundary(base_expr, func_node)
         else:
             raise ValueError(f"Unsupported datetime function: {func_name}")
     
@@ -87,3 +91,77 @@ class DateTimeFunctionHandler(BaseFunctionHandler):
         # Direct implementation - returns current time
         # Note: This is a context-independent function (doesn't use base_expr)
         return f"CURRENT_TIME"
+
+    def _handle_low_boundary(self, base_expr: str, func_node) -> str:
+        """Handle lowBoundary() function - returns lower boundary for date/time precision."""
+        # lowBoundary() function takes optional precision argument
+        if len(func_node.args) > 1:
+            raise ValueError("lowBoundary() function takes at most one argument")
+        
+        # Get precision if provided, otherwise determine from value type
+        precision = None
+        if len(func_node.args) == 1:
+            precision_arg = func_node.args[0]
+            # Extract precision from literal or use default
+            if hasattr(precision_arg, 'literal'):
+                precision = precision_arg.literal.strip('"\'')
+        
+        # Generate boundary calculation based on data type and precision
+        if precision == 'year' or not precision:
+            # For year precision: start of year
+            return f"CASE WHEN {base_expr} IS NOT NULL THEN DATE_TRUNC('year', CAST({base_expr} AS TIMESTAMP)) ELSE NULL END"
+        elif precision == 'month':
+            # For month precision: start of month  
+            return f"CASE WHEN {base_expr} IS NOT NULL THEN DATE_TRUNC('month', CAST({base_expr} AS TIMESTAMP)) ELSE NULL END"
+        elif precision == 'day':
+            # For day precision: start of day
+            return f"CASE WHEN {base_expr} IS NOT NULL THEN DATE_TRUNC('day', CAST({base_expr} AS TIMESTAMP)) ELSE NULL END"
+        elif precision == 'hour':
+            # For hour precision: start of hour
+            return f"CASE WHEN {base_expr} IS NOT NULL THEN DATE_TRUNC('hour', CAST({base_expr} AS TIMESTAMP)) ELSE NULL END"
+        elif precision == 'minute':
+            # For minute precision: start of minute
+            return f"CASE WHEN {base_expr} IS NOT NULL THEN DATE_TRUNC('minute', CAST({base_expr} AS TIMESTAMP)) ELSE NULL END"
+        elif precision == 'second':
+            # For second precision: start of second
+            return f"CASE WHEN {base_expr} IS NOT NULL THEN DATE_TRUNC('second', CAST({base_expr} AS TIMESTAMP)) ELSE NULL END"
+        else:
+            # Default: assume datetime and return start of day
+            return f"CASE WHEN {base_expr} IS NOT NULL THEN DATE_TRUNC('day', CAST({base_expr} AS TIMESTAMP)) ELSE NULL END"
+
+    def _handle_high_boundary(self, base_expr: str, func_node) -> str:
+        """Handle highBoundary() function - returns upper boundary for date/time precision."""
+        # highBoundary() function takes optional precision argument
+        if len(func_node.args) > 1:
+            raise ValueError("highBoundary() function takes at most one argument")
+        
+        # Get precision if provided, otherwise determine from value type
+        precision = None
+        if len(func_node.args) == 1:
+            precision_arg = func_node.args[0]
+            # Extract precision from literal or use default
+            if hasattr(precision_arg, 'literal'):
+                precision = precision_arg.literal.strip('"\'')
+        
+        # Generate boundary calculation based on data type and precision
+        if precision == 'year' or not precision:
+            # For year precision: end of year
+            return f"CASE WHEN {base_expr} IS NOT NULL THEN DATE_TRUNC('year', CAST({base_expr} AS TIMESTAMP)) + INTERVAL '1 year' - INTERVAL '1 microsecond' ELSE NULL END"
+        elif precision == 'month':
+            # For month precision: end of month
+            return f"CASE WHEN {base_expr} IS NOT NULL THEN DATE_TRUNC('month', CAST({base_expr} AS TIMESTAMP)) + INTERVAL '1 month' - INTERVAL '1 microsecond' ELSE NULL END"
+        elif precision == 'day':
+            # For day precision: end of day
+            return f"CASE WHEN {base_expr} IS NOT NULL THEN DATE_TRUNC('day', CAST({base_expr} AS TIMESTAMP)) + INTERVAL '1 day' - INTERVAL '1 microsecond' ELSE NULL END"
+        elif precision == 'hour':
+            # For hour precision: end of hour
+            return f"CASE WHEN {base_expr} IS NOT NULL THEN DATE_TRUNC('hour', CAST({base_expr} AS TIMESTAMP)) + INTERVAL '1 hour' - INTERVAL '1 microsecond' ELSE NULL END"
+        elif precision == 'minute':
+            # For minute precision: end of minute
+            return f"CASE WHEN {base_expr} IS NOT NULL THEN DATE_TRUNC('minute', CAST({base_expr} AS TIMESTAMP)) + INTERVAL '1 minute' - INTERVAL '1 microsecond' ELSE NULL END"
+        elif precision == 'second':
+            # For second precision: end of second
+            return f"CASE WHEN {base_expr} IS NOT NULL THEN DATE_TRUNC('second', CAST({base_expr} AS TIMESTAMP)) + INTERVAL '1 second' - INTERVAL '1 microsecond' ELSE NULL END"
+        else:
+            # Default: assume datetime and return end of day
+            return f"CASE WHEN {base_expr} IS NOT NULL THEN DATE_TRUNC('day', CAST({base_expr} AS TIMESTAMP)) + INTERVAL '1 day' - INTERVAL '1 microsecond' ELSE NULL END"

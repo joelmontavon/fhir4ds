@@ -48,7 +48,7 @@ class CollectionFunctionHandler(BaseFunctionHandler):
             'count()', 'distinct()', 'skip(', 'take(',
             'union(', 'intersect(', 'exclude(',
             'allTrue()', 'anyTrue()', 'allFalse()', 'anyFalse()',
-            'single()'  # Phase 4.6: Add single() to function detection patterns
+            'single()', 'tail()'  # Phase 4.6: Add single() and tail() to function detection patterns
         ]
 
     def can_handle(self, function_name: str) -> bool:

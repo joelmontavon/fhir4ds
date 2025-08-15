@@ -9,6 +9,7 @@ Addresses Phase 4.3 major gap - achieving 80%+ interval compliance (currently 13
 
 import logging
 from typing import Any, List, Dict, Union, Optional
+from ...fhirpath.parser.ast_nodes import LiteralNode
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +63,16 @@ class CQLIntervalFunctionHandler:
             'collapse': self.collapse,
         }
     
+    def _extract_value(self, arg: Any) -> Any:
+        """Extract value from AST node if needed."""
+        if hasattr(arg, 'value'):
+            return arg.value
+        else:
+            return str(arg)
+    
     # Temporal Relationship Functions
     
-    def starts(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> str:
+    def starts(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> LiteralNode:
         """
         CQL 'starts' operator - interval1 starts interval2.
         
@@ -76,23 +84,32 @@ class CQLIntervalFunctionHandler:
         """
         logger.debug(f"Generating CQL starts operation with precision: {precision}")
         
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return str(arg)
+        
+        interval1_val = extract_value(interval1_expr)
+        interval2_val = extract_value(interval2_expr)
+        
         # Extract start and end points from intervals
         # Assuming interval format: [start, end] or interval(start, end)
-        start1 = self._extract_interval_start(interval1_expr)
-        end1 = self._extract_interval_end(interval1_expr)
-        start2 = self._extract_interval_start(interval2_expr)
-        end2 = self._extract_interval_end(interval2_expr)
+        start1 = self._extract_interval_start(interval1_val)
+        end1 = self._extract_interval_end(interval1_val)
+        start2 = self._extract_interval_start(interval2_val)
+        end2 = self._extract_interval_end(interval2_val)
         
         if precision:
             precision_check = self._precision_equal_check(start1, start2, precision)
         else:
             precision_check = f"({start1} = {start2})"
         
-        return f"""
-        ({precision_check} AND {end1} <= {end2})
-        """.strip()
+        sql = f"({precision_check} AND {end1} <= {end2})"
+        return LiteralNode(value=sql, type='sql')
     
-    def ends(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> str:
+    def ends(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> LiteralNode:
         """
         CQL 'ends' operator - interval1 ends interval2.
         
@@ -104,21 +121,30 @@ class CQLIntervalFunctionHandler:
         """
         logger.debug(f"Generating CQL ends operation with precision: {precision}")
         
-        start1 = self._extract_interval_start(interval1_expr)
-        end1 = self._extract_interval_end(interval1_expr)
-        start2 = self._extract_interval_start(interval2_expr)
-        end2 = self._extract_interval_end(interval2_expr)
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return str(arg)
+        
+        interval1_val = extract_value(interval1_expr)
+        interval2_val = extract_value(interval2_expr)
+        
+        start1 = self._extract_interval_start(interval1_val)
+        end1 = self._extract_interval_end(interval1_val)
+        start2 = self._extract_interval_start(interval2_val)
+        end2 = self._extract_interval_end(interval2_val)
         
         if precision:
             precision_check = self._precision_equal_check(end1, end2, precision)
         else:
             precision_check = f"({end1} = {end2})"
         
-        return f"""
-        ({precision_check} AND {start1} >= {start2})
-        """.strip()
+        sql = f"({precision_check} AND {start1} >= {start2})"
+        return LiteralNode(value=sql, type='sql')
     
-    def meets(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> str:
+    def meets(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> LiteralNode:
         """
         CQL 'meets' operator - interval1 meets interval2.
         
@@ -130,17 +156,20 @@ class CQLIntervalFunctionHandler:
         """
         logger.debug(f"Generating CQL meets operation with precision: {precision}")
         
-        end1 = self._extract_interval_end(interval1_expr)
-        start2 = self._extract_interval_start(interval2_expr)
+        interval1_val = self._extract_value(interval1_expr)
+        interval2_val = self._extract_value(interval2_expr)
+        
+        end1 = self._extract_interval_end(interval1_val)
+        start2 = self._extract_interval_start(interval2_val)
         
         if precision:
             precision_check = self._precision_equal_check(end1, start2, precision)
         else:
             precision_check = f"({end1} = {start2})"
         
-        return precision_check
+        return LiteralNode(value=precision_check, type='sql')
     
-    def overlaps_proper(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> str:
+    def overlaps_proper(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> LiteralNode:
         """
         CQL 'overlaps' operator - interval1 overlaps interval2.
         
@@ -154,10 +183,13 @@ class CQLIntervalFunctionHandler:
         """
         logger.debug(f"Generating CQL overlaps operation with precision: {precision}")
         
-        start1 = self._extract_interval_start(interval1_expr)
-        end1 = self._extract_interval_end(interval1_expr)
-        start2 = self._extract_interval_start(interval2_expr)
-        end2 = self._extract_interval_end(interval2_expr)
+        interval1_val = self._extract_value(interval1_expr)
+        interval2_val = self._extract_value(interval2_expr)
+        
+        start1 = self._extract_interval_start(interval1_val)
+        end1 = self._extract_interval_end(interval1_val)
+        start2 = self._extract_interval_start(interval2_val)
+        end2 = self._extract_interval_end(interval2_val)
         
         if precision:
             # For precision-based overlaps, we need to truncate to precision level
@@ -166,15 +198,13 @@ class CQLIntervalFunctionHandler:
             start2_trunc = self._truncate_to_precision(start2, precision)
             end2_trunc = self._truncate_to_precision(end2, precision)
             
-            return f"""
-            ({start1_trunc} < {end2_trunc} AND {end1_trunc} > {start2_trunc})
-            """.strip()
+            sql = f"({start1_trunc} < {end2_trunc} AND {end1_trunc} > {start2_trunc})"
         else:
-            return f"""
-            ({start1} < {end2} AND {end1} > {start2})
-            """.strip()
+            sql = f"({start1} < {end2} AND {end1} > {start2})"
+        
+        return LiteralNode(value=sql, type='sql')
     
-    def before(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> str:
+    def before(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> LiteralNode:
         """
         CQL 'before' operator - interval1 is before interval2.
         
@@ -185,17 +215,22 @@ class CQLIntervalFunctionHandler:
         """
         logger.debug(f"Generating CQL before operation with precision: {precision}")
         
-        end1 = self._extract_interval_end(interval1_expr)
-        start2 = self._extract_interval_start(interval2_expr)
+        interval1_val = self._extract_value(interval1_expr)
+        interval2_val = self._extract_value(interval2_expr)
+        
+        end1 = self._extract_interval_end(interval1_val)
+        start2 = self._extract_interval_start(interval2_val)
         
         if precision:
             end1_trunc = self._truncate_to_precision(end1, precision)
             start2_trunc = self._truncate_to_precision(start2, precision)
-            return f"({end1_trunc} < {start2_trunc})"
+            sql = f"({end1_trunc} < {start2_trunc})"
         else:
-            return f"({end1} < {start2})"
+            sql = f"({end1} < {start2})"
+        
+        return LiteralNode(value=sql, type='sql')
     
-    def after(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> str:
+    def after(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> LiteralNode:
         """
         CQL 'after' operator - interval1 is after interval2.
         
@@ -206,17 +241,22 @@ class CQLIntervalFunctionHandler:
         """
         logger.debug(f"Generating CQL after operation with precision: {precision}")
         
-        start1 = self._extract_interval_start(interval1_expr)
-        end2 = self._extract_interval_end(interval2_expr)
+        interval1_val = self._extract_value(interval1_expr)
+        interval2_val = self._extract_value(interval2_expr)
+        
+        start1 = self._extract_interval_start(interval1_val)
+        end2 = self._extract_interval_end(interval2_val)
         
         if precision:
             start1_trunc = self._truncate_to_precision(start1, precision)
             end2_trunc = self._truncate_to_precision(end2, precision)
-            return f"({start1_trunc} > {end2_trunc})"
+            sql = f"({start1_trunc} > {end2_trunc})"
         else:
-            return f"({start1} > {end2})"
+            sql = f"({start1} > {end2})"
+        
+        return LiteralNode(value=sql, type='sql')
     
-    def during_proper(self, point_or_interval_expr: Any, interval_expr: Any, precision: str = None) -> str:
+    def during_proper(self, point_or_interval_expr: Any, interval_expr: Any, precision: str = None) -> LiteralNode:
         """
         CQL 'during' operator - point/interval is during interval.
         
@@ -230,27 +270,32 @@ class CQLIntervalFunctionHandler:
         """
         logger.debug(f"Generating CQL during operation with precision: {precision}")
         
+        point_or_interval_val = self._extract_value(point_or_interval_expr)
+        interval_val = self._extract_value(interval_expr)
+        
         # Check if first argument is a point or interval
-        if self._is_interval_expression(point_or_interval_expr):
+        if self._is_interval_expression(point_or_interval_val):
             # Interval during interval = includedIn
             return self.included_in(point_or_interval_expr, interval_expr, precision)
         else:
             # Point during interval
-            point = point_or_interval_expr
-            start = self._extract_interval_start(interval_expr)
-            end = self._extract_interval_end(interval_expr)
+            point = point_or_interval_val
+            start = self._extract_interval_start(interval_val)
+            end = self._extract_interval_end(interval_val)
             
             if precision:
                 point_trunc = self._truncate_to_precision(point, precision)
                 start_trunc = self._truncate_to_precision(start, precision)
                 end_trunc = self._truncate_to_precision(end, precision)
-                return f"({start_trunc} <= {point_trunc} AND {point_trunc} <= {end_trunc})"
+                sql = f"({start_trunc} <= {point_trunc} AND {point_trunc} <= {end_trunc})"
             else:
-                return f"({start} <= {point} AND {point} <= {end})"
+                sql = f"({start} <= {point} AND {point} <= {end})"
+            
+            return LiteralNode(value=sql, type='sql')
     
     # Precision-Based Comparison Functions
     
-    def same_as(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> str:
+    def same_as(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> LiteralNode:
         """
         CQL 'same as' operator - intervals are the same at specified precision.
         
@@ -260,10 +305,13 @@ class CQLIntervalFunctionHandler:
         """
         logger.debug(f"Generating CQL same as operation with precision: {precision}")
         
-        start1 = self._extract_interval_start(interval1_expr)
-        end1 = self._extract_interval_end(interval1_expr)
-        start2 = self._extract_interval_start(interval2_expr)
-        end2 = self._extract_interval_end(interval2_expr)
+        interval1_val = self._extract_value(interval1_expr)
+        interval2_val = self._extract_value(interval2_expr)
+        
+        start1 = self._extract_interval_start(interval1_val)
+        end1 = self._extract_interval_end(interval1_val)
+        start2 = self._extract_interval_start(interval2_val)
+        end2 = self._extract_interval_end(interval2_val)
         
         if precision:
             start_check = self._precision_equal_check(start1, start2, precision)
@@ -272,9 +320,10 @@ class CQLIntervalFunctionHandler:
             start_check = f"({start1} = {start2})"
             end_check = f"({end1} = {end2})"
         
-        return f"({start_check} AND {end_check})"
+        sql = f"({start_check} AND {end_check})"
+        return LiteralNode(value=sql, type='sql')
     
-    def includes(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> str:
+    def includes(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> LiteralNode:
         """
         CQL 'includes' operator - interval1 includes interval2.
         
@@ -284,10 +333,13 @@ class CQLIntervalFunctionHandler:
         """
         logger.debug(f"Generating CQL includes operation with precision: {precision}")
         
-        start1 = self._extract_interval_start(interval1_expr)
-        end1 = self._extract_interval_end(interval1_expr)
-        start2 = self._extract_interval_start(interval2_expr)
-        end2 = self._extract_interval_end(interval2_expr)
+        interval1_val = self._extract_value(interval1_expr)
+        interval2_val = self._extract_value(interval2_expr)
+        
+        start1 = self._extract_interval_start(interval1_val)
+        end1 = self._extract_interval_end(interval1_val)
+        start2 = self._extract_interval_start(interval2_val)
+        end2 = self._extract_interval_end(interval2_val)
         
         if precision:
             start1_trunc = self._truncate_to_precision(start1, precision)
@@ -295,15 +347,13 @@ class CQLIntervalFunctionHandler:
             start2_trunc = self._truncate_to_precision(start2, precision)
             end2_trunc = self._truncate_to_precision(end2, precision)
             
-            return f"""
-            ({start1_trunc} <= {start2_trunc} AND {end1_trunc} >= {end2_trunc})
-            """.strip()
+            sql = f"({start1_trunc} <= {start2_trunc} AND {end1_trunc} >= {end2_trunc})"
         else:
-            return f"""
-            ({start1} <= {start2} AND {end1} >= {end2})
-            """.strip()
+            sql = f"({start1} <= {start2} AND {end1} >= {end2})"
+        
+        return LiteralNode(value=sql, type='sql')
     
-    def included_in(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> str:
+    def included_in(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> LiteralNode:
         """
         CQL 'included in' operator - interval1 is included in interval2.
         
@@ -316,7 +366,7 @@ class CQLIntervalFunctionHandler:
         # Included in is the reverse of includes
         return self.includes(interval2_expr, interval1_expr, precision)
     
-    def properly_includes(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> str:
+    def properly_includes(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> LiteralNode:
         """
         CQL 'properly includes' operator - interval1 properly includes interval2.
         
@@ -329,9 +379,10 @@ class CQLIntervalFunctionHandler:
         includes_check = self.includes(interval1_expr, interval2_expr, precision)
         same_as_check = self.same_as(interval1_expr, interval2_expr, precision)
         
-        return f"({includes_check} AND NOT ({same_as_check}))"
+        sql = f"({includes_check.value} AND NOT ({same_as_check.value}))"
+        return LiteralNode(value=sql, type='sql')
     
-    def properly_included_in(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> str:
+    def properly_included_in(self, interval1_expr: Any, interval2_expr: Any, precision: str = None) -> LiteralNode:
         """
         CQL 'properly included in' operator - interval1 is properly included in interval2.
         
@@ -346,25 +397,31 @@ class CQLIntervalFunctionHandler:
     
     # Boundary Operation Functions
     
-    def start_of(self, interval_expr: Any) -> str:
+    def start_of(self, interval_expr: Any) -> LiteralNode:
         """
         CQL 'start of' operator - get start point of interval.
         
         Example: start of [2023-01-01, 2023-01-31] → 2023-01-01
         """
         logger.debug("Generating CQL start of operation")
-        return self._extract_interval_start(interval_expr)
+        
+        interval_val = self._extract_value(interval_expr)
+        start_sql = self._extract_interval_start(interval_val)
+        return LiteralNode(value=start_sql, type='sql')
     
-    def end_of(self, interval_expr: Any) -> str:
+    def end_of(self, interval_expr: Any) -> LiteralNode:
         """
         CQL 'end of' operator - get end point of interval.
         
         Example: end of [2023-01-01, 2023-01-31] → 2023-01-31
         """
         logger.debug("Generating CQL end of operation")
-        return self._extract_interval_end(interval_expr)
+        
+        interval_val = self._extract_value(interval_expr)
+        end_sql = self._extract_interval_end(interval_val)
+        return LiteralNode(value=end_sql, type='sql')
     
-    def width_of(self, interval_expr: Any, precision: str = "day") -> str:
+    def width_of(self, interval_expr: Any, precision: str = "day") -> LiteralNode:
         """
         CQL 'width of' operator - calculate interval width.
         
@@ -374,27 +431,30 @@ class CQLIntervalFunctionHandler:
         """
         logger.debug(f"Generating CQL width of operation with precision: {precision}")
         
-        start = self._extract_interval_start(interval_expr)
-        end = self._extract_interval_end(interval_expr)
+        interval_val = self._extract_value(interval_expr)
+        start = self._extract_interval_start(interval_val)
+        end = self._extract_interval_end(interval_val)
         
         # Use the date/time functions for duration calculation
         if precision == "year":
-            return f"DATE_DIFF('year', {start}, {end})" if self.dialect == "duckdb" else f"EXTRACT(YEAR FROM AGE({end}, {start}))"
+            sql = f"DATE_DIFF('year', {start}, {end})" if self.dialect == "duckdb" else f"EXTRACT(YEAR FROM AGE({end}, {start}))"
         elif precision == "month":
-            return f"DATE_DIFF('month', {start}, {end})" if self.dialect == "duckdb" else f"(EXTRACT(YEAR FROM AGE({end}, {start})) * 12 + EXTRACT(MONTH FROM AGE({end}, {start})))"
+            sql = f"DATE_DIFF('month', {start}, {end})" if self.dialect == "duckdb" else f"(EXTRACT(YEAR FROM AGE({end}, {start})) * 12 + EXTRACT(MONTH FROM AGE({end}, {start})))"
         elif precision == "day":
-            return f"DATE_DIFF('day', {start}, {end})" if self.dialect == "duckdb" else f"EXTRACT(DAY FROM ({end} - {start}))"
+            sql = f"DATE_DIFF('day', {start}, {end})" if self.dialect == "duckdb" else f"EXTRACT(DAY FROM ({end} - {start}))"
         elif precision == "hour":
-            return f"DATE_DIFF('hour', {start}, {end})" if self.dialect == "duckdb" else f"EXTRACT(EPOCH FROM ({end} - {start})) / 3600"
+            sql = f"DATE_DIFF('hour', {start}, {end})" if self.dialect == "duckdb" else f"EXTRACT(EPOCH FROM ({end} - {start})) / 3600"
         elif precision == "minute":
-            return f"DATE_DIFF('minute', {start}, {end})" if self.dialect == "duckdb" else f"EXTRACT(EPOCH FROM ({end} - {start})) / 60"
+            sql = f"DATE_DIFF('minute', {start}, {end})" if self.dialect == "duckdb" else f"EXTRACT(EPOCH FROM ({end} - {start})) / 60"
         elif precision == "second":
-            return f"DATE_DIFF('second', {start}, {end})" if self.dialect == "duckdb" else f"EXTRACT(EPOCH FROM ({end} - {start}))"
+            sql = f"DATE_DIFF('second', {start}, {end})" if self.dialect == "duckdb" else f"EXTRACT(EPOCH FROM ({end} - {start}))"
         else:
             # Default to days
-            return f"DATE_DIFF('day', {start}, {end})" if self.dialect == "duckdb" else f"EXTRACT(DAY FROM ({end} - {start}))"
+            sql = f"DATE_DIFF('day', {start}, {end})" if self.dialect == "duckdb" else f"EXTRACT(DAY FROM ({end} - {start}))"
+        
+        return LiteralNode(value=sql, type='sql')
     
-    def size_of(self, interval_expr: Any, precision: str = "day") -> str:
+    def size_of(self, interval_expr: Any, precision: str = "day") -> LiteralNode:
         """
         CQL 'size of' operator - calculate interval size (inclusive).
         
@@ -404,12 +464,13 @@ class CQLIntervalFunctionHandler:
         """
         logger.debug(f"Generating CQL size of operation with precision: {precision}")
         
-        width = self.width_of(interval_expr, precision)
-        return f"({width} + 1)"
+        width_node = self.width_of(interval_expr, precision)
+        sql = f"({width_node.value} + 1)"
+        return LiteralNode(value=sql, type='sql')
     
     # Interval Arithmetic Functions
     
-    def union(self, interval1_expr: Any, interval2_expr: Any) -> str:
+    def union(self, interval1_expr: Any, interval2_expr: Any) -> LiteralNode:
         """
         CQL 'union' operator - combine two intervals.
         
@@ -419,18 +480,23 @@ class CQLIntervalFunctionHandler:
         """
         logger.debug("Generating CQL interval union operation")
         
-        start1 = self._extract_interval_start(interval1_expr)
-        end1 = self._extract_interval_end(interval1_expr)
-        start2 = self._extract_interval_start(interval2_expr)
-        end2 = self._extract_interval_end(interval2_expr)
+        interval1_val = self._extract_value(interval1_expr)
+        interval2_val = self._extract_value(interval2_expr)
+        
+        start1 = self._extract_interval_start(interval1_val)
+        end1 = self._extract_interval_end(interval1_val)
+        start2 = self._extract_interval_start(interval2_val)
+        end2 = self._extract_interval_end(interval2_val)
         
         # Return interval with minimum start and maximum end
         if self.dialect == "postgresql":
-            return f"[LEAST({start1}, {start2}), GREATEST({end1}, {end2})]"
+            sql = f"[LEAST({start1}, {start2}), GREATEST({end1}, {end2})]"
         else:  # DuckDB
-            return f"[LEAST({start1}, {start2}), GREATEST({end1}, {end2})]"
+            sql = f"[LEAST({start1}, {start2}), GREATEST({end1}, {end2})]"
+        
+        return LiteralNode(value=sql, type='sql')
     
-    def intersection(self, interval1_expr: Any, interval2_expr: Any) -> str:
+    def intersection(self, interval1_expr: Any, interval2_expr: Any) -> LiteralNode:
         """
         CQL 'intersection' operator - find overlap between intervals.
         
@@ -440,10 +506,13 @@ class CQLIntervalFunctionHandler:
         """
         logger.debug("Generating CQL interval intersection operation")
         
-        start1 = self._extract_interval_start(interval1_expr)
-        end1 = self._extract_interval_end(interval1_expr)
-        start2 = self._extract_interval_start(interval2_expr)
-        end2 = self._extract_interval_end(interval2_expr)
+        interval1_val = self._extract_value(interval1_expr)
+        interval2_val = self._extract_value(interval2_expr)
+        
+        start1 = self._extract_interval_start(interval1_val)
+        end1 = self._extract_interval_end(interval1_val)
+        start2 = self._extract_interval_start(interval2_val)
+        end2 = self._extract_interval_end(interval2_val)
         
         # Check for overlap first, then return intersection
         overlap_check = f"({start1} < {end2} AND {end1} > {start2})"
@@ -455,14 +524,15 @@ class CQLIntervalFunctionHandler:
             intersection_start = f"GREATEST({start1}, {start2})"
             intersection_end = f"LEAST({end1}, {end2})"
         
-        return f"""
-        CASE 
-            WHEN {overlap_check} THEN [{intersection_start}, {intersection_end}]
-            ELSE NULL
-        END
-        """.strip()
+        sql = f"""
+CASE 
+    WHEN {overlap_check} THEN [{intersection_start}, {intersection_end}]
+    ELSE NULL
+END""".strip()
+        
+        return LiteralNode(value=sql, type='sql')
     
-    def difference(self, interval1_expr: Any, interval2_expr: Any) -> str:
+    def difference(self, interval1_expr: Any, interval2_expr: Any) -> LiteralNode:
         """
         CQL 'difference' operator - subtract interval2 from interval1.
         
@@ -472,24 +542,28 @@ class CQLIntervalFunctionHandler:
         """
         logger.debug("Generating CQL interval difference operation")
         
+        interval1_val = self._extract_value(interval1_expr)
+        interval2_val = self._extract_value(interval2_expr)
+        
         # This is a complex operation - for now, return a simplified implementation
         # A full implementation would need to handle multiple result intervals
-        start1 = self._extract_interval_start(interval1_expr)
-        end1 = self._extract_interval_end(interval1_expr)
-        start2 = self._extract_interval_start(interval2_expr)
-        end2 = self._extract_interval_end(interval2_expr)
+        start1 = self._extract_interval_start(interval1_val)
+        end1 = self._extract_interval_end(interval1_val)
+        start2 = self._extract_interval_start(interval2_val)
+        end2 = self._extract_interval_end(interval2_val)
         
-        return f"""
-        -- Complex interval difference operation: {interval1_expr} - {interval2_expr}
-        -- Simplified implementation - full version requires collection handling
-        CASE 
-            WHEN {start1} >= {end2} OR {end1} <= {start2} THEN {interval1_expr}  -- No overlap
-            WHEN {start1} >= {start2} AND {end1} <= {end2} THEN NULL  -- Completely contained
-            ELSE {interval1_expr}  -- Partial overlap - needs complex logic
-        END
-        """.strip()
+        sql = f"""
+-- Complex interval difference operation: {interval1_val} - {interval2_val}
+-- Simplified implementation - full version requires collection handling
+CASE 
+    WHEN {start1} >= {end2} OR {end1} <= {start2} THEN {interval1_val}  -- No overlap
+    WHEN {start1} >= {start2} AND {end1} <= {end2} THEN NULL  -- Completely contained
+    ELSE {interval1_val}  -- Partial overlap - needs complex logic
+END""".strip()
+        
+        return LiteralNode(value=sql, type='sql')
     
-    def expand(self, interval_expr: Any, quantity_expr: Any, precision: str = "day") -> str:
+    def expand(self, interval_expr: Any, quantity_expr: Any, precision: str = "day") -> LiteralNode:
         """
         CQL 'expand' operator - expand interval by quantity on both sides.
         
@@ -497,22 +571,26 @@ class CQLIntervalFunctionHandler:
         """
         logger.debug(f"Generating CQL expand operation with precision: {precision}")
         
-        start = self._extract_interval_start(interval_expr)
-        end = self._extract_interval_end(interval_expr)
+        interval_val = self._extract_value(interval_expr)
+        quantity_val = self._extract_value(quantity_expr)
+        
+        start = self._extract_interval_start(interval_val)
+        end = self._extract_interval_end(interval_val)
         
         # Subtract quantity from start, add quantity to end
         if self.dialect == "postgresql":
-            interval_unit = f"'{quantity_expr} {precision}s'"
+            interval_unit = f"'{quantity_val} {precision}s'"
             new_start = f"({start} - INTERVAL {interval_unit})"
             new_end = f"({end} + INTERVAL {interval_unit})"
         else:  # DuckDB
             precision_upper = precision.upper()
-            new_start = f"({start} - INTERVAL ({quantity_expr}) {precision_upper})"
-            new_end = f"({end} + INTERVAL ({quantity_expr}) {precision_upper})"
+            new_start = f"({start} - INTERVAL ({quantity_val}) {precision_upper})"
+            new_end = f"({end} + INTERVAL ({quantity_val}) {precision_upper})"
         
-        return f"[{new_start}, {new_end}]"
+        sql = f"[{new_start}, {new_end}]"
+        return LiteralNode(value=sql, type='sql')
     
-    def collapse(self, intervals_expr: Any) -> str:
+    def collapse(self, intervals_expr: Any) -> LiteralNode:
         """
         CQL 'collapse' operator - merge overlapping intervals in a collection.
         
@@ -522,13 +600,16 @@ class CQLIntervalFunctionHandler:
         """
         logger.debug("Generating CQL collapse operation")
         
+        intervals_val = self._extract_value(intervals_expr)
+        
         # This is a very complex operation requiring collection processing
         # For now, return a placeholder that indicates the complexity
-        return f"""
-        -- Complex interval collapse operation: collapse({intervals_expr})
-        -- Requires collection processing and sorting - placeholder implementation
-        {intervals_expr}
-        """.strip()
+        sql = f"""
+-- Complex interval collapse operation: collapse({intervals_val})
+-- Requires collection processing and sorting - placeholder implementation
+{intervals_val}""".strip()
+        
+        return LiteralNode(value=sql, type='sql')
     
     # Utility Functions
     
@@ -658,20 +739,27 @@ class CQLIntervalFunctionHandler:
                 handler = self.function_map[function_name_lower]
                 
                 # Route to appropriate handler based on argument count and precision
+                result = None
                 if len(args) == 0:
-                    return handler()
+                    result = handler()
                 elif len(args) == 1:
-                    return handler(args[0])
+                    result = handler(args[0])
                 elif len(args) == 2:
                     if precision:
-                        return handler(args[0], args[1], precision)
+                        result = handler(args[0], args[1], precision)
                     else:
-                        return handler(args[0], args[1])
+                        result = handler(args[0], args[1])
                 elif len(args) == 3:
                     # Third argument is typically precision
-                    return handler(args[0], args[1], args[2])
+                    result = handler(args[0], args[1], args[2])
                 else:
                     return f"-- Unsupported argument count for {function_name}: {len(args)} args"
+                
+                # Extract SQL from LiteralNode if that's what we got
+                if hasattr(result, 'value'):
+                    return result.value
+                else:
+                    return str(result)
             else:
                 logger.warning(f"Unknown CQL interval function: {function_name}")
                 return f"-- Unknown interval function: {function_name}({', '.join(map(str, args))})"
