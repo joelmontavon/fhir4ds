@@ -127,6 +127,30 @@ class CQLEngine:
         else:
             # Default to DuckDB if unknown dialect
             return DuckDBDialect()
+    
+    def _json_extract(self, column: str, path: str) -> str:
+        """Generate dialect-appropriate JSON extraction call instead of hardcoded functions."""
+        if self.dialect and hasattr(self.dialect, 'extract_json_field'):
+            return self.dialect.extract_json_field(column, path)
+        else:
+            # This should not happen since all supported dialects implement extract_json_field
+            raise ValueError(f"Dialect {self.dialect} does not support extract_json_field method")
+    
+    def _json_extract_object(self, column: str, path: str) -> str:
+        """Generate dialect-appropriate JSON object extraction call."""
+        if self.dialect and hasattr(self.dialect, 'extract_json_object'):
+            return self.dialect.extract_json_object(column, path)
+        else:
+            # This should not happen since all supported dialects implement extract_json_object
+            raise ValueError(f"Dialect {self.dialect} does not support extract_json_object method")
+    
+    def _json_extract_string(self, column: str, path: str) -> str:
+        """Generate dialect-appropriate JSON string extraction call."""
+        if self.dialect and hasattr(self.dialect, 'extract_json_field'):
+            return self.dialect.extract_json_field(column, path)
+        else:
+            # This should not happen since all supported dialects implement extract_json_field
+            raise ValueError(f"Dialect {self.dialect} does not support extract_json_field method")
         
     def evaluate_expression(self, cql_expression: str, table_name: str = "fhir_resources", 
                           json_column: str = "resource") -> str:
@@ -445,16 +469,16 @@ class CQLEngine:
                 
                 # Convert CQL field access to JSON path
                 json_path = self._convert_cql_field_to_json_path(field_expr, alias)
-                sort_parts.append(f"json_extract({json_column}, '{json_path}') {order}")
+                sort_parts.append(f"{self._json_extract(json_column, json_path)} {order}")
             
-            sort_clause = ", ".join(sort_parts) if sort_parts else "json_extract(resource, '$.id')"
+            sort_clause = ", ".join(sort_parts) if sort_parts else self._json_extract("resource", "$.id")
             
             # Handle terminology filtering if present
-            where_sql = f"json_extract({json_column}, '$.resourceType') = '{resource_type}'"
+            where_sql = f"{self._json_extract(json_column, '$.resourceType')} = '{resource_type}'"
             terminology_match = re.search(r'\[(\w+)\s*:\s*"([^"]+)"\]', cql_expression, re.IGNORECASE)
             if terminology_match:
                 terminology = terminology_match.group(2)
-                where_sql += f" AND (json_extract({json_column}, '$.code.coding[0].display') = '{terminology}' OR json_extract({json_column}, '$.code.text') = '{terminology}' OR json_extract({json_column}, '$.category[0].coding[0].display') = '{terminology}')"
+                where_sql += f" AND ({self._json_extract(json_column, '$.code.coding[0].display')} = '{terminology}' OR {self._json_extract(json_column, '$.code.text')} = '{terminology}' OR {self._json_extract(json_column, '$.category[0].coding[0].display')} = '{terminology}')"
             
             sql = f"""SELECT {json_column}
 FROM {table_name}
@@ -476,7 +500,7 @@ ORDER BY {sort_clause}"""
             if return_clause:
                 return_expr = return_clause.replace('return', '').strip()
                 value_expr = self._convert_cql_field_to_json_path(return_expr, alias or resource_type[0])
-                value_expr = f"CAST(json_extract({json_column}, '{value_expr}') AS DOUBLE)"
+                value_expr = f"CAST({self._json_extract(json_column, value_expr)} AS DOUBLE)"
             
             # Map CQL function to SQL
             sql_func = {
@@ -485,7 +509,7 @@ ORDER BY {sort_clause}"""
                 'avg': 'AVG', 'average': 'AVG', 'min': 'MIN', 'max': 'MAX'
             }.get(func_name.lower(), 'COUNT')
             
-            where_sql = f"json_extract({json_column}, '$.resourceType') = '{resource_type}'"
+            where_sql = f"{self._json_extract(json_column, '$.resourceType')} = '{resource_type}'"
             if where_clause:
                 # Simple where clause conversion
                 where_condition = where_clause.replace('where', '').strip()
@@ -511,7 +535,7 @@ WHERE {where_sql}"""
             if return_clause:
                 return_expr = return_clause.replace('return', '').strip()
                 value_expr = self._convert_cql_field_to_json_path(return_expr, alias or resource_type[0])
-                value_expr = f"CAST(json_extract({json_column}, '{value_expr}') AS DOUBLE)"
+                value_expr = f"CAST({self._json_extract(json_column, value_expr)} AS DOUBLE)"
             
             # Map CQL function to SQL
             sql_func = {
@@ -520,14 +544,14 @@ WHERE {where_sql}"""
                 'avg': 'AVG', 'average': 'AVG', 'min': 'MIN', 'max': 'MAX'
             }.get(func_name.lower(), 'COUNT')
             
-            where_sql = f"json_extract({json_column}, '$.resourceType') = '{resource_type}'"
+            where_sql = f"{self._json_extract(json_column, '$.resourceType')} = '{resource_type}'"
             
             # Handle terminology filtering if present in the resource query
             terminology_match = re.search(r'\[(\w+)\s*:\s*"([^"]+)"\]', cql_expression, re.IGNORECASE)
             if terminology_match:
                 terminology = terminology_match.group(2)
                 # Add terminology filtering to SQL - try multiple common FHIR paths
-                where_sql += f" AND (json_extract({json_column}, '$.code.coding[0].display') = '{terminology}' OR json_extract({json_column}, '$.code.text') = '{terminology}' OR json_extract({json_column}, '$.category[0].coding[0].display') = '{terminology}')"
+                where_sql += f" AND ({self._json_extract(json_column, '$.code.coding[0].display')} = '{terminology}' OR {self._json_extract(json_column, '$.code.text')} = '{terminology}' OR {self._json_extract(json_column, '$.category[0].coding[0].display')} = '{terminology}')"
             
             if where_clause:
                 # Simple where clause conversion
@@ -1020,13 +1044,13 @@ WHERE json_extract({json_column}, '$.resourceType') = '{resource_type}'"""
                     # Build SQL with multiple percentile calculations
                     percentile_selects = []
                     for field_name, _, percentile_value in percentile_matches:
-                        percentile_selects.append(f"PERCENTILE_CONT({float(percentile_value)/100}) WITHIN GROUP (ORDER BY CAST(json_extract_string(r.resource, '$.valueQuantity.value') AS DECIMAL)) as {field_name}")
+                        percentile_selects.append(f"PERCENTILE_CONT({float(percentile_value)/100}) WITHIN GROUP (ORDER BY CAST({self._json_extract_string('r.resource', '$.valueQuantity.value')} AS DECIMAL)) as {field_name}")
                     
                     sql = f"""SELECT {', '.join(percentile_selects)}
 FROM fhir_resources r 
-WHERE json_extract_string(r.resource, '$.resourceType') = '{resource_type}'
-  AND json_extract_string(r.resource, '$.code.coding[0].display') = '{code}' 
-  AND json_extract_string(r.resource, '$.valueQuantity.value') IS NOT NULL"""
+WHERE {self._json_extract_string('r.resource', '$.resourceType')} = '{resource_type}'
+  AND {self._json_extract_string('r.resource', '$.code.coding[0].display')} = '{code}' 
+  AND {self._json_extract_string('r.resource', '$.valueQuantity.value')} IS NOT NULL"""
                     
                     logger.debug(f"Generated interim SQL for object construction with percentiles: {sql[:100]}...")
                     return sql
@@ -1043,11 +1067,11 @@ WHERE json_extract_string(r.resource, '$.resourceType') = '{resource_type}'
                 # Common risk score calculation pattern
                 sql = f"""WITH calculated_values AS (
   SELECT 
-    json_extract_string(r.resource, '$.id') as patient_id,
-    DATEDIFF('YEAR', DATE(json_extract_string(r.resource, '$.birthDate')), CURRENT_DATE) as patient_age,
-    CAST(json_extract_string(r.resource, '$.extension[0].valueDecimal') AS DECIMAL) as bmi
+    {self._json_extract_string('r.resource', '$.id')} as patient_id,
+    DATEDIFF('YEAR', DATE({self._json_extract_string('r.resource', '$.birthDate')}), CURRENT_DATE) as patient_age,
+    CAST({self._json_extract_string('r.resource', '$.extension[0].valueDecimal')} AS DECIMAL) as bmi
   FROM fhir_resources r 
-  WHERE json_extract_string(r.resource, '$.resourceType') = '{resource_type}'
+  WHERE {self._json_extract_string('r.resource', '$.resourceType')} = '{resource_type}'
 )
 SELECT 
   patient_id as id,
@@ -1072,15 +1096,15 @@ WHERE bmi IS NOT NULL"""
                 # Build SQL with CASE-based grouping and statistical functions
                 sql = f"""WITH age_groups AS (
   SELECT 
-    json_extract_string(r.resource, '$.id') as patient_id,
-    DATEDIFF('YEAR', DATE(json_extract_string(r.resource, '$.birthDate')), CURRENT_DATE) as patient_age,
+    {self._json_extract_string('r.resource', '$.id')} as patient_id,
+    DATEDIFF('YEAR', DATE({self._json_extract_string('r.resource', '$.birthDate')}), CURRENT_DATE) as patient_age,
     CASE 
-      WHEN DATEDIFF('YEAR', DATE(json_extract_string(r.resource, '$.birthDate')), CURRENT_DATE) < 18 THEN 'Pediatric'
-      WHEN DATEDIFF('YEAR', DATE(json_extract_string(r.resource, '$.birthDate')), CURRENT_DATE) < 65 THEN 'Adult'
+      WHEN DATEDIFF('YEAR', DATE({self._json_extract_string('r.resource', '$.birthDate')}), CURRENT_DATE) < 18 THEN 'Pediatric'
+      WHEN DATEDIFF('YEAR', DATE({self._json_extract_string('r.resource', '$.birthDate')}), CURRENT_DATE) < 65 THEN 'Adult'
       ELSE 'Geriatric'
     END as age_group
   FROM fhir_resources r
-  WHERE json_extract_string(r.resource, '$.resourceType') = '{resource_type}'
+  WHERE {self._json_extract_string('r.resource', '$.resourceType')} = '{resource_type}'
 )
 SELECT 
   age_group as ageGroup,
@@ -1106,13 +1130,13 @@ GROUP BY age_group"""
                 # Build SQL with time-based grouping and statistical functions
                 sql = f"""WITH time_series AS (
   SELECT 
-    json_extract_string(r.resource, '$.id') as observation_id,
-    EXTRACT({time_unit.upper()} FROM CAST(json_extract_string(r.resource, '$.effectiveDateTime') AS TIMESTAMP)) as time_period,
-    CAST(json_extract_string(r.resource, '$.valueQuantity.value') AS DECIMAL) as obs_value
+    {self._json_extract_string('r.resource', '$.id')} as observation_id,
+    EXTRACT({time_unit.upper()} FROM CAST({self._json_extract_string('r.resource', '$.effectiveDateTime')} AS TIMESTAMP)) as time_period,
+    CAST({self._json_extract_string('r.resource', '$.valueQuantity.value')} AS DECIMAL) as obs_value
   FROM fhir_resources r
-  WHERE json_extract_string(r.resource, '$.resourceType') = '{resource_type}'
-    AND json_extract_string(r.resource, '$.code.coding[0].display') = '{code}'
-    AND json_extract_string(r.resource, '$.valueQuantity.value') IS NOT NULL
+  WHERE {self._json_extract_string('r.resource', '$.resourceType')} = '{resource_type}'
+    AND {self._json_extract_string('r.resource', '$.code.coding[0].display')} = '{code}'
+    AND {self._json_extract_string('r.resource', '$.valueQuantity.value')} IS NOT NULL
 )
 SELECT 
   time_period as month,
@@ -1188,16 +1212,16 @@ ORDER BY time_period"""
                         
                         # Convert CQL field access to JSON path
                         json_path = self._convert_cql_field_to_json_path(field_expr, alias)
-                        sort_parts.append(f"json_extract_string({json_column}, '{json_path}') {order}")
+                        sort_parts.append(f"{self._json_extract_string(json_column, json_path)} {order}")
                 
                 sort_clause_sql = ", ".join(sort_parts) if sort_parts else f"{computed_var.lower()} DESC"
                 
                 # Handle terminology filtering if present
-                where_sql = f"json_extract_string({json_column}, '$.resourceType') = '{resource_type}'"
+                where_sql = f"{self._json_extract_string(json_column, '$.resourceType')} = '{resource_type}'"
                 terminology_match = re.search(r'\[(\w+)\s*:\s*"([^"]+)"\]', cql_expression, re.IGNORECASE)
                 if terminology_match:
                     terminology = terminology_match.group(2)
-                    where_sql += f" AND (json_extract_string({json_column}, '$.code.coding[0].display') = '{terminology}' OR json_extract_string({json_column}, '$.code.text') = '{terminology}' OR json_extract_string({json_column}, '$.category[0].coding[0].display') = '{terminology}')"
+                    where_sql += f" AND ({self._json_extract_string(json_column, '$.code.coding[0].display')} = '{terminology}' OR {self._json_extract_string(json_column, '$.code.text')} = '{terminology}' OR {self._json_extract_string(json_column, '$.category[0].coding[0].display')} = '{terminology}')"
                 
                 # Build SQL with computed values and proper sorting
                 sql = f"""WITH computed_values AS (
@@ -1322,7 +1346,7 @@ ORDER BY {sort_clause_sql}"""
   SELECT 
     {outer_cte_columns_str}
   FROM {table_name}
-  WHERE json_extract_string({json_column}, '$.resourceType') = '{resource_type}'
+  WHERE {self._json_extract_string(json_column, '$.resourceType')} = '{resource_type}'
 )
 SELECT {all_return_columns}
 FROM outer_step"""
@@ -1384,7 +1408,7 @@ FROM outer_step"""
     {json_column},
     ({var_sql}) as {var_name.lower()}
   FROM {table_name}
-  WHERE json_extract_string({json_column}, '$.resourceType') = '{resource_type}'
+  WHERE {self._json_extract_string(json_column, '$.resourceType')} = '{resource_type}'
 )"""
                     else:
                         # Subsequent CTEs reference previous step
@@ -1443,7 +1467,7 @@ FROM outer_step"""
 SELECT {all_return_columns}
 FROM {final_step} final"""
             else:
-                sql = f"SELECT {all_return_columns} FROM {table_name} WHERE json_extract_string({json_column}, '$.resourceType') = '{resource_type}'"
+                sql = f"SELECT {all_return_columns} FROM {table_name} WHERE {self._json_extract_string(json_column, '$.resourceType')} = '{resource_type}'"
             
             logger.debug(f"Generated interim SQL for multiple let expressions: {sql[:100]}...")
             return sql

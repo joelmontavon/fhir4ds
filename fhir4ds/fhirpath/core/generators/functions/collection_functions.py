@@ -289,7 +289,7 @@ class CollectionFunctionHandler(BaseFunctionHandler):
         # Generate expression for array elements (uses 'value' from json_each)
         alias = self.generator.generate_alias()
         array_element_expression_generator = type(self.generator)(
-            table_name=f"json_each({base_expr})",
+            table_name=f"{self.generator.dialect.iterate_json_array(base_expr, '$')}",
             json_column="value",
             resource_type=self.generator.resource_type,
             dialect=self.generator.dialect
@@ -434,7 +434,7 @@ class CollectionFunctionHandler(BaseFunctionHandler):
         
         return f"""
         (SELECT {self.generator.aggregate_to_json_array('value')}
-         FROM json_each({base_expr}) 
+         FROM {self.generator.dialect.iterate_json_array(base_expr, '$')} 
          WHERE {where_condition})
         """
     
@@ -478,7 +478,7 @@ class CollectionFunctionHandler(BaseFunctionHandler):
             else:
                 return f"""
                 (SELECT {self.generator.aggregate_to_json_array('value')}
-                 FROM json_each({base_expr}) 
+                 FROM {self.generator.dialect.iterate_json_array(base_expr, '$')} 
                  WHERE {where_condition})
                 """
         except Exception as e:
@@ -493,7 +493,7 @@ class CollectionFunctionHandler(BaseFunctionHandler):
         (SELECT {self.generator.aggregate_to_json_array('filtered_value')}
          FROM (
              SELECT value as filtered_value
-             FROM json_each({base_expr})
+             FROM {self.generator.dialect.iterate_json_array(base_expr, '$')}
              WHERE {where_condition}
          ) complex_filter)
         """
@@ -515,7 +515,7 @@ class CollectionFunctionHandler(BaseFunctionHandler):
             CASE 
                 WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN
                     (SELECT COUNT(*) = {self.generator.get_json_array_length(base_expr)}
-                     FROM json_each({base_expr}) 
+                     FROM {self.generator.dialect.iterate_json_array(base_expr, '$')} 
                      WHERE {condition})
                 ELSE ({condition})
             END
@@ -536,7 +536,7 @@ class CollectionFunctionHandler(BaseFunctionHandler):
         # Original implementation (fallback)
         return f"""
         (SELECT {self.generator.aggregate_to_json_array('DISTINCT value')}
-         FROM json_each({base_expr}))
+         FROM {self.generator.dialect.iterate_json_array(base_expr, '$')})
         """
     
     # Placeholder implementations for additional collection functions

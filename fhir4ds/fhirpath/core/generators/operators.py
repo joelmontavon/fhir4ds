@@ -112,7 +112,11 @@ class OperatorHandler:
         # Handle JSON value comparisons with proper type casting
         elif node.operator in ['=', '!=', '>', '<', '>=', '<=', '~', '!~']:
             left_cast, right_cast = determine_comparison_casts_func(node.left, node.right, left, right)
-            return f"({left_cast} {sql_op} {right_cast})"
+            comparison_sql = f"({left_cast} {sql_op} {right_cast})"
+            # Apply PostgreSQL JSON operator fixes inline during generation
+            if hasattr(self.dialect, 'fix_json_operators_inline'):
+                comparison_sql = self.dialect.fix_json_operators_inline(comparison_sql)
+            return comparison_sql
         
         # Handle collection union operations
         elif node.operator == '|':

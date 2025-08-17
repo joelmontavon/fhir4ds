@@ -42,7 +42,7 @@ class PostgreSQLDialect(DatabaseDialect):
         self.json_object_function = "jsonb_build_object"
         self.json_type_function = "jsonb_typeof"
         self.json_array_length_function = "jsonb_array_length"
-        self.json_each_function = "jsonb_each"
+        self.json_each_function = "jsonb_array_elements"  # Default to array elements for FHIR
         self.array_agg_function = "array_agg"
         self.string_agg_function = "string_agg"
         self.regex_function = "substring"
@@ -65,24 +65,20 @@ class PostgreSQLDialect(DatabaseDialect):
     
     def execute_sql(self, sql: str, view_def: Optional[Dict] = None) -> 'QueryResult':
         """Execute SQL and return wrapped results"""
-        # Apply PostgreSQL-specific transformations to convert generic functions
-        translated_sql = self.translate_sql(sql)
-        logger.debug(f"Executing PostgreSQL SQL: {translated_sql}")
+        logger.debug(f"Executing PostgreSQL SQL: {sql}")
         
         # Import locally to avoid circular imports
         from .. import datastore
         from ..datastore import QueryResult
-        return QueryResult(self, translated_sql, view_def)
+        return QueryResult(self, sql, view_def)
     
     def execute_query(self, sql: str) -> Any:
         """Execute a query and return raw results"""
-        # Apply PostgreSQL-specific transformations to convert generic functions
-        translated_sql = self.translate_sql(sql)
-        logger.debug(f"Executing PostgreSQL SQL: {translated_sql}")
+        logger.debug(f"Executing PostgreSQL SQL: {sql}")
         
         cursor = self.connection.cursor()
         try:
-            cursor.execute(translated_sql)
+            cursor.execute(sql)
             # Store the cursor description for later retrieval
             self._last_cursor_description = cursor.description
             return cursor.fetchall()
@@ -145,54 +141,51 @@ class PostgreSQLDialect(DatabaseDialect):
     # Dialect-specific SQL generation methods for PostgreSQL
     
     def extract_json_field(self, column: str, path: str) -> str:
-        """Extract a JSON field as text using PostgreSQL JSONB operators"""
+        """Extract a JSON field as text using PostgreSQL's jsonb_extract_path_text function"""
         if path.startswith('$.'):
             field_path = path[2:]  # Remove $.
             
-            # Handle array indexing like name[0].family
+            # Handle array indexing like name[0].family -> jsonb_extract_path_text(column, 'name', '0', 'family')
             if '[' in field_path:
                 import re
                 # Convert array indexing: name[0] -> name,0
                 processed_path = re.sub(r'(\w+)\[(\d+)\]', r'\1,\2', field_path)
                 parts = processed_path.replace('.', ',').split(',')
-                # Build the array path correctly for PostgreSQL
-                path_elements = []
-                for part in parts:
-                    if part.isdigit():
-                        path_elements.append(part)
-                    else:
-                        path_elements.append(f'"{part}"')
-                path_array = ','.join(path_elements)
-                return f"{column} #>> '{{{path_array}}}'"
+                path_args = ', '.join([f"'{part}'" for part in parts])
+                return f"jsonb_extract_path_text({column}, {path_args})"
             elif '.' in field_path:
-                # Nested path: $.name.family -> column #>> '{"name","family"}'
+                # Nested path: $.name.family -> jsonb_extract_path_text(column, 'name', 'family')
                 parts = field_path.split('.')
-                path_array = ','.join([f'"{part}"' for part in parts])
-                return f"{column} #>> '{{{path_array}}}'"
+                path_args = ', '.join([f"'{part}'" for part in parts])
+                return f"jsonb_extract_path_text({column}, {path_args})"
             else:
-                # Simple field: $.id -> column ->> 'id'
-                return f"{column} ->> '{field_path}'"
+                # Simple field: $.id -> jsonb_extract_path_text(column, 'id')
+                return f"jsonb_extract_path_text({column}, '{field_path}')"
         else:
-            # Complex JSONPath - use jsonb_path_query_first
+            # Complex JSONPath - use jsonb_path_query_first as fallback
             return f"jsonb_path_query_first({column}, '{path}') #>> '{{}}'"
     
     def extract_json_object(self, column: str, path: str) -> str:
-        """Extract a JSON object using PostgreSQL JSONB operators"""
+        """Extract a JSON object using PostgreSQL's jsonb_extract_path function"""
         if path.startswith('$.'):
             field_path = path[2:]
             
-            # Handle complex paths
-            if '[' in field_path or '.' in field_path:
-                # For array element access like $[0], use jsonb_path_query_first to avoid set-returning function issues
-                if field_path.startswith('[') and field_path.endswith(']'):
-                    # Direct array element access: $[0] -> jsonb_path_query_first
-                    return f"jsonb_path_query_first({column}, '{path}')"
-                else:
-                    # Use jsonb_path_query for complex paths
-                    return f"jsonb_path_query({column}, '{path}')"
+            # Handle array indexing like telecom[0] -> jsonb_extract_path(column, 'telecom', '0')
+            if '[' in field_path:
+                import re
+                # Convert array indexing: telecom[0] -> telecom,0
+                processed_path = re.sub(r'(\w+)\[(\d+)\]', r'\1,\2', field_path)
+                parts = processed_path.replace('.', ',').split(',')
+                path_args = ', '.join([f"'{part}'" for part in parts])
+                return f"jsonb_extract_path({column}, {path_args})"
+            elif '.' in field_path:
+                # Nested path: $.name.given -> jsonb_extract_path(column, 'name', 'given')
+                parts = field_path.split('.')
+                path_args = ', '.join([f"'{part}'" for part in parts])
+                return f"jsonb_extract_path({column}, {path_args})"
             else:
-                # Simple field: $.telecom -> column -> 'telecom'
-                return f"{column} -> '{field_path}'"
+                # Simple field: $.telecom -> jsonb_extract_path(column, 'telecom')
+                return f"jsonb_extract_path({column}, '{field_path}')"
         else:
             # Complex JSONPath - use jsonb_path_query_first for single result expectations
             return f"jsonb_path_query_first({column}, '{path}')"
@@ -203,15 +196,13 @@ class PostgreSQLDialect(DatabaseDialect):
             field_path = path[2:]
             
             if '.' in field_path:
-                # Nested path like $.name -> jsonb_array_elements(column -> 'name') WITH ORDINALITY
+                # Nested path like $.name -> jsonb_array_elements(jsonb_extract_path(column, 'name')) WITH ORDINALITY
                 parts = field_path.split('.')
-                path_expr = column
-                for part in parts:
-                    path_expr = f"{path_expr} -> '{part}'"
-                return f"jsonb_array_elements({path_expr}) WITH ORDINALITY"
+                path_args = ', '.join([f"'{part}'" for part in parts])
+                return f"jsonb_array_elements(jsonb_extract_path({column}, {path_args})) WITH ORDINALITY"
             else:
-                # Simple path like $.telecom -> jsonb_array_elements(column -> 'telecom') WITH ORDINALITY
-                return f"jsonb_array_elements({column} -> '{field_path}') WITH ORDINALITY"
+                # Simple path like $.telecom -> jsonb_array_elements(jsonb_extract_path(column, 'telecom')) WITH ORDINALITY
+                return f"jsonb_array_elements(jsonb_extract_path({column}, '{field_path}')) WITH ORDINALITY"
         else:
             # Complex path or no path - if path is '$', it's an array iteration
             if path == '$':
@@ -269,12 +260,76 @@ class PostgreSQLDialect(DatabaseDialect):
         """Get column names for object iteration - PostgreSQL uses 'key' and 'value'"""
         return ('key', 'value')
     
-    def _apply_database_specific_sql_transforms(self, sql: str) -> str:
-        """Apply PostgreSQL-specific SQL transformations"""
-        # All SQL generation now uses dialect-aware methods directly
-        # No transformations needed
-        return sql
+    def json_extract_string(self, column: str, path: str) -> str:
+        """Generate JSON string extraction SQL using PostgreSQL's jsonb_extract_path_text"""
+        # This method is an alias for extract_json_field - both extract text
+        return self.extract_json_field(column, path)
     
+    
+    def fix_json_operators_inline(self, sql_expression: str) -> str:
+        """Apply JSON operator fixes inline during SQL generation instead of post-hoc."""
+        import re
+        
+        # Fix function-based approach: jsonb_extract_path() should be jsonb_extract_path_text() for string comparisons
+        def fix_function_calls(match):
+            function_call = match.group(1)
+            operator = match.group(2)
+            value = match.group(3)
+            
+            # For string comparisons, convert jsonb_extract_path to jsonb_extract_path_text
+            if operator == '=' and (value.startswith("'") or value.startswith('"')):
+                # Convert jsonb_extract_path to jsonb_extract_path_text for string comparisons
+                if function_call.startswith('jsonb_extract_path('):
+                    function_call = function_call.replace('jsonb_extract_path(', 'jsonb_extract_path_text(', 1)
+                return f"({function_call} {operator} {value})"
+            else:
+                # For other operations, keep as is
+                return match.group(0)
+        
+        # Fix function-based string comparisons first
+        function_pattern = r'\((jsonb_extract_path\([^)]+\))\s*(=|!=|<>)\s*([^)]+)\)'
+        sql_expression = re.sub(function_pattern, fix_function_calls, sql_expression)
+        
+        # Original operator-based fixes (legacy support)
+        def fix_json_operators(match):
+            column = match.group(1)
+            field = match.group(2)
+            operator = match.group(3)
+            value = match.group(4)
+            
+            # For string comparisons (= with quoted values), use ->>
+            if operator == '=' and (value.startswith("'") or value.startswith('"')):
+                return f"({column} ->> '{field}' {operator} {value})"
+            else:
+                # For other operations like IS NOT NULL, keep ->
+                return match.group(0)
+        
+        # Fix the patterns for string comparisons
+        pattern = r'\(([^)]+)\s*->\s*\'([^\']+)\'\s*(=|!=|<>)\s*([^)]+)\)'
+        return re.sub(pattern, fix_json_operators, sql_expression)
+    
+    def create_json_array(self, *args) -> str:
+        """Create a JSON array from arguments using PostgreSQL's jsonb_build_array"""
+        if args:
+            return f"jsonb_build_array({', '.join(str(arg) for arg in args)})"
+        return "'[]'::jsonb"
+    
+    def create_json_object(self, *args) -> str:
+        """Create a JSON object from key-value pairs using PostgreSQL's jsonb_build_object"""
+        if args:
+            return f"jsonb_build_object({', '.join(str(arg) for arg in args)})"
+        return "'{}'::jsonb"
+    
+    def aggregate_values(self, expression: str, distinct: bool = False) -> str:
+        """Array aggregation using PostgreSQL's array_agg"""
+        if distinct:
+            return f"array_agg(DISTINCT {expression})"
+        return f"array_agg({expression})"
+    
+    def aggregate_strings(self, expression: str, separator: str) -> str:
+        """String aggregation using PostgreSQL's string_agg"""
+        return f"string_agg({expression}, {separator})"
+
     def join_array_elements(self, base_expr: str, separator_sql: str) -> str:
         """Join array elements with separator using PostgreSQL's jsonb functions"""
         return f"""
@@ -310,12 +365,27 @@ class PostgreSQLDialect(DatabaseDialect):
     
     def extract_nested_array_path(self, json_base: str, current_path: str, identifier_name: str, new_path: str) -> str:
         """Extract path from nested array structures using PostgreSQL's JSONB functions"""
+        
+        # For scalar field extractions like .family, return single element from array results
+        is_scalar_field = identifier_name in ['family', 'system', 'value', 'use', 'code']
+        
         # Handle root level access (current_path = "$")
         if current_path == "$":
-            return f"""CASE WHEN jsonb_typeof({json_base}) = 'array'
-            THEN jsonb_path_query_array({json_base}, '$[*].{identifier_name}')
-            ELSE {json_base} -> '{identifier_name}'
-            END"""
+            array_result = f"jsonb_path_query_array({json_base}, '$[*].{identifier_name}')"
+            scalar_result = f"{json_base} -> '{identifier_name}'"
+            
+            if is_scalar_field:
+                return f"""CASE WHEN jsonb_typeof({json_base}) = 'array'
+                THEN CASE WHEN jsonb_array_length({array_result}) = 1 
+                     THEN {array_result} ->> 0
+                     ELSE NULL END
+                ELSE {json_base} ->> '{identifier_name}'
+                END"""
+            else:
+                return f"""CASE WHEN jsonb_typeof({json_base}) = 'array'
+                THEN {array_result}
+                ELSE {scalar_result}
+                END"""
         
         # Convert DuckDB JSONPath syntax to PostgreSQL syntax
         if current_path.startswith('$.'):
@@ -327,24 +397,57 @@ class PostgreSQLDialect(DatabaseDialect):
             if '.' in current_field:
                 # For nested paths, use jsonb_path_query for more complex operations
                 array_path = f"{current_path}[*].{identifier_name}"
-                return f"""CASE WHEN jsonb_typeof(({json_base} #> '{{{current_field.replace('.', ',')}}}')) = 'array'
-                THEN jsonb_path_query_array({json_base}, '{array_path}')
-                ELSE ({json_base} #> '{{{new_field_path.replace('.', ',')}}}')
-                END"""
+                array_result = f"jsonb_path_query_array({json_base}, '{array_path}')"
+                scalar_result = f"({json_base} #> '{{{new_field_path.replace('.', ',')}}}')"
+                
+                if is_scalar_field:
+                    return f"""CASE WHEN jsonb_typeof(({json_base} #> '{{{current_field.replace('.', ',')}}}')) = 'array'
+                    THEN CASE WHEN jsonb_array_length({array_result}) = 1
+                         THEN {array_result} ->> 0
+                         ELSE NULL END
+                    ELSE {scalar_result} ->> '{identifier_name}'
+                    END"""
+                else:
+                    return f"""CASE WHEN jsonb_typeof(({json_base} #> '{{{current_field.replace('.', ',')}}}')) = 'array'
+                    THEN {array_result}
+                    ELSE {scalar_result}
+                    END"""
             else:
                 # Simple paths like $.name
                 array_path = f"{current_path}[*].{identifier_name}"
-                return f"""CASE WHEN jsonb_typeof({json_base} -> '{current_field}') = 'array'
-                THEN jsonb_path_query_array({json_base}, '{array_path}')
-                ELSE {json_base} -> '{current_field}' -> '{identifier_name}'
-                END"""
+                array_result = f"jsonb_path_query_array({json_base}, '{array_path}')"
+                scalar_result = f"{json_base} -> '{current_field}' -> '{identifier_name}'"
+                
+                if is_scalar_field:
+                    return f"""CASE WHEN jsonb_typeof({json_base} -> '{current_field}') = 'array'
+                    THEN CASE WHEN jsonb_array_length({array_result}) = 1
+                         THEN {array_result} ->> 0
+                         ELSE NULL END
+                    ELSE {json_base} -> '{current_field}' ->> '{identifier_name}'
+                    END"""
+                else:
+                    return f"""CASE WHEN jsonb_typeof({json_base} -> '{current_field}') = 'array'
+                    THEN {array_result}
+                    ELSE {scalar_result}
+                    END"""
         else:
             # Handle complex paths with jsonb_path_query
             array_path = f"{current_path}[*].{identifier_name}"
-            return f"""CASE WHEN jsonb_path_exists({json_base}, '{current_path}') AND jsonb_typeof(jsonb_path_query_first({json_base}, '{current_path}')) = 'array'
-            THEN jsonb_path_query_array({json_base}, '{array_path}')
-            ELSE jsonb_path_query_first({json_base}, '{new_path}')
-            END"""
+            array_result = f"jsonb_path_query_array({json_base}, '{array_path}')"
+            scalar_result = f"jsonb_path_query_first({json_base}, '{new_path}')"
+            
+            if is_scalar_field:
+                return f"""CASE WHEN jsonb_path_exists({json_base}, '{current_path}') AND jsonb_typeof(jsonb_path_query_first({json_base}, '{current_path}')) = 'array'
+                THEN CASE WHEN jsonb_array_length({array_result}) = 1
+                     THEN {array_result} ->> 0
+                     ELSE NULL END
+                ELSE {scalar_result} ->> 0
+                END"""
+            else:
+                return f"""CASE WHEN jsonb_path_exists({json_base}, '{current_path}') AND jsonb_typeof(jsonb_path_query_first({json_base}, '{current_path}')) = 'array'
+                THEN {array_result}
+                ELSE {scalar_result}
+                END"""
     
     def split_string(self, expression: str, delimiter: str) -> str:
         """Split string into array using PostgreSQL's string_to_array function"""

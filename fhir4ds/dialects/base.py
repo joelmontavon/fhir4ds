@@ -256,6 +256,24 @@ class DatabaseDialect(ABC):
         pass
     
     @abstractmethod
+    def create_json_array(self, *args) -> str:
+        """Create a JSON array from arguments - database specific implementation"""
+        pass
+    
+    @abstractmethod
+    def create_json_object(self, *args) -> str:
+        """Create a JSON object from key-value pairs - database specific implementation"""
+        pass
+    
+    @abstractmethod
+    def aggregate_values(self, expression: str, distinct: bool = False) -> str:
+        """Array aggregation function - database specific implementation"""
+        pass
+    
+    @abstractmethod
+    def aggregate_strings(self, expression: str, separator: str) -> str:
+        """String aggregation function - database specific implementation"""
+        pass
     def coalesce_empty_array(self, expression: str) -> str:
         """COALESCE with empty array - database specific implementation"""
         pass

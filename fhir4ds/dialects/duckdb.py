@@ -414,6 +414,28 @@ class DuckDBDialect(DatabaseDialect):
         ), '')
         """
     
+    def create_json_array(self, *args) -> str:
+        """Create a JSON array from arguments using DuckDB's json_array"""
+        if args:
+            return f"json_array({', '.join(str(arg) for arg in args)})"
+        return "json_array()"
+    
+    def create_json_object(self, *args) -> str:
+        """Create a JSON object from key-value pairs using DuckDB's json_object"""
+        if args:
+            return f"json_object({', '.join(str(arg) for arg in args)})"
+        return "json_object()"
+    
+    def aggregate_values(self, expression: str, distinct: bool = False) -> str:
+        """Array aggregation using DuckDB's array_agg"""
+        if distinct:
+            return f"array_agg(DISTINCT {expression})"
+        return f"array_agg({expression})"
+    
+    def aggregate_strings(self, expression: str, separator: str) -> str:
+        """String aggregation using DuckDB's string_agg"""
+        return f"string_agg({expression}, {separator})"
+
     def extract_nested_array_path(self, json_base: str, current_path: str, identifier_name: str, new_path: str) -> str:
         """Extract path from nested array structures using DuckDB's JSON functions"""
         # Handle root level access (current_path = "$")

@@ -409,14 +409,18 @@ SELECT * FROM population_aggregated
         analytics_columns = self._get_population_analytics_columns(table_name)
         context_filter = self.generate_context_sql_filter(table_name)
         
+        # Generate dialect-compatible expressions for window functions
+        subject_ref_extract = self._get_dialect_compatible_json_extract("'$.subject.reference'", table_name)
+        date_extract = self._get_dialect_compatible_json_extract("'$.date'", table_name)
+        
         window_sql = f"""
 WITH population_metrics AS (
     SELECT 
         {analytics_columns},
         {metric_expression} as metric_value,
-        ROW_NUMBER() OVER (PARTITION BY json_extract_string({table_name}, '$.subject.reference') ORDER BY json_extract_string({table_name}, '$.date')) as record_sequence,
-        COUNT(*) OVER (PARTITION BY json_extract_string({table_name}, '$.subject.reference')) as patient_record_count,
-        AVG({metric_expression}) OVER (PARTITION BY json_extract_string({table_name}, '$.subject.reference')) as patient_avg,
+        ROW_NUMBER() OVER (PARTITION BY {subject_ref_extract} ORDER BY {date_extract}) as record_sequence,
+        COUNT(*) OVER (PARTITION BY {subject_ref_extract}) as patient_record_count,
+        AVG({metric_expression}) OVER (PARTITION BY {subject_ref_extract}) as patient_avg,
         PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {metric_expression}) OVER () as population_median
     FROM {table_name}
     {f'WHERE {context_filter}' if context_filter != '1=1' else ''}
@@ -441,25 +445,23 @@ ORDER BY patient_id, record_sequence
     
     def _get_dialect_compatible_json_extract(self, path: str, table_alias: str = "resource") -> str:
         """
-        Get dialect-compatible JSON extraction SQL.
+        Get dialect-compatible JSON extraction SQL using proper dialect methods.
         
         Args:
-            path: JSON path to extract
-            table_alias: Table alias
+            path: JSON path to extract (with quotes, e.g., "'$.id'")
+            table_alias: JSON column reference (typically "resource")
             
         Returns:
             Dialect-appropriate JSON extraction SQL
         """
-        if self.dialect and hasattr(self.dialect, 'name'):
-            if self.dialect.name == "POSTGRESQL":
-                # PostgreSQL uses ->> for text extraction
-                return f"({table_alias}->>{path})"
-            else:
-                # DuckDB and default
-                return f"json_extract_string({table_alias}, '{path}')"
+        if self.dialect and hasattr(self.dialect, 'extract_json_field'):
+            # Remove quotes from path for dialect method
+            clean_path = path.strip("'\"")
+            # Use proper dialect method for clean architecture
+            return self.dialect.extract_json_field(table_alias, clean_path)
         else:
-            # Default to DuckDB syntax
-            return f"json_extract_string({table_alias}, '{path}')"
+            # Fallback to DuckDB syntax if no dialect available
+            return f"json_extract_string({table_alias}, {path})"
     
     def _get_dialect_compatible_percentile(self, expression: str, percentile: float) -> str:
         """

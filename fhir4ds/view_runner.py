@@ -95,7 +95,9 @@ class ViewRunner:
     # Dialect-aware helper methods for JSON operations
     def json_extract_string(self, column: str, path: str) -> str:
         """Extract JSON field as string using dialect"""
-        return self.dialect.extract_json_field(column, path)
+        result = self.dialect.extract_json_field(column, path)
+        print(f"🔍 json_extract_string({column}, {path}) → {result}")
+        return result
     
     def json_extract(self, column: str, path: str) -> str:
         """Extract JSON object using dialect"""
@@ -1710,7 +1712,7 @@ class ViewRunner:
                             return f"{self.dialect.extract_json_field(self.json_col, f'$.{left_path}')} = '{right_value}'"
                 
                 # Default: check for existence
-                return f"{self.dialect.extract_json_object(self.json_col, f'$.{path}')} IS NOT NULL"
+                return f"{self.dialect.extract_json_field(self.json_col, f'$.{path}')} IS NOT NULL"
     
     def _generate_smart_where_condition(self, path: str) -> str:
         """Generate smart WHERE conditions with array awareness"""
@@ -1928,7 +1930,7 @@ class ViewRunner:
                         value = value.strip().strip("'\"")
                         conditions.append(f"{self.json_extract_string(f'{before_where}_item.value', f'$.{field}')} = '{value}'")
                     else:
-                        conditions.append(f"{self.json_extract(f'{before_where}_item.value', f'$.{part.strip()}')} IS NOT NULL")
+                        conditions.append(f"{self.dialect.extract_json_field(f'{before_where}_item.value', f'$.{part.strip()}')} IS NOT NULL")
                 
                 return f"""EXISTS (
                     SELECT 1 FROM {self.dialect.iterate_json_array(self.json_col, f'$.{before_where}')} AS {before_where}_item
@@ -1946,7 +1948,7 @@ class ViewRunner:
                         value = value.strip().strip("'\"")
                         conditions.append(f"{self.json_extract_string(f'{before_where}_item.value', f'$.{field}')} = '{value}'")
                     else:
-                        conditions.append(f"{self.json_extract(f'{before_where}_item.value', f'$.{part.strip()}')} IS NOT NULL")
+                        conditions.append(f"{self.dialect.extract_json_field(f'{before_where}_item.value', f'$.{part.strip()}')} IS NOT NULL")
                 
                 return f"""EXISTS (
                     SELECT 1 FROM {self.dialect.iterate_json_array(self.json_col, f'$.{before_where}')} AS {before_where}_item
@@ -1978,7 +1980,7 @@ class ViewRunner:
             return condition_sql
         
         # Fallback for unrecognized patterns
-        return f"{self.json_extract(self.json_col, f'$.{path}')} IS NOT NULL"
+        return f"{self.dialect.extract_json_field(self.json_col, f'$.{path}')} IS NOT NULL"
     
     def _convert_complex_where_condition(self, condition: str) -> str:
         """Convert complex where condition like 'value.ofType(integer) > 11' to SQL"""
@@ -2012,7 +2014,8 @@ class ViewRunner:
         if '.ofType(' in field_path:
             mapped_field = self._apply_choice_type_mapping(field_path)
             # For choice types, just check simple field existence
-            return f"({self.dialect.extract_json_object(self.json_col, f'$.{mapped_field}')} IS NOT NULL AND ({self.dialect.get_json_type(self.dialect.extract_json_object(self.json_col, f'$.{mapped_field}'))} != 'ARRAY' OR {self.dialect.get_json_array_length(self.dialect.extract_json_object(self.json_col, f'$.{mapped_field}'))} > 0))"
+            mapped_obj = self.dialect.extract_json_object(self.json_col, f'$.{mapped_field}')
+            return f"({mapped_obj} IS NOT NULL AND ({self.dialect.get_json_type(mapped_obj)} != 'ARRAY' OR {self.dialect.get_json_array_length(mapped_obj)} > 0))"
         
         # Detect if this is an array path like 'name.family'
         if '.' in field_path:
@@ -2024,14 +2027,15 @@ class ViewRunner:
                 # Generate EXISTS with array iteration
                 return f"""EXISTS (
                     SELECT 1 FROM {self.dialect.iterate_json_array(self.json_col, f'$.{array_field}')} AS {array_field}_item
-                    WHERE {self.dialect.extract_json_object(f'{array_field}_item.value', f'$.{item_field}')} IS NOT NULL
+                    WHERE {self.dialect.extract_json_field(f'{array_field}_item.value', f'$.{item_field}')} IS NOT NULL
                 )"""
         
         # Simple field existence - handle both arrays and simple fields
         # First check if field exists, then if it's an array, check if non-empty
-        return f"""({self.dialect.extract_json_object(self.json_col, f'$.{field_path}')} IS NOT NULL AND 
-                   ({self.dialect.get_json_type(self.dialect.extract_json_object(self.json_col, f'$.{field_path}'))} != 'ARRAY' OR 
-                    {self.dialect.get_json_array_length(self.dialect.extract_json_object(self.json_col, f'$.{field_path}'))} > 0))"""
+        field_obj = self.dialect.extract_json_object(self.json_col, f'$.{field_path}')
+        return f"""({field_obj} IS NOT NULL AND 
+                   ({self.dialect.get_json_type(field_obj)} != 'ARRAY' OR 
+                    {self.dialect.get_json_array_length(field_obj)} > 0))"""
     
     def _generate_equality_condition(self, field_path: str, value: str) -> str:
         """Generate equality condition for array field paths"""
@@ -2393,30 +2397,52 @@ class ViewRunner:
             
             if value_field and nested_field:
                 # Extract nested field from value object within nested extension
+                # Generate proper dialect-specific SQL
+                json_extract_obj = self.dialect.extract_json_object('inner_ext.value', f'$.{value_field}')
+                json_extract_str = self.dialect.extract_json_field(f'({json_extract_obj})', f'$.{nested_field}')
+                json_each_outer = self.dialect.iterate_json_array(self.json_col, '$.extension')
+                json_each_inner = self.dialect.iterate_json_array('outer_ext.value', '$.extension')
+                where_outer = f"{self.dialect.extract_json_field('outer_ext.value', '$.url')} = '{outer_url}'"
+                where_inner = f"{self.dialect.extract_json_field('inner_ext.value', '$.url')} = '{inner_url}'"
+                
                 sql = f"""(
-                    SELECT json_extract_string(json_extract(inner_ext.value, '$.{value_field}'), '$.{nested_field}')
-                    FROM json_each({self.json_col}, '$.extension') AS outer_ext,
-                         json_each(outer_ext.value, '$.extension') AS inner_ext
-                    WHERE json_extract_string(outer_ext.value, '$.url') = '{outer_url}'
-                      AND json_extract_string(inner_ext.value, '$.url') = '{inner_url}'
+                    SELECT {json_extract_str}
+                    FROM {json_each_outer} AS outer_ext,
+                         {json_each_inner} AS inner_ext
+                    WHERE {where_outer}
+                      AND {where_inner}
                     LIMIT 1
                 )"""
             elif value_field:
+                # Generate proper dialect-specific SQL
+                json_extract_str = self.dialect.extract_json_field('inner_ext.value', f'$.{value_field}')
+                json_each_outer = self.dialect.iterate_json_array(self.json_col, '$.extension')
+                json_each_inner = self.dialect.iterate_json_array('outer_ext.value', '$.extension')
+                where_outer = f"{self.dialect.extract_json_field('outer_ext.value', '$.url')} = '{outer_url}'"
+                where_inner = f"{self.dialect.extract_json_field('inner_ext.value', '$.url')} = '{inner_url}'"
+                
                 sql = f"""(
-                    SELECT json_extract_string(inner_ext.value, '$.{value_field}')
-                    FROM json_each({self.json_col}, '$.extension') AS outer_ext,
-                         json_each(outer_ext.value, '$.extension') AS inner_ext
-                    WHERE json_extract_string(outer_ext.value, '$.url') = '{outer_url}'
-                      AND json_extract_string(inner_ext.value, '$.url') = '{inner_url}'
+                    SELECT {json_extract_str}
+                    FROM {json_each_outer} AS outer_ext,
+                         {json_each_inner} AS inner_ext
+                    WHERE {where_outer}
+                      AND {where_inner}
                     LIMIT 1
                 )"""
             else:
+                # Generate proper dialect-specific SQL
+                json_extract_obj = self.dialect.extract_json_object('inner_ext.value', '$')
+                json_each_outer = self.dialect.iterate_json_array(self.json_col, '$.extension')
+                json_each_inner = self.dialect.iterate_json_array('outer_ext.value', '$.extension')
+                where_outer = f"{self.dialect.extract_json_field('outer_ext.value', '$.url')} = '{outer_url}'"
+                where_inner = f"{self.dialect.extract_json_field('inner_ext.value', '$.url')} = '{inner_url}'"
+                
                 sql = f"""(
-                    SELECT json_extract(inner_ext.value, '$')
-                    FROM json_each({self.json_col}, '$.extension') AS outer_ext,
-                         json_each(outer_ext.value, '$.extension') AS inner_ext
-                    WHERE json_extract_string(outer_ext.value, '$.url') = '{outer_url}'
-                      AND json_extract_string(inner_ext.value, '$.url') = '{inner_url}'
+                    SELECT {json_extract_obj}
+                    FROM {json_each_outer} AS outer_ext,
+                         {json_each_inner} AS inner_ext
+                    WHERE {where_outer}
+                      AND {where_inner}
                     LIMIT 1
                 )"""
         else:
@@ -2565,7 +2591,7 @@ class ViewRunner:
                             SELECT {self.dialect.extract_json_field('given_item.value', '$')} AS given_value
                             FROM {self.dialect.iterate_json_array(self.json_col, f'$.{array_field}')} AS name_item,
                                  {self.dialect.iterate_json_array(self.dialect.extract_json_object('name_item.value', f'$.{nested_field}'), '$')} AS given_item
-                            WHERE {self.dialect.extract_json_object('name_item.value', f'$.{nested_field}')} IS NOT NULL
+                            WHERE {self.dialect.extract_json_field('name_item.value', f'$.{nested_field}')} IS NOT NULL
                         )
                     )"""
                 else:
@@ -3041,7 +3067,8 @@ class ViewRunner:
                                 return Expr(sql)
                 
                 # Fallback for other where().exists() patterns
-                sql = f"EXISTS (SELECT 1 FROM json_each({self.json_col}, '$') AS item WHERE true)"
+                iteration_sql = self.dialect.iterate_json_array(self.json_col, '$')
+                sql = f"EXISTS (SELECT 1 FROM {iteration_sql} AS item WHERE true)"
                 return Expr(sql)
         
         # Fallback to simple extraction

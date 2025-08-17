@@ -35,7 +35,13 @@ class CQLCollectionFunctionHandler:
         """
         self.generator = generator
         self.cte_builder = cte_builder
-        self.dialect = generator.dialect if hasattr(generator, 'dialect') else 'duckdb'
+        # Store the actual dialect object for proper method calls
+        if hasattr(generator, 'dialect') and generator.dialect:
+            self.dialect_obj = generator.dialect
+            self.dialect = generator.dialect.name if hasattr(generator.dialect, 'name') else 'duckdb'
+        else:
+            self.dialect_obj = None
+            self.dialect = 'duckdb'
         
     def get_supported_functions(self) -> List[str]:
         """Return list of CQL-specific collection function names this handler supports."""
@@ -665,44 +671,68 @@ class CQLCollectionFunctionHandler:
             return str(arg_node)
     
     def _get_json_type(self, expr: str) -> str:
-        """Get JSON type function for current dialect."""
-        if hasattr(self.generator, 'get_json_type'):
+        """Get JSON type using proper dialect methods."""
+        # First try the dialect object directly
+        if self.dialect_obj and hasattr(self.dialect_obj, 'get_json_type'):
+            return self.dialect_obj.get_json_type(expr)
+        # Fallback to generator method
+        elif hasattr(self.generator, 'get_json_type'):
             return self.generator.get_json_type(expr)
-        elif self.dialect == 'postgresql':
+        # Final fallback to hardcoded functions (should be avoided)
+        elif self.dialect == 'POSTGRESQL':
             return f"jsonb_typeof({expr})"
         else:  # DuckDB
             return f"json_type({expr})"
     
     def _get_json_array_length(self, expr: str) -> str:
-        """Get JSON array length function for current dialect."""
-        if hasattr(self.generator, 'get_json_array_length'):
+        """Get JSON array length using proper dialect methods."""
+        # First try the dialect object directly
+        if self.dialect_obj and hasattr(self.dialect_obj, 'get_json_array_length'):
+            return self.dialect_obj.get_json_array_length(expr)
+        # Fallback to generator method
+        elif hasattr(self.generator, 'get_json_array_length'):
             return self.generator.get_json_array_length(expr)
-        elif self.dialect == 'postgresql':
+        # Final fallback to hardcoded functions (should be avoided)
+        elif self.dialect == 'POSTGRESQL':
             return f"jsonb_array_length({expr})"
         else:  # DuckDB
             return f"json_array_length({expr})"
     
     def _iterate_json_array(self, expr: str, path: str) -> str:
-        """Generate JSON array iteration for current dialect."""
-        if hasattr(self.generator, 'iterate_json_array'):
+        """Generate JSON array iteration using proper dialect methods."""
+        # First try the dialect object directly
+        if self.dialect_obj and hasattr(self.dialect_obj, 'iterate_json_array'):
+            return self.dialect_obj.iterate_json_array(expr, path)
+        # Fallback to generator method
+        elif hasattr(self.generator, 'iterate_json_array'):
             return self.generator.iterate_json_array(expr, path)
-        elif self.dialect == 'postgresql':
+        # Final fallback to hardcoded functions (should be avoided)
+        elif self.dialect == 'POSTGRESQL':
             return f"jsonb_array_elements_text({expr}) WITH ORDINALITY AS elem(value, key)"
         else:  # DuckDB
             return f"json_each({expr}) AS elem"
     
     def _aggregate_to_json_array(self, expr: str) -> str:
-        """Generate JSON array aggregation for current dialect."""
-        if hasattr(self.generator, 'aggregate_to_json_array'):
+        """Generate JSON array aggregation using proper dialect methods."""
+        # First try the dialect object directly
+        if self.dialect_obj and hasattr(self.dialect_obj, 'aggregate_to_json_array'):
+            return self.dialect_obj.aggregate_to_json_array(expr)
+        # Fallback to generator method
+        elif hasattr(self.generator, 'aggregate_to_json_array'):
             return self.generator.aggregate_to_json_array(expr)
-        elif self.dialect == 'postgresql':
+        # Final fallback to hardcoded functions (should be avoided)
+        elif self.dialect == 'POSTGRESQL':
             return f"jsonb_agg({expr})"
         else:  # DuckDB
             return f"json_group_array({expr})"
     
     def _create_json_object(self, key_value_pairs: List[str]) -> str:
-        """Create JSON object for current dialect."""
-        if self.dialect == 'postgresql':
+        """Create JSON object using proper dialect methods."""
+        # First try the dialect object directly
+        if self.dialect_obj and hasattr(self.dialect_obj, 'create_json_object'):
+            return self.dialect_obj.create_json_object(*key_value_pairs)
+        # Final fallback to hardcoded functions (should be avoided)
+        elif self.dialect == 'POSTGRESQL':
             return f"jsonb_build_object({', '.join(key_value_pairs)})"
         else:  # DuckDB
             pairs = []
@@ -713,17 +743,26 @@ class CQLCollectionFunctionHandler:
             return f"{{{', '.join(pairs)}}}"
     
     def _create_json_array(self, elements: List[str]) -> str:
-        """Create JSON array for current dialect."""
-        if self.dialect == 'postgresql':
+        """Create JSON array using proper dialect methods."""
+        # First try the dialect object directly
+        if self.dialect_obj and hasattr(self.dialect_obj, 'create_json_array'):
+            return self.dialect_obj.create_json_array(*elements)
+        # Final fallback to hardcoded functions (should be avoided)
+        elif self.dialect == 'POSTGRESQL':
             return f"jsonb_build_array({', '.join(elements)})"
         else:  # DuckDB
             return f"[{', '.join(elements)}]"
     
     def _extract_json_object(self, expr: str, path: str) -> str:
-        """Extract JSON object for current dialect."""
-        if hasattr(self.generator, 'extract_json_object'):
+        """Extract JSON object using proper dialect methods."""
+        # First try the dialect object directly
+        if self.dialect_obj and hasattr(self.dialect_obj, 'extract_json_object'):
+            return self.dialect_obj.extract_json_object(expr, path)
+        # Fallback to generator method
+        elif hasattr(self.generator, 'extract_json_object'):
             return self.generator.extract_json_object(expr, path)
-        elif self.dialect == 'postgresql':
+        # Final fallback to hardcoded functions (should be avoided)
+        elif self.dialect == 'POSTGRESQL':
             return f"{expr} -> '{path}'"
         else:  # DuckDB
             return f"json_extract({expr}, '{path}')"

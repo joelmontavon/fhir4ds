@@ -480,8 +480,8 @@ class BaseFunctionHandler(ABC):
                 FROM json_each({base_expr}, '$')
                 WHERE ({element_logic}) IS NOT NULL
             )
-            WHEN {base_expr} IS NOT NULL THEN json_array({element_logic.replace('value', base_expr)})
-            ELSE json_array()
+            WHEN {base_expr} IS NOT NULL THEN {self.generator.json_array_call}({element_logic.replace('value', base_expr)})
+            ELSE {self.generator.json_array_call}()
         END
         """
         

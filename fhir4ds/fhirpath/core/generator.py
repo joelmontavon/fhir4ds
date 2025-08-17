@@ -301,6 +301,35 @@ class SQLGenerator:
         """Iterate JSON array using dialect-specific method"""
         return self.dialect.iterate_json_array(column, path)
     
+    def json_each_with_dialect(self, column: str) -> str:
+        """Generate JSON each iteration using proper dialect method"""
+        return self.dialect.iterate_json_array(column, '$')
+    
+    def generate_from_json_each(self, column: str) -> str:
+        """Generate FROM clause for JSON each iteration using dialect methods"""
+        if self.dialect.name == 'POSTGRESQL':
+            # PostgreSQL: FROM jsonb_array_elements(column) WITH ORDINALITY AS t(value, ordinality) 
+            return f"jsonb_array_elements({column}) WITH ORDINALITY AS t(value, ordinality)"
+        else:
+            # DuckDB: FROM json_each(column)
+            return f"json_each({column})"
+    
+    def json_array_call(self, *args) -> str:
+        """Generate JSON array creation using dialect method"""
+        return self.dialect.create_json_array(*args)
+    
+    def json_object_call(self, *args) -> str:
+        """Generate JSON object creation using dialect method"""
+        return self.dialect.create_json_object(*args)
+    
+    def array_agg_call(self, expression: str, distinct: bool = False) -> str:
+        """Generate array aggregation using dialect method"""
+        return self.dialect.aggregate_values(expression, distinct)
+    
+    def string_agg_call(self, expression: str, separator: str) -> str:
+        """Generate string aggregation using dialect method"""
+        return self.dialect.aggregate_strings(expression, separator)
+    
     def iterate_json_elements_indexed(self, column: str) -> str:
         """Iterate JSON elements with proper indexing for both arrays and objects"""
         # For PostgreSQL, we need to handle arrays vs objects differently
@@ -344,7 +373,7 @@ class SQLGenerator:
     
     def json_extract_string_function_call(self, column: str, path: str) -> str:
         """Generate JSON extract string function call using dialect-specific method"""
-        return f"{self.dialect.json_extract_string_function}({column}, '{path}')"
+        return self.dialect.extract_json_field(column, path)
         
     def json_array_function_call(self, *args) -> str:
         """Generate JSON array function call using dialect-specific method"""
@@ -2346,7 +2375,7 @@ class SQLGenerator:
                         CASE 
                             WHEN {self.get_json_array_length(base_ref)} = 0 THEN NULL
                             ELSE (
-                                SELECT json_group_array(
+                                SELECT {self.dialect.aggregate_to_json_array}(
                                     CASE 
                                         WHEN {self.get_json_type('value')} = 'VARCHAR' AND TRY_CAST(value AS DATE) IS NOT NULL THEN TRY_CAST(value AS DATE)
                                         WHEN {self.get_json_type('value')} = 'DATE' THEN CAST(value AS DATE)
@@ -3457,7 +3486,7 @@ class SQLGenerator:
         # Create CTE for distinct operation
         distinct_cte_name = self._create_cte(f"""
             SELECT 
-                json_group_array(DISTINCT elem.value) as distinct_result
+                {self.dialect.aggregate_to_json_array}(DISTINCT elem.value) as distinct_result
             FROM {self.iterate_json_array(base_ref, '$')} AS elem(value)
             WHERE elem.value IS NOT NULL
         """, "distinct_result")
@@ -3523,12 +3552,12 @@ class SQLGenerator:
                     WHEN json_type({base_ref}) = 'ARRAY' THEN
                         COALESCE(
                             (SELECT json_group_array(value)
-                             FROM json_each({base_ref})
+                             FROM {self.generate_from_json_each(base_ref)}
                              WHERE {element_condition.replace('element_value', 'value')}),
-                            json_array()
+                            {self.json_array_call()}
                         )
                     ELSE 
-                        CASE WHEN {element_condition.replace('element_value', base_ref)} THEN json_array({base_ref}) ELSE json_array() END
+                        CASE WHEN {element_condition.replace('element_value', base_ref)} THEN {self.json_array_call(base_ref)} ELSE {self.json_array_call()} END
                 END as oftype_result
             FROM {from_clause}
         """, "oftype_result")
@@ -3687,7 +3716,7 @@ class SQLGenerator:
         extension_cte_name = self._create_cte(f"""
             SELECT 
                 CASE 
-                    WHEN COUNT(*) = 0 THEN json_array()
+                    WHEN COUNT(*) = 0 THEN {self.json_array_call()}
                     ELSE json_group_array(
                         json_object(
                             'id', {self.extract_json_field('value', '$.id')},
@@ -3965,7 +3994,7 @@ class SQLGenerator:
         # Create CTE for getResourceKey operation
         getresourcekey_cte_name = self._create_cte(f"""
             SELECT 
-                json_extract_string({self.json_column}, '$.id') as getresourcekey_result
+                {self.dialect.extract_json_field(self.json_column, '$.id')} as getresourcekey_result
             FROM {self.table_name}
         """, "getresourcekey_result")
         
@@ -4802,12 +4831,12 @@ class SQLGenerator:
                 WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN
                     COALESCE(
                         (SELECT json_group_array(value)
-                         FROM json_each({base_expr})
+                         FROM {self.generate_from_json_each(base_expr)}
                          WHERE {element_condition.replace('element_value', 'value')}),
-                        json_array()
+                        {self.json_array_call()}
                     )
                 ELSE 
-                    CASE WHEN {element_condition.replace('element_value', base_expr)} THEN json_array({base_expr}) ELSE json_array() END
+                    CASE WHEN {element_condition.replace('element_value', base_expr)} THEN {self.json_array_call(base_expr)} ELSE {self.json_array_call()} END
             END
             """
 
@@ -4832,7 +4861,7 @@ class SQLGenerator:
             return f"""
             (SELECT 
                 CASE 
-                    WHEN COUNT(*) = 0 THEN json_array()
+                    WHEN COUNT(*) = 0 THEN {self.json_array_call()}
                     ELSE json_group_array(
                         json_object(
                             'id', {self.extract_json_field('value', '$.id')},
@@ -4853,7 +4882,7 @@ class SQLGenerator:
                         )
                     )
                 END
-             FROM json_each(json_extract({base_expr}, '$.extension'))
+             FROM {self.generate_from_json_each(f"{self.dialect.extract_json_object(base_expr, '$.extension')}")}
              WHERE {self.extract_json_field('value', '$.url')} = '{extension_url}')
             """
 
@@ -5199,7 +5228,7 @@ class SQLGenerator:
             
             # Original implementation (fallback)
             # Return the resource ID as the key
-            return f"json_extract_string({self.json_column}, '$.id')"
+            return f"{self.dialect.extract_json_field(self.json_column, '$.id')}"
             
         elif func_name == 'abs':
             # abs() function - absolute value
@@ -5919,10 +5948,10 @@ class SQLGenerator:
                 WHEN {self.dialect.json_type_function}({base_expr}) IN ('VARCHAR', 'STRING', 'TEXT') THEN
                     CASE 
                         -- Simple numeric string
-                        WHEN {self.dialect.json_extract_string_function}({base_expr}, '$') ~ '^[+-]?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?$' 
+                        WHEN {self.json_extract_string_function_call(base_expr, '$')} ~ '^[+-]?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?$' 
                         THEN TRUE
                         -- Numeric string with unit (basic pattern)
-                        WHEN {self.dialect.json_extract_string_function}({base_expr}, '$') ~ '^[+-]?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?\\s+[a-zA-Z]+.*$' 
+                        WHEN {self.json_extract_string_function_call(base_expr, '$')} ~ '^[+-]?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?\\s+[a-zA-Z]+.*$' 
                         THEN TRUE
                         ELSE FALSE
                     END
@@ -5945,7 +5974,7 @@ class SQLGenerator:
                      (
                          -- For strings, check if not empty
                          ({self.dialect.json_type_function}({base_expr}) IN ('VARCHAR', 'STRING', 'TEXT') AND 
-                          {self.dialect.json_extract_string_function}({base_expr}, '$') != '') OR
+                          {self.json_extract_string_function_call(base_expr, '$')} != '') OR
                          -- For arrays, check if not empty
                          ({self.dialect.json_type_function}({base_expr}) = 'ARRAY' AND 
                           {self.dialect.json_array_length_function}({base_expr}) > 0) OR
@@ -6097,7 +6126,7 @@ class SQLGenerator:
                 -- Check if it's a simple string code (in some contexts)
                 WHEN {base_expr} IS NOT NULL AND 
                      {self.dialect.json_type_function}({base_expr}) IN ('VARCHAR', 'STRING', 'TEXT') AND
-                     {self.dialect.json_extract_string_function}({base_expr}, '$') != ''
+                     {self.json_extract_string_function_call(base_expr, '$')} != ''
                 THEN TRUE
                 ELSE FALSE
             END
@@ -6172,7 +6201,7 @@ class SQLGenerator:
                             CASE 
                                 WHEN EXISTS (
                                     SELECT 1 FROM json_each({self.dialect.json_extract_function}({base_expr}, '$.meta.profile')) 
-                                    WHERE {self.dialect.json_extract_string_function}(value, '$') = '{template_id}'
+                                    WHERE {self.json_extract_string_function_call('value', '$')} = '{template_id}'
                                 )
                                 THEN TRUE
                                 ELSE FALSE
@@ -6189,7 +6218,7 @@ class SQLGenerator:
                                 WHEN {self.dialect.json_type_function}({self.dialect.json_extract_function}({base_expr}, '$.templateId')) = 'ARRAY' AND
                                      EXISTS (
                                          SELECT 1 FROM json_each({self.dialect.json_extract_function}({base_expr}, '$.templateId')) 
-                                         WHERE {self.dialect.json_extract_string_function}(value, '$.root') = '{template_id}'
+                                         WHERE {self.json_extract_string_function_call('value', '$.root')} = '{template_id}'
                                      )
                                 THEN TRUE
                                 ELSE FALSE
@@ -7703,7 +7732,7 @@ class SQLGenerator:
             
             # Original implementation (fallback)
             # Return the resource ID as the key
-            return f"json_extract_string({self.json_column}, '$.id')"
+            return f"{self.dialect.extract_json_field(self.json_column, '$.id')}"
         
         # Handle getReferenceKey() function
         if func_name == 'getreferencekey':
@@ -7986,8 +8015,8 @@ class SQLGenerator:
                         # Instead of casting the entire complex expression, check if any array element matches
                         final_left_sql = f"""(
                             SELECT COUNT(*) > 0 
-                            FROM json_each(COALESCE({left_sql}, json_array()))
-                            WHERE json_extract_string(value, '$') = {right_sql}
+                            FROM json_each(COALESCE({left_sql}, {self.json_array_call()}))
+                            WHERE {self.runner.json_extract_string('value', '$')} = {right_sql}
                         )"""
                         final_right_sql = "true"
                     # Special handling for to_json(list(...)) array expressions - FHIRPath collection promotion
@@ -7996,13 +8025,13 @@ class SQLGenerator:
                         # Use FHIRPath collection promotion: check if any element in collection equals scalar
                         final_left_sql = f"""(
                             SELECT COUNT(*) > 0
-                            FROM json_each(COALESCE(({left_sql}), json_array()))
-                            WHERE json_extract_string(value, '$') = {right_sql}
+                            FROM json_each(COALESCE(({left_sql}), {self.json_array_call()}))
+                            WHERE {self.runner.json_extract_string('value', '$')} = {right_sql}
                         )"""
                         final_right_sql = "true"
                     # Special handling for $this comparisons in json_each context
                     elif left_sql.strip() == 'value':  # This is $this in json_each context
-                        final_left_sql = f"json_extract_string({left_sql}, '$')"
+                        final_left_sql = f"{self.runner.json_extract_string(left_sql, '$')}"
                     elif transformed_left:
                         final_left_sql = transformed_left
                     elif 'json_extract' in left_sql:  # Fallback for complex expr involving json_extract
@@ -8052,7 +8081,7 @@ class SQLGenerator:
                 else:
                     # Special handling for $this comparisons in json_each context
                     if right_sql.strip() == 'value':  # This is $this in json_each context
-                        final_right_sql = f"json_extract_string({right_sql}, '$')"
+                        final_right_sql = f"{self.runner.json_extract_string(right_sql, '$')}"
                     elif transformed_right:
                         final_right_sql = transformed_right
                     elif 'json_extract' in right_sql: # Fallback for complex expr involving json_extract
@@ -8156,7 +8185,7 @@ class SQLGenerator:
                 evaluated_index = self._evaluate_simple_arithmetic(index_val_sql)
                 if evaluated_index is not None and evaluated_index >= 0:
                     # Use json_extract_string for likely string results to avoid quotes
-                    return f"COALESCE(json_extract_string({base_expr}, '$[{evaluated_index}]'), '')"
+                    return f"COALESCE({self.runner.json_extract_string(base_expr, f'$[{evaluated_index}]')}, '')"
             except Exception as e:
                 # Optimization failed, continue with fallback
                 self.logger.debug(f"Optimization failed: {e}")
@@ -8170,7 +8199,7 @@ class SQLGenerator:
                 evaluated_index = self._evaluate_simple_arithmetic(index_val_sql)
                 if evaluated_index is not None and evaluated_index >= 0:
                     # Use static index with json_extract_string
-                    return f"COALESCE(json_extract_string({base_expr}, '$[{evaluated_index}]'), '')"
+                    return f"COALESCE({self.runner.json_extract_string(base_expr, f'$[{evaluated_index}]')}, '')"
             except Exception as e:
                 # Optimization failed, continue with fallback
                 self.logger.debug(f"Optimization failed: {e}")
@@ -8182,7 +8211,7 @@ class SQLGenerator:
                 evaluated_index = self._evaluate_simple_arithmetic(index_val_sql) 
                 if evaluated_index is not None and evaluated_index >= 0:
                     # Use json_extract_string instead of json_extract for string results
-                    return f"COALESCE(json_extract_string({base_expr}, '$[{evaluated_index}]'), '')"
+                    return f"COALESCE({self.runner.json_extract_string(base_expr, f'$[{evaluated_index}]')}, '')"
             except Exception as e:
                 # Optimization failed, continue with fallback
                 self.logger.debug(f"Optimization failed: {e}")
@@ -8193,11 +8222,12 @@ class SQLGenerator:
         if self._is_simple_arithmetic_expression(index_val_sql):
             path_prefix = "'$['"
             path_suffix = "']'"
+            # Note: This needs dynamic path construction - keeping hardcoded for now
             return f"COALESCE(json_extract_string({base_expr}, {self.dialect.string_concat(self.dialect.string_concat(path_prefix, f'CAST({index_val_sql} AS VARCHAR)'), path_suffix)}), '')"
         else:
             path_prefix = "'$['"
             path_suffix = "']'"
-            return f"COALESCE(json_extract({base_expr}, {self.dialect.string_concat(self.dialect.string_concat(path_prefix, f'CAST({index_val_sql} AS VARCHAR)'), path_suffix)}), json_array())"
+            return f"COALESCE(json_extract({base_expr}, {self.dialect.string_concat(self.dialect.string_concat(path_prefix, f'CAST({index_val_sql} AS VARCHAR)'), path_suffix)}), {self.json_array_call()})"
     
     def _is_simple_arithmetic_expression(self, expr: str) -> bool:
         """Check if an expression is simple arithmetic that can be evaluated at generation time"""
