@@ -427,7 +427,13 @@ class CollectionFunctionHandler(BaseFunctionHandler):
         # Configure nested generator for WHERE context
         nested_generator.in_where_context = True
         
-        where_condition = nested_generator.visit(condition_node)
+        # Use context-aware visit for string comparisons in WHERE clauses
+        try:
+            from fhir4ds.dialects.context import ExtractionContext
+            where_condition = nested_generator.visit(condition_node, context=ExtractionContext.TEXT_COMPARISON)
+        except ImportError:
+            # Fallback if context system not available
+            where_condition = nested_generator.visit(condition_node)
         
         # Merge CTEs and state from where condition generator
         self.generator.merge_nested_generator_state(nested_generator)
@@ -467,7 +473,13 @@ class CollectionFunctionHandler(BaseFunctionHandler):
             nested_generator.datetime_function_handler = self.generator.datetime_function_handler
         
         try:
-            where_condition = nested_generator.visit(condition_node)
+            # Use context-aware visit for string comparisons in complex WHERE clauses
+            try:
+                from fhir4ds.dialects.context import ExtractionContext
+                where_condition = nested_generator.visit(condition_node, context=ExtractionContext.TEXT_COMPARISON)
+            except ImportError:
+                # Fallback if context system not available
+                where_condition = nested_generator.visit(condition_node)
             
             # Merge CTEs and state from where condition generator
             self.generator.merge_nested_generator_state(nested_generator)

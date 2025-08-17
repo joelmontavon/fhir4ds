@@ -183,6 +183,11 @@ class DuckDBDialect(DatabaseDialect):
         """Extract a JSON object using DuckDB's json_extract"""
         return f"json_extract({column}, '{path}')"
     
+    def extract_json_text(self, column: str, path: str) -> str:
+        """Extract a JSON field as text using DuckDB's json_extract function"""
+        # DuckDB uses same function for both object and text extraction
+        return self.extract_json_object(column, path)
+    
     def iterate_json_array(self, column: str, path: str) -> str:
         """Iterate over JSON array elements using DuckDB's json_each"""
         return f"json_each({column}, '{path}')"

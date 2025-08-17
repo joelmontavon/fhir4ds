@@ -11,6 +11,7 @@ import logging
 
 if TYPE_CHECKING:
     from ..datastore import QueryResult
+    from .context import ExtractionContext, ComparisonContext
 import re
 
 
@@ -216,6 +217,23 @@ class DatabaseDialect(ABC):
         """Extract a JSON field as text - database specific implementation"""
         pass
     
+    @abstractmethod
+    def extract_json_text(self, column: str, path: str) -> str:
+        """
+        Extract a JSON field as text/string type for string comparisons and display.
+        
+        This method should return SQL that extracts JSON values as text/string type,
+        suitable for string comparisons, display, and text operations.
+        
+        Args:
+            column: The column containing JSON data
+            path: JSONPath expression (e.g., '$.field', '$.nested.field')
+            
+        Returns:
+            SQL expression that extracts the JSON value as text type
+        """
+        pass
+    
     @abstractmethod 
     def extract_json_object(self, column: str, path: str) -> str:
         """Extract a JSON object - database specific implementation"""
@@ -239,6 +257,42 @@ class DatabaseDialect(ABC):
     def json_type(self, column: str) -> str:
         """Alias for get_json_type for backward compatibility"""
         return self.get_json_type(column)
+    
+    def extract_json_smart(self, column: str, path: str, 
+                          context: Optional['ExtractionContext'] = None,
+                          comparison_context: Optional['ComparisonContext'] = None) -> str:
+        """
+        Smart JSON extraction that selects appropriate method based on context.
+        
+        This method determines whether to use extract_json_object() or extract_json_text()
+        based on the extraction context and comparison context.
+        
+        Args:
+            column: The column containing JSON data
+            path: JSONPath expression
+            context: Explicit extraction context (overrides auto-detection)
+            comparison_context: Context information for comparison operations
+            
+        Returns:
+            SQL expression using appropriate extraction method
+        """
+        # Import here to avoid circular imports
+        from .context import ExtractionContext, determine_extraction_context
+        
+        # Determine context if not explicitly provided
+        if context is None:
+            context = determine_extraction_context(comparison_context)
+        
+        # Route to appropriate extraction method
+        if context in [ExtractionContext.TEXT_COMPARISON, ExtractionContext.TEXT_DISPLAY]:
+            return self.extract_json_text(column, path)
+        else:
+            return self.extract_json_object(column, path)
+
+    # Backward compatibility alias
+    def extract_json_field(self, column: str, path: str) -> str:
+        """Backward compatibility - delegates to extract_json_text()"""
+        return self.extract_json_text(column, path)
     
     @abstractmethod
     def get_json_array_length(self, column: str, path: str = None) -> str:

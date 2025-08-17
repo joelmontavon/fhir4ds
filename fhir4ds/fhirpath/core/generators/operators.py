@@ -27,7 +27,7 @@ class OperatorHandler:
         self.FunctionCallNode = ast_nodes['FunctionCallNode']
         self.dialect = dialect
     
-    def visit_binary_op(self, node, visit_func, determine_comparison_casts_func, generate_union_sql_func) -> str:
+    def visit_binary_op(self, node, visit_func, determine_comparison_casts_func, generate_union_sql_func, context=None) -> str:
         """
         Visit a binary operation node with proper type casting.
         
@@ -36,6 +36,7 @@ class OperatorHandler:
             visit_func: Function to visit child nodes
             determine_comparison_casts_func: Function to determine comparison casting
             generate_union_sql_func: Function to generate union SQL
+            context: Optional extraction context for comparison operations
             
         Returns:
             SQL expression for the binary operation
@@ -109,14 +110,58 @@ class OperatorHandler:
             right_cast = self._ensure_boolean_casting(node.right, right)
             return f"(NOT {left_cast} OR {right_cast})"
 
-        # Handle JSON value comparisons with proper type casting
+        # Handle JSON value comparisons with context-aware generation
         elif node.operator in ['=', '!=', '>', '<', '>=', '<=', '~', '!~']:
-            left_cast, right_cast = determine_comparison_casts_func(node.left, node.right, left, right)
-            comparison_sql = f"({left_cast} {sql_op} {right_cast})"
-            # Apply PostgreSQL JSON operator fixes inline during generation
-            if hasattr(self.dialect, 'fix_json_operators_inline'):
-                comparison_sql = self.dialect.fix_json_operators_inline(comparison_sql)
-            return comparison_sql
+            # Import context classes
+            try:
+                from fhir4ds.dialects.context import ComparisonContext, ExtractionContext
+                
+                # Pre-generate operands to analyze context
+                temp_left = visit_func(node.left)
+                temp_right = visit_func(node.right)
+                
+                # Create comparison context for analysis
+                comparison_context = ComparisonContext(
+                    operator=node.operator,
+                    left_node=node.left,
+                    right_node=node.right,
+                    left_sql=temp_left,
+                    right_sql=temp_right
+                )
+                
+                # Determine extraction context from comparison
+                extraction_context = None
+                if comparison_context.should_use_text_extraction():
+                    extraction_context = ExtractionContext.TEXT_COMPARISON
+                else:
+                    extraction_context = ExtractionContext.OBJECT_OPERATION
+                
+                # Re-generate operands with proper context
+                # Create a context-aware wrapper for visit_func  
+                def context_aware_visit(node_arg, context_arg=None):
+                    try:
+                        if context_arg is not None:
+                            return visit_func(node_arg, context_arg)
+                        else:
+                            return visit_func(node_arg)
+                    except TypeError:
+                        # Fallback for visit functions that don't support context
+                        return visit_func(node_arg)
+                
+                left = context_aware_visit(node.left, extraction_context)
+                right = context_aware_visit(node.right, extraction_context)
+                
+                # Apply comparison casts with context
+                left_cast, right_cast = determine_comparison_casts_func(
+                    node.left, node.right, left, right, comparison_context
+                )
+                
+                return f"({left_cast} {sql_op} {right_cast})"
+                
+            except ImportError:
+                # Fallback to original behavior if context system not available
+                left_cast, right_cast = determine_comparison_casts_func(node.left, node.right, left, right)
+                return f"({left_cast} {sql_op} {right_cast})"
         
         # Handle collection union operations
         elif node.operator == '|':

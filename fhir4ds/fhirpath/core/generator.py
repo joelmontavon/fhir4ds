@@ -7,7 +7,10 @@ into SQL queries compatible with DuckDB's JSON extension.
 
 import re
 import hashlib
-from typing import List, Dict, Any, Optional, Union, Tuple
+from typing import List, Dict, Any, Optional, Union, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ...dialects.context import ExtractionContext, ComparisonContext
 from ...utils.logging_config import get_logger, log_fallback_usage
 from .exceptions import FHIRPathValidationError, FHIRPathGenerationError, FHIRPathOptimizationError
 from .error_handling import validate_argument_count, validate_argument_range, ErrorContext
@@ -4100,8 +4103,8 @@ class SQLGenerator:
         
         return f"(SELECT abs_result FROM {abs_cte_name} LIMIT 1)"
     
-    def visit(self, node) -> str:
-        """Visit an AST node and generate SQL"""
+    def visit(self, node, context: Optional['ExtractionContext'] = None) -> str:
+        """Visit an AST node and generate SQL with optional context"""
         if isinstance(node, self.ThisNode): # Handle $this if AST rewrite produces it
             return self.json_column
         elif isinstance(node, self.VariableNode): # Handle context variables like $index, $total
@@ -4109,13 +4112,13 @@ class SQLGenerator:
         elif isinstance(node, self.LiteralNode):
             return self.visit_literal(node)
         elif isinstance(node, self.IdentifierNode):
-            return self.visit_identifier(node)
+            return self.visit_identifier(node, context)
         elif isinstance(node, self.PathNode):
-            return self.visit_path(node)
+            return self.visit_path(node, context)
         elif isinstance(node, self.FunctionCallNode):
-            return self.visit_function_call(node)
+            return self.visit_function_call(node, context)
         elif isinstance(node, self.BinaryOpNode):
-            return self.visit_binary_op(node)
+            return self.visit_binary_op(node, context)
         elif isinstance(node, self.UnaryOpNode):
             return self.visit_unary_op(node)
         elif isinstance(node, self.IndexerNode):
@@ -4148,13 +4151,13 @@ class SQLGenerator:
         """Visit a variable node ($index, $total, etc.)"""
         return self.literal_handler.visit_variable(node)
     
-    def visit_identifier(self, node) -> str:
-        """Visit an identifier node"""
-        return self.path_handler.visit_identifier(node, self.resource_type)
+    def visit_identifier(self, node, context: Optional['ExtractionContext'] = None) -> str:
+        """Visit an identifier node with optional extraction context"""
+        return self.path_handler.visit_identifier(node, self.resource_type, context)
     
-    def visit_path(self, node) -> str:
+    def visit_path(self, node, context: Optional['ExtractionContext'] = None) -> str:
         """Visit a path node - builds the JSON path sequentially"""
-        return self.path_handler.visit_path(node)
+        return self.path_handler.visit_path(node, context)
     
     def _apply_identifier_segment(self, identifier_name: str, base_sql: str) -> str:
         """Applies an identifier segment to a base SQL expression with proper array flattening."""
@@ -4227,9 +4230,14 @@ class SQLGenerator:
         # This replaces the complex PostgreSQL-specific fallback logic with a cleaner approach
         return self.dialect.extract_nested_array_path(base_sql, "$", identifier_name, f"$.{identifier_name}")
         
-    def build_path_expression(self, segments) -> str:
-        """Build a path expression from segments"""
+    def build_path_expression(self, segments, context: Optional['ExtractionContext'] = None) -> str:
+        """Build a path expression from segments with optional context"""
         if not segments: return self.json_column
+
+        # Try simple context-aware path building for identifier-only paths
+        simple_path_result = self._build_simple_path_with_context(segments, context)
+        if simple_path_result is not None:
+            return simple_path_result
 
         # Check for FHIR choice type patterns anywhere in the path
         # Look for patterns like: identifier.ofType(typename) or complex.path.identifier.ofType(typename)
@@ -4357,6 +4365,31 @@ class SQLGenerator:
                 # Re-raise with more context
                 raise ValueError(f"Error processing segment {i} ({type(segment_node).__name__}): {str(e)}") from e
         return current_sql
+    
+    def _segments_to_path(self, segments) -> str:
+        """Convert path segments to JSONPath string."""
+        path_parts = []
+        for segment in segments:
+            if isinstance(segment, self.IdentifierNode):
+                path_parts.append(segment.name)
+            # Handle other segment types as needed
+        return f"$.{'.'.join(path_parts)}"
+    
+    def _build_simple_path_with_context(self, segments, context: Optional['ExtractionContext'] = None) -> str:
+        """Build a simple path with context-aware extraction for identifier-only segments."""
+        if not segments:
+            return self.json_column
+        
+        # Check if all segments are simple identifiers
+        if all(isinstance(seg, self.IdentifierNode) for seg in segments):
+            path = self._segments_to_path(segments)
+            if context:
+                return self.path_handler.extract_json_smart(self.json_column, path, context)
+            else:
+                return self.path_handler.extract_json_object(self.json_column, path)
+        
+        # Fall back to complex path building
+        return None
     
     def apply_function_to_expression(self, func_node, base_expr: str) -> str:
         """Apply a function to a base expression"""
@@ -7716,8 +7749,8 @@ class SQLGenerator:
         else:
             raise ValueError(f"Unknown function: {func_name}")
     
-    def visit_function_call(self, node) -> str:
-        """Visit a function call node"""
+    def visit_function_call(self, node, context: Optional['ExtractionContext'] = None) -> str:
+        """Visit a function call node with optional extraction context"""
         func_name = node.name.lower()
         
         # Handle getResourceKey() function
@@ -7769,13 +7802,14 @@ class SQLGenerator:
         else:
             raise ValueError(f"Unknown or unsupported standalone function: {func_name}")
     
-    def visit_binary_op(self, node) -> str:
+    def visit_binary_op(self, node, context: Optional['ExtractionContext'] = None) -> str:
         """Visit a binary operation node with proper type casting"""
         return self.operator_handler.visit_binary_op(
             node, 
             self.visit, 
             self.determine_comparison_casts, 
-            self._generate_union_sql
+            self._generate_union_sql,
+            context
         )
     
     def _ensure_boolean_casting(self, node, sql_expr: str) -> str:
@@ -7968,8 +8002,16 @@ class SQLGenerator:
                 segments.append(segment.name)
         return ".".join(segments)
     
-    def determine_comparison_casts(self, left_node, right_node, left_sql: str, right_sql: str) -> Tuple[str, str]:
-        """Determine appropriate casts for comparison operations, preferring json_extract_string for string comparisons."""
+    def determine_comparison_casts(self, left_node, right_node, left_sql: str, right_sql: str,
+                                  comparison_context: Optional['ComparisonContext'] = None) -> Tuple[str, str]:
+        """Determine appropriate casts for comparison operations with context awareness."""
+        
+        # Context-aware handling: If we have context and it indicates text extraction should be used,
+        # ensure the SQL was generated with text extraction methods
+        if comparison_context and comparison_context.should_use_text_extraction():
+            # For PostgreSQL, verify we're using text extraction methods
+            left_sql = self._ensure_text_extraction_sql(left_node, left_sql, comparison_context)
+            right_sql = self._ensure_text_extraction_sql(right_node, right_sql, comparison_context)
 
         def _transform_json_extract_to_string_version(sql_expr: str) -> Optional[str]:
             # Tries to convert "json_extract(col, path)" to "json_extract_string(col, path)"
@@ -8127,6 +8169,21 @@ class SQLGenerator:
             final_right_sql = f"CAST({right_sql} AS VARCHAR)"
 
         return final_left_sql, final_right_sql
+    
+    def _ensure_text_extraction_sql(self, node, current_sql: str, 
+                                   comparison_context: 'ComparisonContext') -> str:
+        """Ensure SQL uses text extraction methods when needed."""
+        # Check if current SQL uses object extraction when text is needed
+        if 'jsonb_extract_path(' in current_sql and comparison_context.should_use_text_extraction():
+            # Regenerate with text extraction context
+            try:
+                from ...dialects.context import ExtractionContext
+                return self.visit(node, context=ExtractionContext.TEXT_COMPARISON)
+            except ImportError:
+                # Fallback: continue with current SQL
+                pass
+        
+        return current_sql
     
     def visit_unary_op(self, node) -> str:
         """Visit a unary operation node"""

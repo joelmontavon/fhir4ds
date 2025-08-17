@@ -260,53 +260,35 @@ class PostgreSQLDialect(DatabaseDialect):
         """Get column names for object iteration - PostgreSQL uses 'key' and 'value'"""
         return ('key', 'value')
     
+    def extract_json_text(self, column: str, path: str) -> str:
+        """Extract a JSON field as text using PostgreSQL's jsonb_extract_path_text function"""
+        if path.startswith('$.'):
+            field_path = path[2:]  # Remove $.
+            
+            # Handle array indexing like name[0].family -> jsonb_extract_path_text(column, 'name', '0', 'family')
+            if '[' in field_path:
+                import re
+                # Convert array indexing: name[0] -> name,0
+                processed_path = re.sub(r'(\w+)\[(\d+)\]', r'\1,\2', field_path)
+                parts = processed_path.replace('.', ',').split(',')
+                path_args = ', '.join([f"'{part}'" for part in parts])
+                return f"jsonb_extract_path_text({column}, {path_args})"
+            elif '.' in field_path:
+                # Nested path: $.name.family -> jsonb_extract_path_text(column, 'name', 'family')
+                parts = field_path.split('.')
+                path_args = ', '.join([f"'{part}'" for part in parts])
+                return f"jsonb_extract_path_text({column}, {path_args})"
+            else:
+                # Simple field: $.id -> jsonb_extract_path_text(column, 'id')
+                return f"jsonb_extract_path_text({column}, '{field_path}')"
+        else:
+            # Complex JSONPath - use jsonb_path_query_first as fallback
+            return f"jsonb_path_query_first({column}, '{path}') #>> '{{}}'"
+    
     def json_extract_string(self, column: str, path: str) -> str:
         """Generate JSON string extraction SQL using PostgreSQL's jsonb_extract_path_text"""
         # This method is an alias for extract_json_field - both extract text
         return self.extract_json_field(column, path)
-    
-    
-    def fix_json_operators_inline(self, sql_expression: str) -> str:
-        """Apply JSON operator fixes inline during SQL generation instead of post-hoc."""
-        import re
-        
-        # Fix function-based approach: jsonb_extract_path() should be jsonb_extract_path_text() for string comparisons
-        def fix_function_calls(match):
-            function_call = match.group(1)
-            operator = match.group(2)
-            value = match.group(3)
-            
-            # For string comparisons, convert jsonb_extract_path to jsonb_extract_path_text
-            if operator == '=' and (value.startswith("'") or value.startswith('"')):
-                # Convert jsonb_extract_path to jsonb_extract_path_text for string comparisons
-                if function_call.startswith('jsonb_extract_path('):
-                    function_call = function_call.replace('jsonb_extract_path(', 'jsonb_extract_path_text(', 1)
-                return f"({function_call} {operator} {value})"
-            else:
-                # For other operations, keep as is
-                return match.group(0)
-        
-        # Fix function-based string comparisons first
-        function_pattern = r'\((jsonb_extract_path\([^)]+\))\s*(=|!=|<>)\s*([^)]+)\)'
-        sql_expression = re.sub(function_pattern, fix_function_calls, sql_expression)
-        
-        # Original operator-based fixes (legacy support)
-        def fix_json_operators(match):
-            column = match.group(1)
-            field = match.group(2)
-            operator = match.group(3)
-            value = match.group(4)
-            
-            # For string comparisons (= with quoted values), use ->>
-            if operator == '=' and (value.startswith("'") or value.startswith('"')):
-                return f"({column} ->> '{field}' {operator} {value})"
-            else:
-                # For other operations like IS NOT NULL, keep ->
-                return match.group(0)
-        
-        # Fix the patterns for string comparisons
-        pattern = r'\(([^)]+)\s*->\s*\'([^\']+)\'\s*(=|!=|<>)\s*([^)]+)\)'
-        return re.sub(pattern, fix_json_operators, sql_expression)
     
     def create_json_array(self, *args) -> str:
         """Create a JSON array from arguments using PostgreSQL's jsonb_build_array"""

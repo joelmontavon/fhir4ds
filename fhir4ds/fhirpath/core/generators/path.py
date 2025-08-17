@@ -5,7 +5,10 @@ This module handles path construction and JSON navigation from FHIRPath AST
 into SQL path expressions and JSON extraction operations.
 """
 
-from typing import Any, Optional, List
+from typing import Any, Optional, List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ...dialects.context import ExtractionContext
 
 
 class PathHandler:
@@ -39,13 +42,14 @@ class PathHandler:
         self.enable_cte = getattr(generator, 'enable_cte', True)
         self.in_where_context = getattr(generator, 'in_where_context', False)
     
-    def visit_identifier(self, node, resource_type: Optional[str] = None) -> str:
+    def visit_identifier(self, node, resource_type: Optional[str] = None, context: Optional['ExtractionContext'] = None) -> str:
         """
         Visit an identifier node and convert to SQL.
         
         Args:
             node: Identifier AST node
             resource_type: Current FHIR resource type for choice type handling
+            context: Optional extraction context for method selection
             
         Returns:
             SQL expression for the identifier
@@ -67,16 +71,22 @@ class PathHandler:
             coalesce_args = ", ".join([self.extract_json_object(self.json_column, f"$.{field}") for field in possible_deceased_fields])
             return f"COALESCE({coalesce_args})"
 
-        # Default behavior for other identifiers
+        # Default behavior for other identifiers with context-aware extraction
         json_path = f"$.{node.name}"
-        return self.extract_json_object(self.json_column, json_path)
+        
+        if context:
+            return self.extract_json_smart(self.json_column, json_path, context)
+        else:
+            # Backward compatibility: default to object extraction
+            return self.extract_json_object(self.json_column, json_path)
     
-    def visit_path(self, node) -> str:
+    def visit_path(self, node, context: Optional['ExtractionContext'] = None) -> str:
         """
         Visit a path node and build the JSON path sequentially.
         
         Args:
             node: Path AST node with segments
+            context: Optional extraction context for method selection
             
         Returns:
             SQL expression for the complete path
@@ -84,9 +94,9 @@ class PathHandler:
         if len(node.segments) == 0:
             return self.json_column
         
-        return self.build_path_expression(node.segments)
+        return self.build_path_expression(node.segments, context)
     
-    def build_path_expression(self, segments) -> str:
+    def build_path_expression(self, segments, context: Optional['ExtractionContext'] = None) -> str:
         """
         Build SQL expression from path segments.
         
@@ -94,6 +104,7 @@ class PathHandler:
         
         Args:
             segments: List of path segments (identifiers, indexers, etc.)
+            context: Optional extraction context for method selection
             
         Returns:
             SQL expression for the complete path
@@ -101,7 +112,7 @@ class PathHandler:
         # Delegate complex path building to main generator for now
         # This avoids circular dependency issues with function calls in paths
         if hasattr(self, 'generator'):
-            return self.generator.build_path_expression(segments)
+            return self.generator.build_path_expression(segments, context)
         else:
             # Simple fallback for basic identifier-only paths
             if not segments:
@@ -215,13 +226,18 @@ class PathHandler:
             index_sql = str(indexer_node.index)  # Simplified
             return f"json_extract({base_sql}, '$[{index_sql}]')"
     
-    def extract_json_field(self, column: str, path: str) -> str:
-        """Extract a JSON field as text using dialect-specific methods"""
-        return self.dialect.extract_json_field(column, path)
-    
+    def extract_json_smart(self, column: str, path: str, context=None) -> str:
+        """Extract JSON using context-aware method selection"""
+        return self.dialect.extract_json_smart(column, path, context=context)
+
+    # Maintain backward compatibility
     def extract_json_object(self, column: str, path: str) -> str:
         """Extract a JSON object using dialect-specific methods"""
         return self.dialect.extract_json_object(column, path)
+
+    def extract_json_field(self, column: str, path: str) -> str:
+        """Extract a JSON field as text using dialect-specific methods"""
+        return self.dialect.extract_json_field(column, path)
     
     def _path_to_string(self, node) -> str:
         """
