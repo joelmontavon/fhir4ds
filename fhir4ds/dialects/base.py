@@ -304,6 +304,27 @@ class DatabaseDialect(ABC):
         # Default implementation - return uppercase for consistency
         return json_type.upper()
     
+    def get_collection_count_expression(self, base_expr: str) -> str:
+        """Generate database-specific count expression for collection functions"""
+        # Default implementation using standard JSON type checking
+        return f"""
+        CASE 
+            WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN {self.get_json_array_length(base_expr)}
+            WHEN {base_expr} IS NOT NULL THEN 1
+            ELSE 0
+        END
+        """
+    
+    def generate_from_json_each(self, column: str) -> str:
+        """Generate FROM clause for JSON each iteration - database specific implementation"""
+        # Default implementation - subclasses should override for optimal performance
+        return f"json_each({column})"
+    
+    def iterate_json_elements_indexed(self, column: str) -> str:
+        """Iterate JSON elements with proper indexing for both arrays and objects - database specific"""
+        # Default implementation - subclasses should override for optimal performance  
+        return f"json_each({column})"
+    
     @abstractmethod
     def aggregate_to_json_array(self, expression: str) -> str:
         """Aggregate values into a JSON array - database specific implementation"""

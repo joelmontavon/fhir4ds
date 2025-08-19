@@ -247,13 +247,8 @@ class CollectionFunctionHandler(BaseFunctionHandler):
                 print(f"CTE generation failed for count(), falling back to subqueries: {e}")
         
         # Original implementation (fallback)
-        return f"""
-        CASE 
-            WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN {self.generator.get_json_array_length(base_expr)}
-            WHEN {base_expr} IS NOT NULL THEN 1
-            ELSE 0
-        END
-        """
+        # Use dialect-specific count expression (moved database-specific logic to dialect classes)
+        return self.dialect.get_collection_count_expression(base_expr)
     
     def _handle_length(self, base_expr: str, func_node) -> str:
         """Handle length() function."""
@@ -723,27 +718,30 @@ class CollectionFunctionHandler(BaseFunctionHandler):
         if len(func_node.args) != 1:
             raise ValueError("combine() function requires exactly one argument")
         
-        # Use optimized implementation for combine function
+        # Use collection operation context for combine() to ensure array preservation
+        try:
+            from fhir4ds.dialects.context import ExtractionContext
+            other_collection = self.generator.visit(func_node.args[0], context=ExtractionContext.COLLECTION_OPERATION)
+        except ImportError:
+            # Fallback if context system not available
+            other_collection = self.generator.visit(func_node.args[0])
         
-        # Original implementation (fallback)
-        other_collection = self.generator.visit(func_node.args[0])
-        
-        # Fix GROUP BY issues by using dialect-specific array concatenation without subqueries
+        # Simplified approach: use array concatenation directly with proper null handling
         return f"""
         CASE 
             WHEN {base_expr} IS NULL AND {other_collection} IS NULL THEN NULL
             WHEN {base_expr} IS NULL THEN
                 CASE 
-                    WHEN {self.generator.get_json_type(other_collection)} = 'ARRAY' THEN {other_collection}
-                    ELSE {self.dialect.json_array_function}({other_collection})
+                    WHEN {other_collection} IS NOT NULL THEN {self.dialect.json_array_function}({other_collection})
+                    ELSE NULL
                 END
             WHEN {other_collection} IS NULL THEN
                 CASE 
-                    WHEN {self.generator.get_json_type(base_expr)} = 'ARRAY' THEN {base_expr}
-                    ELSE {self.dialect.json_array_function}({base_expr})
+                    WHEN {base_expr} IS NOT NULL THEN {self.dialect.json_array_function}({base_expr})
+                    ELSE NULL
                 END
             ELSE 
-                -- Proper array concatenation without subqueries using dialect methods
+                -- Direct array concatenation using dialect methods
                 {self.dialect.array_concat_function(base_expr, other_collection)}
         END
         """.strip()

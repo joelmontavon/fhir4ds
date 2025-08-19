@@ -31,6 +31,10 @@ class CTEManager:
         self.cte_counter = 0
         self.inlined_ctes: Dict[str, str] = {}  # Track CTEs that have been inlined
         
+        # Context-aware CTE management for forEach/unionAll
+        self.context_ctes: Dict[str, Dict[str, str]] = {}  # context_id -> {cte_name -> cte_sql}
+        self.context_stack = []  # Stack for nested contexts
+        
         # CTE configuration
         self.enable_cte = True
         self.cte_configs = self._setup_cte_configs()
@@ -127,6 +131,44 @@ class CTEManager:
         complexity_score = sum(1 for indicator in complexity_indicators if indicator in expr.upper())
         return complexity_score >= 3
     
+    def create_context_aware_cte(self, sql_query: str, base_name: str, context_id: str = None) -> str:
+        """
+        Create a context-aware CTE that tracks forEach/unionAll context.
+        
+        Args:
+            sql_query: The SQL query for the CTE
+            base_name: Base name for the CTE
+            context_id: Context identifier for forEach/unionAll operations
+            
+        Returns:
+            The CTE alias name
+        """
+        # Create fingerprint for deduplication (including context)
+        context_fingerprint = f"{context_id}_{sql_query}" if context_id else sql_query
+        fingerprint = self._create_expression_fingerprint(context_fingerprint)
+        
+        # Check if we already have a CTE for this expression in this context
+        if fingerprint in self.cte_aliases:
+            return self.cte_aliases[fingerprint]
+        
+        # Create unique CTE name with context marker
+        if context_id:
+            cte_name = f"{base_name}_{context_id}_{self.cte_counter}"
+        else:
+            cte_name = f"{base_name}_{self.cte_counter}"
+        self.cte_counter += 1
+        
+        # Store CTE in appropriate context
+        if context_id:
+            if context_id not in self.context_ctes:
+                self.context_ctes[context_id] = {}
+            self.context_ctes[context_id][cte_name] = sql_query
+        else:
+            self.ctes[cte_name] = sql_query
+            
+        self.cte_aliases[fingerprint] = cte_name
+        return cte_name
+
     def create_cte(self, sql_query: str, base_name: str) -> str:
         """
         Create a CTE with deduplication support.
@@ -164,21 +206,33 @@ class CTEManager:
         # Create hash
         return hashlib.md5(normalized.encode()).hexdigest()[:8]
     
-    def build_final_query_with_ctes(self, main_query: str) -> str:
+    def build_final_query_with_ctes(self, main_query: str, context_id: str = None) -> str:
         """
-        Build the final query with CTEs.
+        Build the final query with CTEs, including context-aware CTEs.
         
         Args:
             main_query: The main SQL query
+            context_id: Optional context identifier to include context-specific CTEs
             
         Returns:
             Complete SQL query with CTEs
         """
-        if not self.ctes:
+        all_ctes = self.ctes.copy()
+        
+        # Include context-specific CTEs if context_id is provided
+        if context_id and context_id in self.context_ctes:
+            all_ctes.update(self.context_ctes[context_id])
+            
+        # Include all context CTEs if no specific context requested
+        if context_id is None:
+            for ctx_ctes in self.context_ctes.values():
+                all_ctes.update(ctx_ctes)
+        
+        if not all_ctes:
             return main_query
         
         # Apply smart inlining for simple CTEs
-        optimized_ctes = self._apply_cte_inlining()
+        optimized_ctes = self._apply_context_aware_cte_inlining(all_ctes)
         
         if not optimized_ctes:
             return main_query
@@ -190,6 +244,21 @@ class CTEManager:
         
         # Combine with main query
         return f"WITH {', '.join(cte_clauses)}\n{main_query}"
+    
+    def _apply_context_aware_cte_inlining(self, all_ctes: Dict[str, str]) -> Dict[str, str]:
+        """Apply smart inlining for CTEs with context awareness."""
+        optimized_ctes = {}
+        
+        for cte_name, cte_sql in all_ctes.items():
+            # Check if CTE should be inlined (same logic as before)
+            if self._should_inline_cte(cte_name, cte_sql):
+                # Store inlined CTE for reference replacement
+                self.inlined_ctes[cte_name] = cte_sql
+            else:
+                # Keep as regular CTE
+                optimized_ctes[cte_name] = cte_sql
+        
+        return optimized_ctes
     
     def _apply_cte_inlining(self) -> Dict[str, str]:
         """Apply smart inlining for simple CTEs."""
@@ -254,7 +323,14 @@ class CTEManager:
         self.ctes.clear()
         self.cte_aliases.clear()
         self.inlined_ctes.clear()
+        self.context_ctes.clear()
+        self.context_stack.clear()
         self.cte_counter = 0
+    
+    def clear_context_ctes(self, context_id: str):
+        """Clear CTEs for a specific context."""
+        if context_id in self.context_ctes:
+            del self.context_ctes[context_id]
     
     def get_cte_count(self) -> int:
         """Get the number of active CTEs."""

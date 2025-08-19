@@ -10,6 +10,8 @@ class ExtractionContext(Enum):
     OBJECT_OPERATION = "object"    # For further JSON operations (default)
     TEXT_COMPARISON = "text"       # For string literal comparisons
     TEXT_DISPLAY = "text"         # For output/display purposes
+    FILTERED_SINGLE = "filtered"   # For results of where() that should return scalars
+    COLLECTION_OPERATION = "collection"  # For collection functions that need arrays
     UNKNOWN = "object"            # Default fallback
 
 @dataclass

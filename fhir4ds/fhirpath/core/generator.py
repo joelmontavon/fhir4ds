@@ -24,6 +24,56 @@ from .generators.functions.type_functions import TypeFunctionHandler
 from .generators.functions.datetime_functions import DateTimeFunctionHandler
 from .cte_manager import CTEManager
 
+
+class ContextState:
+    """
+    Manages context state for forEach/unionAll operations.
+    
+    This class tracks the current context during FHIRPath expression evaluation,
+    ensuring proper context propagation through forEach loops and unionAll branches.
+    """
+    
+    def __init__(self, base_table: str, json_column: str, current_context: str = None):
+        self.base_table = base_table
+        self.json_column = json_column
+        self.current_context = current_context  # forEach context path
+        self.parent_context = None  # outer context for nested operations
+        self.is_collection = False  # whether current context is a collection
+        self.foreach_depth = 0  # nesting level of forEach operations
+        self.context_alias = None  # table alias for current context
+        self.union_branch_id = None  # identifier for unionAll branches
+        
+    def create_child_context(self, foreach_path: str, is_collection: bool = True) -> 'ContextState':
+        """Create a child context for nested forEach operations."""
+        child = ContextState(self.base_table, self.json_column, foreach_path)
+        child.parent_context = self.current_context
+        child.is_collection = is_collection
+        child.foreach_depth = self.foreach_depth + 1
+        child.union_branch_id = self.union_branch_id
+        return child
+        
+    def create_union_branch_context(self, branch_id: str) -> 'ContextState':
+        """Create a context for unionAll branch processing."""
+        branch = ContextState(self.base_table, self.json_column, self.current_context)
+        branch.parent_context = self.parent_context
+        branch.is_collection = self.is_collection
+        branch.foreach_depth = self.foreach_depth
+        branch.union_branch_id = branch_id
+        return branch
+        
+    def get_effective_table(self) -> str:
+        """Get the effective table reference for current context."""
+        if self.context_alias:
+            return self.context_alias
+        return self.base_table
+        
+    def get_effective_column(self) -> str:
+        """Get the effective JSON column for current context."""
+        if self.current_context and self.is_collection:
+            # In forEach context, reference the unpacked element
+            return "value"  # Standard JSON_EACH value column
+        return self.json_column
+
 class SQLGenerator:
     """Generates SQL from FHIRPath AST with dependency injection"""
     
@@ -81,6 +131,10 @@ class SQLGenerator:
         
         # Context awareness for WHERE vs SELECT clause generation
         self.in_where_context = False
+        
+        # Enhanced context management for forEach/unionAll operations
+        self.context_state = ContextState(table_name, json_column)
+        self.context_stack = []  # Stack for nested context management
         
         # Database dialect for database-specific SQL generation
         self.dialect = dialect
@@ -310,12 +364,7 @@ class SQLGenerator:
     
     def generate_from_json_each(self, column: str) -> str:
         """Generate FROM clause for JSON each iteration using dialect methods"""
-        if self.dialect.name == 'POSTGRESQL':
-            # PostgreSQL: FROM jsonb_array_elements(column) WITH ORDINALITY AS t(value, ordinality) 
-            return f"jsonb_array_elements({column}) WITH ORDINALITY AS t(value, ordinality)"
-        else:
-            # DuckDB: FROM json_each(column)
-            return f"json_each({column})"
+        return self.dialect.generate_from_json_each(column)
     
     def json_array_call(self, *args) -> str:
         """Generate JSON array creation using dialect method"""
@@ -335,16 +384,7 @@ class SQLGenerator:
     
     def iterate_json_elements_indexed(self, column: str) -> str:
         """Iterate JSON elements with proper indexing for both arrays and objects"""
-        # For PostgreSQL, we need to handle arrays vs objects differently
-        if self.dialect.name == 'POSTGRESQL':
-            # PostgreSQL needs different functions for arrays vs objects
-            return f"""(
-                SELECT value, (ordinality - 1)::text as key 
-                FROM jsonb_array_elements({column}) WITH ORDINALITY AS t(value, ordinality)
-            )"""
-        else:
-            # For DuckDB and other dialects, use the existing method
-            return f"{self.dialect.json_each_function}({column})"
+        return self.dialect.iterate_json_elements_indexed(column)
     
     def check_json_exists(self, column: str, path: str) -> str:
         """Check JSON path exists using dialect-specific method"""
@@ -385,6 +425,71 @@ class SQLGenerator:
             return f"{self.dialect.json_array_function}({args_str})"
         else:
             return f"{self.dialect.json_array_function}()"
+    
+    # Context Management Methods for forEach/unionAll Operations
+    
+    def push_context(self, foreach_path: str, is_collection: bool = True) -> None:
+        """
+        Push a new forEach context onto the context stack.
+        
+        Args:
+            foreach_path: The FHIRPath expression for forEach
+            is_collection: Whether this context represents a collection
+        """
+        # Save current context to stack
+        self.context_stack.append(self.context_state)
+        
+        # Create new child context
+        self.context_state = self.context_state.create_child_context(foreach_path, is_collection)
+        
+        self.logger.debug(f"Pushed forEach context: {foreach_path}, depth: {self.context_state.foreach_depth}")
+    
+    def pop_context(self) -> ContextState:
+        """
+        Pop the current context and return to parent context.
+        
+        Returns:
+            The popped context state
+        """
+        if not self.context_stack:
+            self.logger.warning("Attempted to pop context from empty stack")
+            return self.context_state
+            
+        popped_context = self.context_state
+        self.context_state = self.context_stack.pop()
+        
+        self.logger.debug(f"Popped context, returning to depth: {self.context_state.foreach_depth}")
+        return popped_context
+    
+    def create_union_branch_context(self, branch_id: str) -> ContextState:
+        """
+        Create a context for processing unionAll branches.
+        
+        Args:
+            branch_id: Identifier for the union branch
+            
+        Returns:
+            New context state for the branch
+        """
+        branch_context = self.context_state.create_union_branch_context(branch_id)
+        self.logger.debug(f"Created union branch context: {branch_id}")
+        return branch_context
+    
+    def get_context_table_reference(self) -> str:
+        """Get the appropriate table reference for current context."""
+        return self.context_state.get_effective_table()
+    
+    def get_context_column_reference(self) -> str:
+        """Get the appropriate JSON column reference for current context."""
+        return self.context_state.get_effective_column()
+    
+    def is_in_foreach_context(self) -> bool:
+        """Check if currently processing within a forEach context."""
+        return self.context_state.current_context is not None
+    
+    def get_context_depth(self) -> int:
+        """Get the current forEach nesting depth."""
+        return self.context_state.foreach_depth
     
     def _is_complex_expression(self, sql_expr: str) -> bool:
         """Check if SQL expression is too complex and needs optimization"""
@@ -427,18 +532,18 @@ class SQLGenerator:
             
         path = match.group(1)
         
-        # Common FHIR array fields that need special handling
-        # These are fields that are arrays at the top level of resources
-        fhir_array_fields = {
-            '$.address', '$.telecom', '$.identifier', '$.name', '$.contact', 
-            '$.communication', '$.link', '$.qualification', '$.extension',
-            '$.modifierExtension', '$.contained', '$.given', '$.family'
-        }
+        # Use centralized FHIR schema system instead of hardcoded array fields
+        from ...schema import fhir_schema
         
-        # Check if the path ends with a known FHIR array field
-        for array_field in fhir_array_fields:
-            if path == array_field or path.endswith(array_field.replace('$.', '.')):
-                return True
+        # Extract field name from path (handle both $.field and field.subfield formats)
+        if path.startswith('$.'):
+            field_name = path[2:].split('.')[0]  # $.name.family -> 'name'
+        else:
+            field_name = path.split('.')[0]  # name.family -> 'name'
+            
+        # Check if it's a known FHIR array field
+        if fhir_schema.is_array_field(field_name):
+            return True
                 
         return False
     

@@ -441,19 +441,36 @@ class DuckDBDialect(DatabaseDialect):
         """String aggregation using DuckDB's string_agg"""
         return f"string_agg({expression}, {separator})"
 
-    def extract_nested_array_path(self, json_base: str, current_path: str, identifier_name: str, new_path: str) -> str:
+    def extract_nested_array_path(self, json_base: str, current_path: str, identifier_name: str, new_path: str, context=None) -> str:
         """Extract path from nested array structures using DuckDB's JSON functions"""
+        # Check if this is a collection operation that needs array preservation
+        try:
+            from fhir4ds.dialects.context import ExtractionContext
+            is_collection_op = context == ExtractionContext.COLLECTION_OPERATION
+        except ImportError:
+            is_collection_op = False
+        
         # Handle root level access (current_path = "$")
         if current_path == "$":
-            # Phase 4.6: Improved array extraction - extract scalar values from single-element arrays
-            return f"""CASE WHEN json_type({json_base}) = 'ARRAY' 
-            THEN 
-                CASE 
-                    WHEN json_array_length({json_base}) = 1 
-                    THEN json_extract({json_base}, '$[0].{identifier_name}')
-                    ELSE json_extract({json_base}, '$[*].{identifier_name}')
-                END
-            ELSE json_extract({json_base}, '$.{identifier_name}') 
+            array_result = f"json_extract({json_base}, '$[*].{identifier_name}')"
+            scalar_result = f"json_extract({json_base}, '$.{identifier_name}')"
+            
+            # For collection operations, always preserve array structure
+            if is_collection_op:
+                return f"""CASE WHEN json_type({json_base}) = 'ARRAY'
+                THEN {array_result}
+                ELSE CASE WHEN {scalar_result} IS NOT NULL THEN json_array({scalar_result}) ELSE NULL END
+                END"""
+            
+            # Context-aware array extraction for non-collection operations:
+            # - For single-element arrays from where(), extract scalar values
+            # - For multi-element arrays, return arrays for collection operations
+            return f"""CASE WHEN json_type({json_base}) = 'ARRAY'
+            THEN CASE WHEN json_array_length({json_base}) = 1
+                 THEN json_extract({json_base}, '$[0].{identifier_name}')
+                 ELSE {array_result}
+                 END
+            ELSE {scalar_result}
             END"""
         
         # Handle missing properties by explicitly checking each array element
@@ -549,6 +566,16 @@ class DuckDBDialect(DatabaseDialect):
     def array_distinct_function(self, array: str) -> str:
         """Remove duplicates from a JSON array."""
         return f"to_json(list_distinct(json_extract({array}, '$[*]')))"
+    
+    def get_collection_count_expression(self, collection_expr: str) -> str:
+        """Get count of elements in a collection for DuckDB."""
+        return f"""CASE 
+            WHEN json_type({collection_expr}) = 'ARRAY' 
+            THEN json_array_length({collection_expr})
+            WHEN {collection_expr} IS NULL 
+            THEN 0
+            ELSE 1
+        END"""
     
     def array_union_function(self, array1: str, array2: str) -> str:
         """Union two JSON arrays or single values into a single JSON array (remove duplicates, preserve order)."""

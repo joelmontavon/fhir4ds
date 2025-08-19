@@ -350,18 +350,18 @@ class SQLGenerator:
             
         path = match.group(1)
         
-        # Common FHIR array fields that need special handling
-        # These are fields that are arrays at the top level of resources
-        fhir_array_fields = {
-            '$.address', '$.telecom', '$.identifier', '$.name', '$.contact', 
-            '$.communication', '$.link', '$.qualification', '$.extension',
-            '$.modifierExtension', '$.contained', '$.given', '$.family'
-        }
+        # Use centralized FHIR schema system instead of hardcoded array fields
+        from ...schema import fhir_schema
         
-        # Check if the path ends with a known FHIR array field
-        for array_field in fhir_array_fields:
-            if path == array_field or path.endswith(array_field.replace('$.', '.')):
-                return True
+        # Extract field name from path (handle both $.field and field.subfield formats)
+        if path.startswith('$.'):
+            field_name = path[2:].split('.')[0]  # $.name.family -> 'name'
+        else:
+            field_name = path.split('.')[0]  # name.family -> 'name'
+            
+        # Check if it's a known FHIR array field
+        if fhir_schema.is_array_field(field_name):
+            return True
                 
         return False
     

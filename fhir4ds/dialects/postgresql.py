@@ -179,16 +179,31 @@ class PostgreSQLDialect(DatabaseDialect):
                 path_args = ', '.join([f"'{part}'" for part in parts])
                 return f"jsonb_extract_path({column}, {path_args})"
             elif '.' in field_path:
-                # Nested path: $.name.given -> jsonb_extract_path(column, 'name', 'given')
+                # Check if this is an array field that needs array iteration instead of simple extraction
                 parts = field_path.split('.')
-                path_args = ', '.join([f"'{part}'" for part in parts])
-                return f"jsonb_extract_path({column}, {path_args})"
+                first_part = parts[0]
+                
+                # Use centralized FHIR schema instead of hardcoded array fields
+                from ..schema import fhir_schema
+                
+                if fhir_schema.is_array_field(first_part) and len(parts) > 1:
+                    # Use array iteration: name.family -> jsonb_path_query_array to get ALL values
+                    # This is essential for collection functions like combine() that need all array elements
+                    array_path = f"$.{'.'.join(parts[:1])}[*].{'.'.join(parts[1:])}"
+                    return f"jsonb_path_query_array({column}, '{array_path}')"
+                else:
+                    # Regular nested path: $.id.value -> jsonb_extract_path(column, 'id', 'value')
+                    path_args = ', '.join([f"'{part}'" for part in parts])
+                    return f"jsonb_extract_path({column}, {path_args})"
             else:
                 # Simple field: $.telecom -> jsonb_extract_path(column, 'telecom')
                 return f"jsonb_extract_path({column}, '{field_path}')"
         else:
-            # Complex JSONPath - use jsonb_path_query_first for single result expectations
-            return f"jsonb_path_query_first({column}, '{path}')"
+            # Complex JSONPath - use jsonb_path_query_array for array results or jsonb_path_query_first for single results
+            if '[*]' in path:
+                return f"jsonb_path_query_array({column}, '{path}')"
+            else:
+                return f"jsonb_path_query_first({column}, '{path}')"
     
     def iterate_json_array(self, column: str, path: str) -> str:
         """Iterate over JSON array elements using PostgreSQL JSONB functions"""
@@ -274,10 +289,23 @@ class PostgreSQLDialect(DatabaseDialect):
                 path_args = ', '.join([f"'{part}'" for part in parts])
                 return f"jsonb_extract_path_text({column}, {path_args})"
             elif '.' in field_path:
-                # Nested path: $.name.family -> jsonb_extract_path_text(column, 'name', 'family')
+                # Check if this is an array field that needs array iteration instead of simple extraction
                 parts = field_path.split('.')
-                path_args = ', '.join([f"'{part}'" for part in parts])
-                return f"jsonb_extract_path_text({column}, {path_args})"
+                first_part = parts[0]
+                
+                # Use centralized FHIR schema instead of hardcoded array fields
+                from ..schema import fhir_schema
+                
+                if fhir_schema.is_array_field(first_part) and len(parts) > 1:
+                    # Use array iteration: name.family -> jsonb_path_query_array for multiple values
+                    # For text extraction, we need to handle this differently since we can't return an array as text
+                    # Instead, convert to a single text value by taking the first non-null result
+                    array_path = f"$.{'.'.join(parts[:1])}[*].{'.'.join(parts[1:])}"
+                    return f"jsonb_path_query_first({column}, '{array_path}') #>> '{{}}'"
+                else:
+                    # Regular nested path: $.id.value -> jsonb_extract_path_text(column, 'id', 'value') 
+                    path_args = ', '.join([f"'{part}'" for part in parts])
+                    return f"jsonb_extract_path_text({column}, {path_args})"
             else:
                 # Simple field: $.id -> jsonb_extract_path_text(column, 'id')
                 return f"jsonb_extract_path_text({column}, '{field_path}')"
@@ -348,26 +376,24 @@ class PostgreSQLDialect(DatabaseDialect):
     def extract_nested_array_path(self, json_base: str, current_path: str, identifier_name: str, new_path: str) -> str:
         """Extract path from nested array structures using PostgreSQL's JSONB functions"""
         
-        # For scalar field extractions like .family, return single element from array results
-        is_scalar_field = identifier_name in ['family', 'system', 'value', 'use', 'code']
+        # Always return array results for FHIR array fields to support collection functions
+        # This fixes the root cause of collection function failures
         
         # Handle root level access (current_path = "$")
         if current_path == "$":
             array_result = f"jsonb_path_query_array({json_base}, '$[*].{identifier_name}')"
             scalar_result = f"{json_base} -> '{identifier_name}'"
             
-            if is_scalar_field:
-                return f"""CASE WHEN jsonb_typeof({json_base}) = 'array'
-                THEN CASE WHEN jsonb_array_length({array_result}) = 1 
-                     THEN {array_result} ->> 0
-                     ELSE NULL END
-                ELSE {json_base} ->> '{identifier_name}'
-                END"""
-            else:
-                return f"""CASE WHEN jsonb_typeof({json_base}) = 'array'
-                THEN {array_result}
-                ELSE {scalar_result}
-                END"""
+            # Context-aware array extraction: 
+            # - For single-element arrays from where(), extract scalar values
+            # - For multi-element arrays, return arrays for collection operations  
+            return f"""CASE WHEN jsonb_typeof({json_base}) = 'array'
+            THEN CASE WHEN jsonb_array_length({json_base}) = 1
+                 THEN {json_base} -> 0 -> '{identifier_name}'
+                 ELSE {array_result}
+                 END
+            ELSE {scalar_result}
+            END"""
         
         # Convert DuckDB JSONPath syntax to PostgreSQL syntax
         if current_path.startswith('$.'):
@@ -382,54 +408,42 @@ class PostgreSQLDialect(DatabaseDialect):
                 array_result = f"jsonb_path_query_array({json_base}, '{array_path}')"
                 scalar_result = f"({json_base} #> '{{{new_field_path.replace('.', ',')}}}')"
                 
-                if is_scalar_field:
-                    return f"""CASE WHEN jsonb_typeof(({json_base} #> '{{{current_field.replace('.', ',')}}}')) = 'array'
-                    THEN CASE WHEN jsonb_array_length({array_result}) = 1
-                         THEN {array_result} ->> 0
-                         ELSE NULL END
-                    ELSE {scalar_result} ->> '{identifier_name}'
-                    END"""
-                else:
-                    return f"""CASE WHEN jsonb_typeof(({json_base} #> '{{{current_field.replace('.', ',')}}}')) = 'array'
-                    THEN {array_result}
-                    ELSE {scalar_result}
-                    END"""
+                # Context-aware array extraction for nested paths
+                return f"""CASE WHEN jsonb_typeof(({json_base} #> '{{{current_field.replace('.', ',')}}}')) = 'array'
+                THEN CASE WHEN jsonb_array_length(({json_base} #> '{{{current_field.replace('.', ',')}}}')) = 1
+                     THEN ({json_base} #> '{{{current_field.replace('.', ',')}}}') -> 0 -> '{identifier_name}'
+                     ELSE {array_result}
+                     END
+                ELSE {scalar_result}
+                END"""
             else:
                 # Simple paths like $.name
                 array_path = f"{current_path}[*].{identifier_name}"
                 array_result = f"jsonb_path_query_array({json_base}, '{array_path}')"
                 scalar_result = f"{json_base} -> '{current_field}' -> '{identifier_name}'"
                 
-                if is_scalar_field:
-                    return f"""CASE WHEN jsonb_typeof({json_base} -> '{current_field}') = 'array'
-                    THEN CASE WHEN jsonb_array_length({array_result}) = 1
-                         THEN {array_result} ->> 0
-                         ELSE NULL END
-                    ELSE {json_base} -> '{current_field}' ->> '{identifier_name}'
-                    END"""
-                else:
-                    return f"""CASE WHEN jsonb_typeof({json_base} -> '{current_field}') = 'array'
-                    THEN {array_result}
-                    ELSE {scalar_result}
-                    END"""
+                # Context-aware array extraction for simple paths
+                return f"""CASE WHEN jsonb_typeof({json_base} -> '{current_field}') = 'array'
+                THEN CASE WHEN jsonb_array_length({json_base} -> '{current_field}') = 1
+                     THEN ({json_base} -> '{current_field}') -> 0 -> '{identifier_name}'
+                     ELSE {array_result}
+                     END
+                ELSE {scalar_result}
+                END"""
         else:
             # Handle complex paths with jsonb_path_query
             array_path = f"{current_path}[*].{identifier_name}"
             array_result = f"jsonb_path_query_array({json_base}, '{array_path}')"
             scalar_result = f"jsonb_path_query_first({json_base}, '{new_path}')"
             
-            if is_scalar_field:
-                return f"""CASE WHEN jsonb_path_exists({json_base}, '{current_path}') AND jsonb_typeof(jsonb_path_query_first({json_base}, '{current_path}')) = 'array'
-                THEN CASE WHEN jsonb_array_length({array_result}) = 1
-                     THEN {array_result} ->> 0
-                     ELSE NULL END
-                ELSE {scalar_result} ->> 0
-                END"""
-            else:
-                return f"""CASE WHEN jsonb_path_exists({json_base}, '{current_path}') AND jsonb_typeof(jsonb_path_query_first({json_base}, '{current_path}')) = 'array'
-                THEN {array_result}
-                ELSE {scalar_result}
-                END"""
+            # Context-aware array extraction for complex paths
+            return f"""CASE WHEN jsonb_path_exists({json_base}, '{current_path}') AND jsonb_typeof(jsonb_path_query_first({json_base}, '{current_path}')) = 'array'
+            THEN CASE WHEN jsonb_array_length(jsonb_path_query_first({json_base}, '{current_path}')) = 1
+                 THEN jsonb_path_query_first({json_base}, '{current_path}') -> 0 -> '{identifier_name}'
+                 ELSE {array_result}
+                 END
+            ELSE {scalar_result}
+            END"""
     
     def split_string(self, expression: str, delimiter: str) -> str:
         """Split string into array using PostgreSQL's string_to_array function"""
@@ -580,6 +594,42 @@ class PostgreSQLDialect(DatabaseDialect):
     def base64_decode(self, expression: str) -> str:
         """Base64 decode using PostgreSQL's decode function"""
         return f"convert_from(decode(CAST({expression} AS TEXT), 'base64'), 'UTF8')"
+    
+    def get_collection_count_expression(self, base_expr: str) -> str:
+        """Generate PostgreSQL-specific count expression for collection functions"""
+        # PostgreSQL-specific count logic moved from collection_functions.py
+        # This fixes the architecture violation of having database-specific logic outside dialects
+        return f"""
+        CASE 
+            WHEN {base_expr} IS NULL THEN 0
+            WHEN {base_expr}::text LIKE '[%]' THEN 
+                CASE 
+                    WHEN {base_expr}::text = '[]' THEN 0
+                    ELSE (
+                        SELECT COUNT(*)
+                        FROM jsonb_array_elements({base_expr}::jsonb)
+                    )
+                END
+            WHEN {base_expr} IS NOT NULL THEN 1
+            ELSE 0
+        END
+        """
+    
+    def generate_from_json_each(self, column: str) -> str:
+        """Generate FROM clause for JSON each iteration using PostgreSQL JSONB functions"""
+        # PostgreSQL: FROM jsonb_array_elements(column) WITH ORDINALITY AS t(value, ordinality)
+        return f"jsonb_array_elements({column}) WITH ORDINALITY AS t(value, ordinality)"
+    
+    def iterate_json_elements_indexed(self, column: str) -> str:
+        """Iterate JSON elements with proper indexing for both arrays and objects using PostgreSQL"""
+        # PostgreSQL needs different functions for arrays vs objects
+        return f"""(
+            SELECT value, (ordinality - 1)::text as key
+            FROM jsonb_array_elements({column}) WITH ORDINALITY AS t(value, ordinality)
+            UNION ALL
+            SELECT value, key  
+            FROM jsonb_each({column})
+        )"""
     
     def create_optimized_indexes(self, table_name: str, json_col: str) -> None:
         """Create PostgreSQL-optimized indexes for FHIR data"""
