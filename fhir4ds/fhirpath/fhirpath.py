@@ -9,10 +9,28 @@ from typing import Any, Dict, List, Optional, Union
 import json
 
 from .parser.parser import FHIRPathParser
-from .core.translator import FHIRPathToSQL
-from .core.generator import SQLGenerator
+# Legacy translator removed - using pipeline system only
 from .core.choice_types import fhir_choice_types
 from .parser.ast_nodes import ASTNode
+
+# Import new pipeline architecture components
+try:
+    from ..pipeline.converters.ast_converter import ASTToPipelineConverter, PipelineASTBridge
+    from ..pipeline.core.base import ExecutionContext, SQLState
+    from ..dialects.duckdb import DuckDBDialect
+    PIPELINE_AVAILABLE = True
+    _DEFAULT_DIALECT = None  # Lazy initialization
+except ImportError:
+    PIPELINE_AVAILABLE = False
+    _DEFAULT_DIALECT = None
+
+
+def _get_default_dialect():
+    """Get default dialect with lazy initialization."""
+    global _DEFAULT_DIALECT
+    if _DEFAULT_DIALECT is None and PIPELINE_AVAILABLE:
+        _DEFAULT_DIALECT = DuckDBDialect()
+    return _DEFAULT_DIALECT
 
 
 class FHIRPath:
@@ -24,17 +42,23 @@ class FHIRPath:
     - Advanced: Access to AST, SQL generation, and custom dialects
     """
     
-    def __init__(self, dialect=None):
+    def __init__(self, dialect=None, use_pipeline: bool = False):
         """
         Initialize FHIRPath processor.
         
         Args:
             dialect: Database dialect for SQL generation (optional)
+            use_pipeline: Whether to use new pipeline architecture (default: False)
         """
-        # Don't instantiate parser directly - create when needed
-        self.translator = FHIRPathToSQL()
-        self.generator = SQLGenerator(dialect=dialect) if dialect else SQLGenerator()
         self.dialect = dialect
+        self.use_pipeline = use_pipeline and PIPELINE_AVAILABLE
+        
+        # Initialize pipeline components if available and requested
+        if self.use_pipeline:
+            self.pipeline_bridge = PipelineASTBridge()
+            self.pipeline_bridge.set_migration_mode('gradual')  # Use gradual mode by default
+        else:
+            self.pipeline_bridge = None
     
     def parse(self, expression: str) -> ASTNode:
         """
@@ -74,8 +98,69 @@ class FHIRPath:
             >>> sql = fp.to_sql("Patient.name.family", "Patient", "p")
             >>> print(sql)  # JSON_EXTRACT(p.data, '$.name[*].family')
         """
-        result = self.translator.translate_to_parts(expression, resource_type)
-        return result["expression_sql"]
+        # Always use pipeline system - legacy translator removed
+        if not self.use_pipeline or not self.pipeline_bridge:
+            # Enable pipeline if not already enabled
+            if PIPELINE_AVAILABLE:
+                self.use_pipeline = True
+                self.pipeline_bridge = PipelineASTBridge()
+                self.pipeline_bridge.set_migration_mode('gradual')
+            else:
+                raise RuntimeError("Pipeline system not available and legacy translator has been removed")
+        
+        try:
+            # Parse expression to AST
+            ast_node = self.parse(expression)
+            
+            # Create execution context with default dialect if none specified
+            if not self.dialect:
+                self.dialect = _get_default_dialect()
+                if not self.dialect:
+                    raise RuntimeError("No dialect available - pipeline system dependencies missing")
+            
+            context = ExecutionContext(dialect=self.dialect)
+            
+            # Use pipeline bridge to process
+            sql = self.pipeline_bridge.process_fhirpath_expression(ast_node, context)
+            
+            # Adjust table alias if needed
+            if table_alias != "fhir_resources":
+                sql = sql.replace("fhir_resources.resource", f"{table_alias}.data")
+            
+            return sql
+            
+        except Exception as e:
+            # Log pipeline failure but don't fall back to deprecated translator
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Pipeline SQL generation failed for '{expression}': {e}")
+            raise RuntimeError(f"FHIRPath to SQL conversion failed: {e}") from e
+    
+    def set_pipeline_mode(self, mode: str) -> None:
+        """
+        Set the pipeline migration mode.
+        
+        Args:
+            mode: Migration mode ('gradual', 'pipeline_only', 'ast_only')
+        """
+        if self.use_pipeline and self.pipeline_bridge:
+            self.pipeline_bridge.set_migration_mode(mode)
+        else:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning("Pipeline not available - cannot set pipeline mode")
+    
+    def get_pipeline_stats(self) -> dict:
+        """
+        Get pipeline usage statistics.
+        
+        Returns:
+            Dictionary with pipeline statistics
+        """
+        if self.use_pipeline and self.pipeline_bridge:
+            return self.pipeline_bridge.get_pipeline_coverage_stats()
+        else:
+            return {"pipeline_available": False, "use_pipeline": self.use_pipeline}
     
     def validate_expression(self, expression: str) -> tuple[bool, Optional[str]]:
         """

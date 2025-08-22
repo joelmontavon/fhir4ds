@@ -318,6 +318,19 @@ class PostgreSQLDialect(DatabaseDialect):
         # This method is an alias for extract_json_field - both extract text
         return self.extract_json_field(column, path)
     
+    def get_json_array_element(self, json_expr: str, index: int) -> str:
+        """Extract element at index from JSON array."""
+        return f"({json_expr} -> {index})"
+    
+    def get_json_extract_string(self, json_expr: str, path: str) -> str:
+        """Extract string value from JSON path."""
+        if path.startswith('$.'):
+            field_path = path[2:]
+            path_args = field_path.replace('.', ',').replace(',', '\', \'')
+            return f"jsonb_extract_path_text({json_expr}, '{path_args}')"
+        else:
+            return f"jsonb_path_query_first({json_expr}, '{path}') #>> '{{}}'"
+    
     def create_json_array(self, *args) -> str:
         """Create a JSON array from arguments using PostgreSQL's jsonb_build_array"""
         if args:
@@ -732,3 +745,162 @@ class PostgreSQLDialect(DatabaseDialect):
                 os.unlink(temp_path)
             except OSError:
                 pass
+    
+    # Pipeline-specific optimized implementations for PostgreSQL
+    
+    def extract_json_path(self, base_expr: str, json_path: str, context_mode: 'ContextMode') -> str:
+        """
+        PostgreSQL-optimized JSON path extraction with context awareness.
+        """
+        from ..pipeline.core.base import ContextMode
+        
+        # Convert JSONPath to PostgreSQL syntax
+        pg_path = json_path.replace('$.', '')
+        
+        if context_mode == ContextMode.COLLECTION:
+            # Handle JSONPath syntax for array traversal
+            if json_path.startswith('$[*].'):
+                # Extract field from array elements: $[*].field -> jsonb_path_query_array(base, '$[*].field')
+                return f"jsonb_path_query_array({base_expr}, '{json_path}')"
+            elif '.' in pg_path:
+                # Handle nested paths like "name.family"
+                parts = pg_path.split('.')
+                pg_expr = base_expr
+                for part in parts:
+                    pg_expr = f"({pg_expr} -> '{part}')"
+                return pg_expr
+            else:
+                return f"({base_expr} -> '{pg_path}')"
+        elif context_mode == ContextMode.WHERE_CLAUSE:
+            # Optimize for boolean evaluation using ?
+            if '.' in pg_path:
+                parts = pg_path.split('.')
+                # For nested paths, check if the path exists
+                return f"({base_expr} #> '{{{','.join(parts)}}}' IS NOT NULL)"
+            else:
+                return f"({base_expr} ? '{pg_path}')"
+        else:
+            # Standard text extraction using ->>
+            if '.' in pg_path:
+                parts = pg_path.split('.')
+                pg_expr = base_expr
+                for i, part in enumerate(parts):
+                    if i == len(parts) - 1:
+                        # Last part - extract as text
+                        pg_expr = f"({pg_expr} ->> '{part}')"
+                    else:
+                        # Intermediate part - extract as jsonb
+                        pg_expr = f"({pg_expr} -> '{part}')"
+                return pg_expr
+            else:
+                return f"({base_expr} ->> '{pg_path}')"
+    
+    def extract_array_element(self, array_expr: str, index: int) -> str:
+        """PostgreSQL-optimized array element extraction."""
+        return f"({array_expr} -> {index})"
+    
+    def extract_last_array_element(self, array_expr: str) -> str:
+        """PostgreSQL-optimized last array element extraction."""
+        return f"({array_expr} -> (jsonb_array_length({array_expr}) - 1))"
+    
+    def _extract_collection_path(self, base_expr: str, json_path: str) -> str:
+        """PostgreSQL-optimized collection path extraction."""
+        # Convert to PostgreSQL path format
+        pg_path = json_path.replace('$.', '')
+        if '.' in pg_path:
+            parts = pg_path.split('.')
+            pg_expr = base_expr
+            for part in parts:
+                pg_expr = f"({pg_expr} -> '{part}')"
+            return pg_expr
+        else:
+            return f"({base_expr} -> '{pg_path}')"
+    
+    def _extract_boolean_path(self, base_expr: str, json_path: str) -> str:
+        """PostgreSQL-optimized boolean path extraction."""
+        # Use PostgreSQL's existence operator ? when possible
+        pg_path = json_path.replace('$.', '')
+        if '.' in pg_path:
+            # For nested paths, use #> path operator
+            parts = pg_path.split('.')
+            path_array = "{" + ",".join(parts) + "}"
+            return f"({base_expr} #> '{path_array}' IS NOT NULL)"
+        else:
+            # For simple paths, use existence operator
+            return f"({base_expr} ? '{pg_path}')"
+    
+    # Implementation of new abstract methods for FHIRPath operations
+    
+    def try_cast(self, expression: str, target_type: str) -> str:
+        """PostgreSQL safe type conversion using CASE statements"""
+        if target_type.upper() == 'INTEGER':
+            return f"""(
+                CASE WHEN {expression}::text ~ '^[+-]?[0-9]+$' 
+                     THEN CAST({expression} AS INTEGER)
+                     ELSE NULL END
+            )"""
+        elif target_type.upper() == 'BOOLEAN':
+            return f"""(
+                CASE WHEN LOWER({expression}::text) ~ '^(true|false|t|f|1|0)$'
+                     THEN CAST({expression} AS BOOLEAN)
+                     ELSE NULL END
+            )"""
+        elif target_type.upper() in ('DATE', 'TIME', 'TIMESTAMP'):
+            # For temporal types, use basic casting with NULL on error
+            return f"""(
+                CASE 
+                    WHEN {expression} IS NULL THEN NULL
+                    ELSE 
+                        CASE 
+                            WHEN {expression}::text ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}' THEN
+                                CAST({expression} AS {target_type.upper()})
+                            ELSE NULL
+                        END
+                END
+            )"""
+        else:
+            # Default to basic casting
+            return f"CAST({expression} AS {target_type.upper()})"
+    
+    def string_to_char_array(self, expression: str) -> str:
+        """PostgreSQL string to character array conversion"""
+        return f"regexp_split_to_array({expression}, '')"
+    
+    def regex_matches(self, string_expr: str, pattern: str) -> str:
+        """PostgreSQL regex pattern matching"""
+        return f"({string_expr} ~ {pattern})"
+    
+    def regex_replace(self, string_expr: str, pattern: str, replacement: str) -> str:
+        """PostgreSQL regex pattern replacement"""
+        return f"regexp_replace({string_expr}, {pattern}, {replacement}, 'g')"
+    
+    def json_group_array(self, value_expr: str, from_clause: str = None) -> str:
+        """PostgreSQL JSONB array aggregation"""
+        if from_clause:
+            return f"(SELECT jsonb_agg({value_expr}) FROM {from_clause})"
+        return f"jsonb_agg({value_expr})"
+    
+    def json_each(self, json_expr: str, path: str = None) -> str:
+        """PostgreSQL JSONB object iteration"""
+        if path:
+            # PostgreSQL doesn't have direct path-based json_each, use jsonb_extract_path
+            return f"jsonb_each(jsonb_extract_path({json_expr}, {path}))"
+        return f"jsonb_each({json_expr})"
+    
+    def json_typeof(self, json_expr: str) -> str:
+        """PostgreSQL JSONB type checking"""
+        return f"jsonb_typeof({json_expr})"
+    
+    def json_array_elements(self, json_expr: str, with_ordinality: bool = False) -> str:
+        """PostgreSQL JSONB array element extraction"""
+        if with_ordinality:
+            return f"jsonb_array_elements({json_expr}) WITH ORDINALITY"
+        return f"jsonb_array_elements({json_expr})"
+    
+    def cast_to_timestamp(self, expression: str) -> str:
+        """PostgreSQL timestamp casting"""
+        return f"CAST({expression} AS TIMESTAMP)"
+    
+    def cast_to_time(self, expression: str) -> str:
+        """PostgreSQL time casting"""
+        return f"CAST({expression} AS TIME)"

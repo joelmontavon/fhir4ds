@@ -8,7 +8,7 @@ using the existing FHIR4DS infrastructure.
 from typing import Dict, Any, Optional, List
 import logging
 
-from ...fhirpath.core.generator import SQLGenerator
+# SQLGenerator removed - using pipeline system only
 from ...dialects import DuckDBDialect, PostgreSQLDialect
 from .parser import CQLParser, CQLLexer
 from .translator import CQLTranslator
@@ -196,12 +196,27 @@ class CQLEngine:
             # Step 2: Translate CQL AST to FHIRPath AST
             fhirpath_ast = self.translator.translate_expression(cql_ast)
             
-            # Step 3: Generate SQL using existing FHIRPath infrastructure
+            # Step 3: Generate SQL using pipeline architecture
             if self.dialect:
-                generator = SQLGenerator(table_name, json_column, dialect=self.dialect)
-                # Provide unified registry access to FHIRPath generator for enhanced function routing
-                generator.unified_registry = self.unified_registry
-                sql = generator.visit(fhirpath_ast)
+                # Use pipeline system instead of legacy SQLGenerator
+                from ...pipeline.converters.ast_converter import PipelineASTBridge
+                from ...pipeline.core.base import ExecutionContext, SQLState
+                
+                pipeline_bridge = PipelineASTBridge()
+                pipeline_bridge.set_migration_mode('pipeline_only')
+                
+                # Create execution context
+                context = ExecutionContext(dialect=self.dialect)
+                initial_state = SQLState(
+                    base_table=table_name,
+                    json_column=json_column,
+                    sql_fragment=f"{table_name}.{json_column}"
+                )
+                
+                # Convert AST to pipeline and compile to SQL
+                pipeline = pipeline_bridge.ast_to_pipeline_converter.convert_ast_to_pipeline(fhirpath_ast)
+                compiled_sql = pipeline.compile(context, initial_state)
+                sql = compiled_sql.get_full_sql()
                 
                 # Step 4: Apply context filtering to generated SQL
                 context_filtered_sql = self.context_manager.current_context.apply_context_to_query(sql, table_name)
@@ -2719,12 +2734,27 @@ FROM {table_name} {alias.lower()}
             # Translate to FHIRPath AST
             fhirpath_ast = self.translator.translate_expression(cql_ast)
             
-            # Generate SQL
+            # Generate SQL using pipeline architecture
             if self.dialect:
-                generator = SQLGenerator(table_name, json_column, dialect=self.dialect)
-                # Provide unified registry access to FHIRPath generator for enhanced function routing
-                generator.unified_registry = self.unified_registry
-                sql = generator.visit(fhirpath_ast)
+                # Use pipeline system instead of legacy SQLGenerator
+                from ...pipeline.converters.ast_converter import PipelineASTBridge
+                from ...pipeline.core.base import ExecutionContext, SQLState
+                
+                pipeline_bridge = PipelineASTBridge()
+                pipeline_bridge.set_migration_mode('pipeline_only')
+                
+                # Create execution context
+                context = ExecutionContext(dialect=self.dialect)
+                initial_state = SQLState(
+                    base_table=table_name,
+                    json_column=json_column,
+                    sql_fragment=f"{table_name}.{json_column}"
+                )
+                
+                # Convert AST to pipeline and compile to SQL
+                pipeline = pipeline_bridge.ast_to_pipeline_converter.convert_ast_to_pipeline(fhirpath_ast)
+                compiled_sql = pipeline.compile(context, initial_state)
+                sql = compiled_sql.get_full_sql()
                 
                 # Apply context filtering
                 context_filtered_sql = self.context_manager.current_context.apply_context_to_query(sql, table_name)

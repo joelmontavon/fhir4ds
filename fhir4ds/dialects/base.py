@@ -143,6 +143,16 @@ class DatabaseDialect(ABC):
             return f"{self.json_each_function}({self.json_extract_function}({column}, '{path}'))"
         return f"{self.json_each_function}({column})"
     
+    @abstractmethod
+    def get_json_array_element(self, json_expr: str, index: int) -> str:
+        """Extract element at index from JSON array."""
+        pass
+    
+    @abstractmethod
+    def get_json_extract_string(self, json_expr: str, path: str) -> str:
+        """Extract string value from JSON path."""
+        pass
+    
     def array_agg(self, expression: str, distinct: bool = False) -> str:
         """Generate array aggregation SQL for the dialect"""
         if distinct:
@@ -383,7 +393,144 @@ class DatabaseDialect(ABC):
         """Concatenate two strings - database specific implementation"""
         pass
     
+    # New abstract methods for FHIRPath function operations
+    
+    @abstractmethod
+    def try_cast(self, expression: str, target_type: str) -> str:
+        """Safe type conversion that returns NULL on failure"""
+        pass
+    
+    @abstractmethod
+    def string_to_char_array(self, expression: str) -> str:
+        """Split string into array of individual characters"""
+        pass
+    
+    @abstractmethod
+    def regex_matches(self, string_expr: str, pattern: str) -> str:
+        """Test if string matches regex pattern"""
+        pass
+    
+    @abstractmethod
+    def regex_replace(self, string_expr: str, pattern: str, replacement: str) -> str:
+        """Replace regex pattern matches with replacement string"""
+        pass
+    
+    @abstractmethod
+    def json_group_array(self, value_expr: str, from_clause: str = None) -> str:
+        """Aggregate values into JSON array"""
+        pass
+    
+    @abstractmethod
+    def json_each(self, json_expr: str, path: str = None) -> str:
+        """Iterate over JSON array elements"""
+        pass
+    
+    @abstractmethod
+    def json_typeof(self, json_expr: str) -> str:
+        """Get JSON type of expression"""
+        pass
+    
+    @abstractmethod
+    def json_array_elements(self, json_expr: str, with_ordinality: bool = False) -> str:
+        """Extract array elements from JSON"""
+        pass
+    
+    @abstractmethod
+    def cast_to_timestamp(self, expression: str) -> str:
+        """Cast expression to timestamp/datetime type"""
+        pass
+    
+    @abstractmethod
+    def cast_to_time(self, expression: str) -> str:
+        """Cast expression to time type"""
+        pass
+    
     def optimize_cte_definition(self, cte_name: str, cte_expr: str) -> str:
         """Apply dialect-specific CTE optimizations - database specific implementation"""
         # Default implementation - no optimization
         return f"{cte_name} AS ({cte_expr})"
+    
+    # Pipeline-specific methods for new immutable pipeline architecture
+    
+    def extract_json_path(self, base_expr: str, json_path: str, context_mode: 'ContextMode') -> str:
+        """
+        Extract JSON path with context mode awareness.
+        
+        This method is used by PathNavigationOperation to generate
+        dialect-specific SQL for JSON path extraction.
+        
+        Args:
+            base_expr: Base SQL expression (e.g., "table.resource")
+            json_path: JSON path to extract (e.g., "$.name.family")
+            context_mode: Execution context mode
+            
+        Returns:
+            SQL expression for path extraction
+        """
+        from ..pipeline.core.base import ContextMode
+        
+        if context_mode == ContextMode.COLLECTION:
+            # Collection context - may need to use json_each or similar
+            return self._extract_collection_path(base_expr, json_path)
+        elif context_mode == ContextMode.WHERE_CLAUSE:
+            # WHERE clause context - optimize for boolean evaluation
+            return self._extract_boolean_path(base_expr, json_path)
+        else:
+            # Single value context - standard extraction
+            return self.extract_json_text(base_expr, json_path)
+    
+    def _extract_collection_path(self, base_expr: str, json_path: str) -> str:
+        """Extract JSON path for collection context."""
+        # Default implementation - can be overridden by specific dialects
+        return self.extract_json_text(base_expr, json_path)
+    
+    def _extract_boolean_path(self, base_expr: str, json_path: str) -> str:
+        """Extract JSON path for boolean context (WHERE clauses)."""
+        # Default implementation - check if path exists and is not null
+        return f"({self.extract_json_text(base_expr, json_path)} IS NOT NULL)"
+    
+    def extract_array_element(self, array_expr: str, index: int) -> str:
+        """
+        Extract element from JSON array by index.
+        
+        Used by IndexerOperation for array access.
+        
+        Args:
+            array_expr: SQL expression that evaluates to JSON array
+            index: Zero-based array index
+            
+        Returns:
+            SQL expression for array element extraction
+        """
+        # Default implementation using json_extract with array index
+        return f"json_extract({array_expr}, '$[{index}]')"
+    
+    def extract_last_array_element(self, array_expr: str) -> str:
+        """
+        Extract last element from JSON array.
+        
+        Args:
+            array_expr: SQL expression that evaluates to JSON array
+            
+        Returns:
+            SQL expression for last array element extraction
+        """
+        # Default implementation - get array length and use index
+        return f"json_extract({array_expr}, '$[' || ({self.get_json_array_length(array_expr)} - 1) || ']')"
+    
+    def optimize_pipeline(self, pipeline: 'FHIRPathPipeline') -> 'FHIRPathPipeline':
+        """
+        Apply dialect-specific optimizations to a pipeline.
+        
+        This method can be overridden by specific dialects to apply
+        optimizations like merging operations, using dialect-specific
+        functions, or restructuring for better performance.
+        
+        Args:
+            pipeline: Pipeline to optimize
+            
+        Returns:
+            Optimized pipeline
+        """
+        # Default implementation - no optimization
+        return pipeline
