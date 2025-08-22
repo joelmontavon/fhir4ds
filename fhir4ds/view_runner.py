@@ -28,7 +28,7 @@ except ImportError:
     CSV_AVAILABLE = False
 
 # CTEProcessor moved to archive - was disabled in production
-from .fhirpath.core.generator import SQLGenerator
+# SQLGenerator removed - using pipeline system only
 from .fhirpath.core.sql_builders import (
     QueryItem, Literal, Field, Func, Expr, SelectItem, 
     Table, Join, Select, FromItem, TableRef, Subquery, 
@@ -37,6 +37,10 @@ from .fhirpath.core.sql_builders import (
 from .fhirpath.core.choice_types import fhir_choice_types
 # DuckDBDialect now imported from dialects package
 from .dialects import DuckDBDialect
+
+# Pipeline system imports
+from .pipeline.converters.ast_converter import PipelineASTBridge
+from .fhirpath.fhirpath import FHIRPath
 
 # Import legacy components for fallback compatibility
 try:
@@ -59,13 +63,16 @@ class ViewRunner:
     SQL-on-FHIR v2.0 specification compliance.
     """
     
-    def __init__(self, datastore, enable_enhanced_sql_generation: bool = True):
+    def __init__(self, datastore, enable_enhanced_sql_generation: bool = True, 
+                 enable_pipeline: bool = False, pipeline_mode: str = 'gradual'):
         """
         Initialize SQL on FHIR View Runner.
         
         Args:
             datastore: FHIRDataStore instance (required)
             enable_enhanced_sql_generation: Enable enhanced SQL generation features
+            enable_pipeline: Enable new pipeline architecture for FHIRPath processing
+            pipeline_mode: Pipeline migration mode ('gradual', 'pipeline_only', 'ast_only')
         """
         if datastore is None:
             raise ValueError("datastore parameter is required")
@@ -78,19 +85,37 @@ class ViewRunner:
         self.dialect = datastore.dialect
             
         self.enable_enhanced_sql_generation = enable_enhanced_sql_generation
+        self.enable_pipeline = enable_pipeline
+        self.pipeline_mode = pipeline_mode
         self.logger = get_logger(__name__)
         
         # Performance tracking
         self.execution_stats = {
             'enhanced_executions': 0,
             'choice_type_resolutions': 0,
-            'cte_operations': 0
+            'cte_operations': 0,
+            'pipeline_executions': 0,
+            'pipeline_fallbacks': 0
         }
         
-        self.sql_generator = SQLGenerator(self.table_name, self.json_col, dialect=self.dialect)
+# Legacy SQLGenerator removed - using pipeline system only
         
         # Setup logging
         self.logger = logging.getLogger(__name__)
+        
+        # Initialize pipeline components (always enabled now)
+        try:
+            self.pipeline_bridge = PipelineASTBridge()
+            self.pipeline_bridge.set_migration_mode('pipeline_only')  # Always use pipeline mode
+            
+            # Create pipeline-enabled FHIRPath processor
+            self.fhirpath_pipeline = FHIRPath(dialect=self.dialect, use_pipeline=True)
+            self.fhirpath_pipeline.set_pipeline_mode('pipeline_only')  # Always use pipeline mode
+            
+            self.logger.info("Pipeline architecture enabled (legacy SQL generator removed)")
+        except ImportError as e:
+            self.logger.error(f"Pipeline architecture required but not available: {e}")
+            raise RuntimeError("Pipeline system is required - legacy SQLGenerator has been removed")
     
     # Dialect-aware helper methods for JSON operations
     def json_extract_string(self, column: str, path: str) -> str:
@@ -519,6 +544,17 @@ class ViewRunner:
             # Raise exception for validation errors
             raise ValueError("ViewDefinition validation failed: Invalid forEach paths")
         
+        # Try pipeline processing first if enabled
+        if self.enable_pipeline and self.pipeline_bridge:
+            try:
+                sql = self._generate_pipeline_sql(view_def)
+                self.execution_stats['pipeline_executions'] += 1
+                return sql
+            except Exception as e:
+                self.logger.debug(f"Pipeline SQL generation failed: {e}, falling back to legacy")
+                self.execution_stats['pipeline_fallbacks'] += 1
+                # Fall through to legacy generation
+        
         # Check if ViewDefinition has special operations
         has_foreach = self._contains_foreach_operations(view_def)
         has_unionall = self._has_unionall_operations(view_def)
@@ -562,6 +598,80 @@ class ViewRunner:
             if 'unionAll' in item:
                 return True
         return False
+    
+    def _generate_pipeline_sql(self, view_def: Dict[str, Any]) -> str:
+        """
+        Generate SQL using the new pipeline architecture.
+        
+        Args:
+            view_def: ViewDefinition dictionary
+            
+        Returns:
+            SQL string generated through pipeline system
+        """
+        from .pipeline.core.base import ExecutionContext, SQLState
+        
+        # Create execution context for pipeline processing
+        context = ExecutionContext(dialect=self.dialect)
+        
+        # Start with base resource table state
+        initial_state = SQLState(
+            base_table=self.table_name,
+            json_column=self.json_col,
+            sql_fragment=f"{self.table_name}.{self.json_col}",
+            resource_type=view_def.get('resource', 'Patient')
+        )
+        
+        # Process ViewDefinition through pipeline system
+        # For now, delegate to FHIRPath pipeline processor for individual expressions
+        select_parts = []
+        
+        for select_item in view_def.get('select', []):
+            if 'path' in select_item:
+                # Use pipeline to process FHIRPath expression
+                try:
+                    pipeline_sql = self.fhirpath_pipeline.to_sql(
+                        select_item['path'], 
+                        view_def.get('resource', 'Patient'),
+                        self.table_name
+                    )
+                    
+                    column_name = select_item.get('name', select_item['path'].replace('.', '_'))
+                    select_parts.append(f"{pipeline_sql} AS {column_name}")
+                    
+                except Exception as e:
+                    self.logger.debug(f"Pipeline processing failed for path '{select_item['path']}': {e}")
+                    raise  # Re-raise to trigger fallback
+        
+        if not select_parts:
+            raise ValueError("No valid select items processed through pipeline")
+        
+        # Build final SQL
+        base_sql = f"""
+        SELECT {', '.join(select_parts)}
+        FROM {self.table_name}
+        """
+        
+        # Add WHERE clause if present
+        if 'where' in view_def:
+            where_conditions = []
+            for where_item in view_def['where']:
+                if 'path' in where_item:
+                    try:
+                        where_sql = self.fhirpath_pipeline.to_sql(
+                            where_item['path'],
+                            view_def.get('resource', 'Patient'),
+                            self.table_name
+                        )
+                        where_conditions.append(f"({where_sql}) IS NOT NULL")
+                    except Exception as e:
+                        self.logger.debug(f"Pipeline WHERE processing failed: {e}")
+                        raise
+            
+            if where_conditions:
+                base_sql += f" WHERE {' AND '.join(where_conditions)}"
+        
+        return base_sql.strip()
     
     def _generate_standard_sql(self, view_def: Dict[str, Any]) -> str:
         """Generate standard SQL without forEach expansion"""
@@ -872,11 +982,8 @@ class ViewRunner:
         column_type = column.get('type', 'string')
         collection_setting = column.get('collection')
         
-        # Set forEach context in SQL generator for proper context-aware generation
+        # Legacy SQL generator context management removed - pipeline handles context internally
         context_pushed = False
-        if hasattr(self, 'sql_generator') and self.sql_generator:
-            self.sql_generator.push_context(foreach_path=path, is_collection=collection_setting)
-            context_pushed = True
             
         try:
             # Handle collection: true within forEach context
@@ -955,9 +1062,8 @@ class ViewRunner:
                 return f"{self.dialect.extract_json_field(f'{foreach_alias}.value', f'$.{adjusted_path}')}"
                 
         finally:
-            # Clean up context when done
-            if context_pushed and hasattr(self, 'sql_generator') and self.sql_generator:
-                self.sql_generator.pop_context()
+            # Legacy SQL generator context cleanup removed - pipeline handles cleanup internally
+            pass
     
     def _adjust_path_for_foreach_context(self, path: str) -> str:
         """
@@ -1132,29 +1238,25 @@ class ViewRunner:
         return self._has_fhirpath_functions(path)
     
     def _generate_fhirpath_expression(self, path: str, column_type: str, collection_setting: bool = None) -> QueryItem:
-        """Generate SQL using the FHIRPath translator for complex expressions"""
+        """Generate SQL using the pipeline system for complex expressions"""
         try:
-            # Import the FHIRPath translator
-            from .fhirpath.core.translator import FHIRPathToSQL
-            
-            # Create translator instance
-            translator = FHIRPathToSQL(
-                table_name=self.table_name,
-                json_column=self.json_col,
-                dialect=self.dialect
-            )
-            
-            # Get resource type from the ViewDefinition context if available
-            resource_type = getattr(self, 'current_resource_type', None)
-            
-            # Use the new translate_to_expression_only method that returns just the expression
-            # without CTEs, specifically designed for embedding in larger queries
-            expression = translator.translate_to_expression_only(path, resource_type_context=resource_type)
-            
-            # Handle collection setting for FHIRPath expressions
-            if collection_setting is True:
-                # Wrap the FHIRPath expression result in collection handling logic
-                wrapped_expression = f"""(
+            # Use the pipeline system directly
+            if hasattr(self, 'fhirpath_pipeline') and self.fhirpath_pipeline:
+                # Parse the FHIRPath expression
+                ast_node = self.fhirpath_pipeline.parse(path)
+                
+                # Create execution context and process
+                from fhir4ds.pipeline.core.base import ExecutionContext
+                context = ExecutionContext(dialect=self.dialect)
+                sql = self.fhirpath_pipeline.pipeline_bridge.process_fhirpath_expression(ast_node, context)
+                
+                # Clean up the SQL to extract just the expression part
+                expression = sql.replace("fhir_resources.resource", self.json_col)
+                
+                # Handle collection setting for FHIRPath expressions
+                if collection_setting is True:
+                    # Wrap the FHIRPath expression result in collection handling logic
+                    wrapped_expression = f"""(
  CASE 
  WHEN json_type({expression}) = 'ARRAY' THEN 
  {expression}
@@ -1162,9 +1264,12 @@ class ViewRunner:
  json_array({expression})
  END
  )"""
-                return Expr([wrapped_expression], sep='')
+                    return Expr([wrapped_expression], sep='')
+                else:
+                    return Expr([expression], sep='')
             else:
-                return Expr([expression], sep='')
+                # Pipeline not available, raise error
+                raise RuntimeError("Pipeline system not available for FHIRPath processing")
                 
         except Exception as e:
             # If FHIRPath translation fails, fall back to simple expression generation
@@ -1577,8 +1682,7 @@ class ViewRunner:
                 for branch_idx, union_branch in enumerate(select_item['unionAll']):
                     # Set up union branch context in SQL generator
                     branch_id = f"union_branch_{branch_idx}"
-                    if hasattr(self, 'sql_generator') and self.sql_generator:
-                        branch_context = self.sql_generator.create_union_branch_context(branch_id)
+                    # Legacy SQL generator union branch context removed - pipeline handles context internally
                     
                     # Create a temporary view definition for this branch
                     branch_view_def = {
@@ -1762,25 +1866,18 @@ class ViewRunner:
         try:
             return self._generate_smart_where_condition(path)
         except:
-            # Fallback to legacy generator for complex cases
+            # Use pipeline system for complex WHERE conditions
             try:
-                # Use the FHIRPath parser for WHERE conditions
-                from .fhirpath.parser import FHIRPathLexer, FHIRPathParser
-                from .fhirpath.core.generator import SQLGenerator
+                from .fhirpath.fhirpath import FHIRPath
                 
-                # Tokenize the expression first
-                lexer = FHIRPathLexer(path)
-                tokens = lexer.tokenize()
+                # Create FHIRPath instance with current dialect
+                fp = FHIRPath(dialect=self.dialect, use_pipeline=True)
                 
-                # Parse tokens into AST
-                parser = FHIRPathParser(tokens)
-                ast = parser.parse()
+                # Generate SQL condition using pipeline
+                sql_condition = fp.to_sql(path, "Patient", "resource")
                 
-                # Generate SQL
-                sql_gen = SQLGenerator(self.table_name, self.json_col, dialect=self.dialect)
-                sql_condition = sql_gen.visit(ast)
-                
-                return sql_condition
+                # WHERE conditions should evaluate to boolean
+                return f"({sql_condition}) = true"
                 
             except Exception as e:
                 # Final fallback to simple processing
@@ -2205,8 +2302,9 @@ class ViewRunner:
                     array_iterate = self.dialect.iterate_json_array(self.json_col, f'$.{array_field}')
                     nested_iterate = self.dialect.iterate_json_array(f'{array_field}_item.{array_value_col}', f'$.{nested_field}')
                     
+                    # Fix table alias reference for DuckDB - remove ORDER BY to avoid table reference issues
                     sql = f"""(
-                        SELECT COALESCE({self.dialect.string_agg_function}({nested_extract}, '{separator}' ORDER BY {array_field}_item.{array_key_col}, {nested_field}_item.{nested_key_col}), '')
+                        SELECT COALESCE({self.dialect.string_agg_function}({nested_extract}, '{separator}'), '')
                         FROM {array_iterate} AS {array_field}_item,
                              {nested_iterate} AS {nested_field}_item
                     )"""
@@ -2345,9 +2443,7 @@ class ViewRunner:
         if self._is_simple_array_function_pattern(path):
             return self._generate_optimized_array_functions(path, column_type)
         
-        # Handle join() function separately
-        if '.join(' in path:
-            return self._generate_join_expression(path, column_type)
+        # Remove special case for join() - let it use the pipeline system
         
         # Handle complex FHIRPath expressions with functions (but NOT if already handled as comparison)
         if any(func in path for func in ['first()', 'exists()', 'where(', 'last()', 'count()']):
@@ -2741,6 +2837,7 @@ class ViewRunner:
         
         # Check for complex where() expressions that can be simplified
         if '.where(' in path and ').' in path:
+            self.logger.info(f"USING SIMPLIFIED WHERE EXPRESSION for path: {path}")
             return self._generate_simplified_where_expression(path, column_type)
         
         # Check for exists() patterns that should be simplified early
@@ -2748,50 +2845,17 @@ class ViewRunner:
             return self._generate_simplified_where_expression(path, column_type)
         
         try:
-            # Use the FHIRPath parser for complex expressions
-            from .fhirpath.parser import FHIRPathLexer, FHIRPathParser
-            from .fhirpath.core.generator import SQLGenerator
+            # Use pipeline system for complex expressions
+            from .fhirpath.fhirpath import FHIRPath
             
-            # Tokenize the expression first
-            lexer = FHIRPathLexer(path)
-            tokens = lexer.tokenize()
+            # Create FHIRPath instance with current dialect
+            fp = FHIRPath(dialect=self.dialect, use_pipeline=True)
             
-            # Parse tokens into AST
-            parser = FHIRPathParser(tokens)
-            ast = parser.parse()
-            
-            # Generate SQL
-            sql_gen = SQLGenerator(self.table_name, self.json_col, dialect=self.dialect)
-            sql_expression = sql_gen.visit(ast)
-            
-            # Check if CTEs were created - if so, we need to create a complete query
-            if sql_gen.ctes:
-                # If CTEs exist, we need to create a full SQL query and extract just the expression
-                # This is a complex case that requires special handling
-                from .fhirpath.core.translator import FHIRPathToSQL
-                
-                # Use the translator to get the complete SQL with CTEs
-                translator = FHIRPathToSQL(self.table_name, self.json_col, dialect=self.dialect)
-                complete_sql = translator.translate([path])
-                
-                # Extract just the expression part from the complete SQL
-                # The complete SQL has format: "WITH ... SELECT expression FROM table"
-                # We need to extract the expression part
-                import re
-                # Find the SELECT clause and extract the expression
-                select_match = re.search(r'SELECT\s+(.+?)\s+FROM\s+' + re.escape(self.table_name), complete_sql, re.IGNORECASE | re.DOTALL)
-                if select_match:
-                    extracted_expression = select_match.group(1).strip()
-                    # Remove AS alias if present
-                    extracted_expression = re.sub(r'\s+AS\s+\w+\s*$', '', extracted_expression, flags=re.IGNORECASE)
-                    sql_expression = extracted_expression
-                else:
-                    # Fallback to original expression if extraction fails
-                    self.logger.warning(f"Could not extract expression from CTE query for '{path}', using original")
+            # Generate SQL expression using pipeline
+            sql_expression = fp.to_sql(path, "Patient", "resource")
             
             # Check if the generated SQL is too complex (likely to cause parser errors)
-            # Increase threshold for CTE-based expressions since they can be legitimately long
-            complexity_threshold = 5000 if sql_gen.ctes else 1000
+            complexity_threshold = 1000
             if len(sql_expression) > complexity_threshold:
                 self.logger.warning(f"Generated SQL too complex for '{path}' ({len(sql_expression)} chars), using simplified version")
                 return self._generate_simplified_where_expression(path, column_type)
@@ -3050,6 +3114,8 @@ class ViewRunner:
     def _generate_simplified_where_expression(self, path: str, column_type: str) -> QueryItem:
         """Generate simplified SQL for complex where() expressions to avoid parser errors"""
         import re
+        
+        self.logger.info(f"SIMPLIFIED WHERE EXPRESSION: processing path={path}")
         
         # Handle patterns like "name.where(use = 'official').family"
         where_match = re.match(r'^(\w+)\.where\(([^)]+)\)\.(\w+)$', path)
@@ -3364,20 +3430,37 @@ class ViewRunner:
         """
         Check if a path contains FHIRPath functions that need proper translation.
         
-        Phase 4.5: Dynamic function discovery using handler registry
+        Updated to work with pipeline system - detects function calls directly.
         """
-        # Get all function patterns from registered handlers
-        all_function_patterns = self._get_all_function_patterns()
+        # Only use pipeline for complex functions that definitely need it
+        # Be conservative to avoid breaking simple paths
+        complex_fhirpath_functions = [
+            '.allTrue()', '.allFalse()', '.anyTrue()', '.anyFalse()',
+            '.where(', '.union(', '.combine(',
+            '.join(', '.contains(', '.startsWith(', '.endsWith(',
+            '.matches(', '.replace(', '.substring(',
+            '.length()', '.upper()', '.lower()', '.trim()',
+            # Add more functions that definitely need pipeline processing
+            '.skip(', '.take(', '.tail()', '.single()'
+        ]
         
-        # Check for functions that need translation
-        for pattern in all_function_patterns:
-            if pattern in path:
+        # Check for complex function patterns only
+        for func_pattern in complex_fhirpath_functions:
+            if func_pattern in path:
+                return True
+        
+        # Also check for functions at the end of paths (like "extension.valueBoolean.allTrue()")
+        import re
+        function_at_end_patterns = [
+            r'\.allTrue\(\)$', r'\.allFalse\(\)$', r'\.anyTrue\(\)$', r'\.anyFalse\(\)$',
+            r'\.skip\(', r'\.take\(', r'\.tail\(\)$', r'\.single\(\)$',
+            r'\.join\(', r'\.where\('
+        ]
+        
+        for pattern in function_at_end_patterns:
+            if re.search(pattern, path):
                 return True
                 
-        # Check for where() with complex expressions (not simple optimized patterns)
-        if '.where(' in path and not self._is_simple_where_pattern(path):
-            return True
-            
         return False
     
     def _get_all_function_patterns(self) -> list:
@@ -3411,20 +3494,12 @@ class ViewRunner:
     
     def _get_function_handler_registry(self) -> list:
         """
-        Get the registry of all function handlers.
-        
-        Phase 4.5: Formal handler registry access pattern
+        Legacy function handler registry removed - pipeline system handles all functions.
         
         Returns:
-            List of all registered function handlers
+            Empty list - functions are handled through pipeline architecture
         """
-        return [
-            self.sql_generator.collection_function_handler,
-            self.sql_generator.string_function_handler,
-            self.sql_generator.math_function_handler,
-            self.sql_generator.type_function_handler,
-            self.sql_generator.datetime_function_handler
-        ]
+        return []  # Pipeline system handles all functions through operations
     
     def _get_patterns_from_handler(self, handler) -> list:
         """
@@ -3534,28 +3609,31 @@ class ViewRunner:
     
     def _generate_fhirpath_sql(self, path: str) -> str:
         """
-        Generate SQL using proper FHIRPath translation.
+        Generate SQL using the new pipeline system.
         
-        Phase 1.2: String Functions Integration
+        This replaces the old FHIRPath translator with the new pipeline architecture.
         """
         try:
-            # Import FHIRPath translator
-            from .fhirpath import FHIRPath
+            self.logger.info(f"_generate_fhirpath_sql called with path: {path}")
+            # Use pipeline system for FHIRPath expressions
+            from .fhirpath.fhirpath import FHIRPath
+            from .pipeline.core.base import ExecutionContext
             
-            # Create FHIRPath instance with current dialect
-            fp = FHIRPath(dialect=self.dialect)
+            # Parse the FHIRPath expression
+            fhirpath = FHIRPath()
+            ast = fhirpath.parse(path)
             
-            # Translate the expression to SQL
-            sql = fp.to_sql(path, "Patient", "p")
+            # Create execution context
+            context = ExecutionContext(dialect=self.dialect)
             
-            # Replace table alias with our actual column reference
-            # The translator uses "p.data" but we need "resource"
-            sql = sql.replace('p.data', 'resource')
+            # Use the pipeline bridge to convert AST to SQL
+            bridge = self.pipeline_bridge
+            sql_expression = bridge.process_fhirpath_expression(ast, context)
             
-            return sql
+            return sql_expression
             
         except Exception as e:
             # Fallback to simple path extraction if translation fails
-            self.logger.warning(f"FHIRPath translation failed for '{path}': {e}")
+            self.logger.warning(f"Pipeline translation failed for '{path}': {e}")
             return f'{self.dialect.extract_json_field("resource", f"$.{path}")}'
 

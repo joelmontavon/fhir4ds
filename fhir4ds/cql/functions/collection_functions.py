@@ -10,7 +10,8 @@ Phase 5.1: Advanced Collection Functions Implementation
 
 from typing import List, Any, Optional, Dict, Union, Callable
 import re
-from ...fhirpath.core.generators.functions.collection_functions import CollectionFunctionHandler
+from ...pipeline.operations.functions import FunctionCallOperation
+from ...pipeline.core.base import SQLState, ExecutionContext
 
 
 class CQLCollectionFunctionHandler:
@@ -25,22 +26,22 @@ class CQLCollectionFunctionHandler:
     - Set operations with custom predicates
     """
     
-    def __init__(self, generator, cte_builder=None):
+    def __init__(self, dialect=None):
         """
         Initialize the CQL collection function handler.
         
         Args:
-            generator: Reference to main CQLEngine for complex operations
-            cte_builder: Optional CTEBuilder instance for CTE management
+            dialect: Database dialect for SQL generation (optional, defaults to DuckDB)
         """
-        self.generator = generator
-        self.cte_builder = cte_builder
-        # Store the actual dialect object for proper method calls
-        if hasattr(generator, 'dialect') and generator.dialect:
-            self.dialect_obj = generator.dialect
-            self.dialect = generator.dialect.name if hasattr(generator.dialect, 'name') else 'duckdb'
+        # MIGRATION NOTE: Updated to work with pipeline architecture
+        # Legacy generator and cte_builder parameters removed
+        if dialect:
+            self.dialect_obj = dialect
+            self.dialect = dialect.name if hasattr(dialect, 'name') else 'duckdb'
         else:
-            self.dialect_obj = None
+            # Default to DuckDB for backward compatibility
+            from ...dialects.duckdb import DuckDBDialect
+            self.dialect_obj = DuckDBDialect()
             self.dialect = 'duckdb'
         
     def get_supported_functions(self) -> List[str]:

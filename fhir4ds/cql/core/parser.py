@@ -48,6 +48,9 @@ class CQLTokenType(Enum):
     INCLUDEDLN = "INCLUDEDLN"
     BEFORE = "BEFORE" 
     AFTER = "AFTER"
+    
+    # CQL literals
+    DATE_TIME_LITERAL = "DATE_TIME_LITERAL"  # @2020-01-01
     MEETS = "MEETS"
     OVERLAPS = "OVERLAPS"
     STARTS = "STARTS"
@@ -185,6 +188,52 @@ class CQLLexer(FHIRPathLexer):
             result.cql_keyword = self.cql_keywords[result.value.lower()]
             
         return result
+    
+    def tokenize(self) -> List:
+        """Override tokenization to handle CQL-specific tokens like @ date literals."""
+        # Pre-process the expression to handle @ date literals before standard tokenization
+        processed_expression = self._preprocess_cql_literals(self.expression)
+        
+        # Create a temporary lexer with the processed expression
+        temp_lexer = FHIRPathLexer(processed_expression)
+        tokens = temp_lexer.tokenize()
+        
+        return tokens
+    
+    def _preprocess_cql_literals(self, expression: str) -> str:
+        """Pre-process CQL expression to convert @ date literals to quoted strings."""
+        import re
+        
+        # Pattern to match @ followed by date-like strings
+        # @2020-01-01, @2020-01-01T12:00:00, @2020, @2020-01
+        date_literal_pattern = r'@(\d{4}(?:-\d{2}(?:-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)?)?)?)'
+        
+        # Replace @date with "@date" (quoted string)
+        def replace_date_literal(match):
+            date_value = match.group(1)
+            return f'"@{date_value}"'
+        
+        processed = re.sub(date_literal_pattern, replace_date_literal, expression)
+        return processed
+    
+    def _looks_like_date_after_at(self, token) -> bool:
+        """Check if token looks like a date that should follow @."""
+        if not token or not hasattr(token, 'value'):
+            return False
+            
+        import re
+        date_patterns = [
+            r'^\d{4}-\d{2}-\d{2}$',  # @2020-01-01
+            r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$',  # @2020-01-01T12:00:00
+            r'^\d{4}$',  # @2020
+            r'^\d{4}-\d{2}$',  # @2020-01
+        ]
+        
+        for pattern in date_patterns:
+            if re.match(pattern, str(token.value)):
+                return True
+        
+        return False
 
 class CQLParser(FHIRPathParser):
     """
@@ -201,6 +250,10 @@ class CQLParser(FHIRPathParser):
         position = getattr(self.current_token, 'position', -1) if self.current_token else -1
         raise ValueError(f"Parse error at position {position}: {message}")
         
+    def is_at_end(self) -> bool:
+        """Check if we're at the end of the token stream."""
+        return self.position >= len(self.tokens)
+    
     def parse_library(self) -> LibraryNode:
         """
         Parse a complete CQL library.
@@ -357,6 +410,9 @@ class CQLParser(FHIRPathParser):
         if self.current_token and self.current_token.type == TokenType.LBRACKET:
             # Retrieve expression
             source = self.parse_retrieve()
+            # Check for alias after retrieve
+            if self.current_token and self.current_token.type == TokenType.IDENTIFIER:
+                aliases.append(self.consume_identifier())
         elif self.current_token and self.current_token.type == TokenType.IDENTIFIER:
             # Could be identifier or from clause
             if self.current_token.value.lower() == 'from':
@@ -497,13 +553,109 @@ class CQLParser(FHIRPathParser):
             raise self.error("Expected identifier")
     
     def parse_primary_expression(self) -> ASTNode:
-        """Override FHIRPath primary expression parsing to handle CQL resource retrieval."""
+        """Override FHIRPath primary expression parsing to handle CQL constructs."""
         # Check for CQL resource retrieval syntax [ResourceType]
         if self.current_token and self.current_token.type == TokenType.LBRACKET:
             return self.parse_retrieve()
+        
+        # Check for CQL function calls with special argument handling
+        elif (self.current_token and 
+              self.current_token.type == TokenType.IDENTIFIER):
+            
+            # Look ahead to see if this is a function call
+            name = self.current_token.value
+            if (self.position + 1 < len(self.tokens) and 
+                self.tokens[self.position + 1].type == TokenType.LPAREN):
+                
+                # Check if this is a CQL function that takes query arguments
+                cql_query_functions = {
+                    'count', 'exists', 'first', 'last', 'sum', 'max', 'min',
+                    'avg', 'average', 'stddev', 'variance', 'median', 'mode'
+                }
+                
+                if name.lower() in cql_query_functions:
+                    return self.parse_cql_function_call()
+        
+        # Fall back to parent FHIRPath parsing for other cases
+        return super().parse_primary_expression()
+    
+    def parse_cql_function_call(self) -> FunctionCallNode:
+        """Parse CQL function calls that can take query arguments."""
+        name = self.current_token.value
+        self.advance()  # Skip function name
+        
+        if self.current_token.type != TokenType.LPAREN:
+            raise self.error("Expected '(' after function name")
+        
+        self.advance()  # Skip '('
+        args = []
+        
+        if self.current_token.type != TokenType.RPAREN:
+            # Parse first argument - might be a CQL query
+            args.append(self.parse_cql_function_argument())
+            
+            # Parse additional arguments
+            while self.current_token.type == TokenType.COMMA:
+                self.advance()  # Skip ','
+                args.append(self.parse_cql_function_argument())
+        
+        if self.current_token.type != TokenType.RPAREN:
+            raise self.error(f"Expected ')' after function arguments, found {self.current_token}")
+        
+        self.advance()  # Skip ')'
+        return FunctionCallNode(name, args)
+    
+    def parse_cql_function_argument(self) -> ASTNode:
+        """Parse function argument that might be a CQL query."""
+        # Check if argument starts with [ResourceType] - this is a CQL query
+        if (self.current_token and 
+            self.current_token.type == TokenType.LBRACKET):
+            return self.parse_query_expression()
         else:
-            # Fall back to parent FHIRPath parsing for other cases
-            return super().parse_primary_expression()
+            # Parse as regular FHIRPath expression
+            return self.parse_or_expression()
+    
+    def _is_cql_function_call_with_cql_args(self, text: str) -> bool:
+        """
+        Check if this is a CQL function call with CQL expressions as arguments.
+        
+        Examples: Exists([Patient] P), Count([Patient] P where ...), First([Patient] P sort by ...)
+        """
+        import re
+        
+        # Pattern for CQL functions that take CQL query expressions
+        cql_function_pattern = r'^(Exists|Count|First|Last|Sum|Max|Min|Avg|StdDev|Median|Mode)\s*\(\s*\['
+        return bool(re.search(cql_function_pattern, text.strip(), re.IGNORECASE))
+    
+    def _parse_cql_function_call(self, text: str) -> FunctionCallNode:
+        """
+        Parse CQL function calls like Exists([Patient] P), Count([Patient] P where ...).
+        """
+        import re
+        
+        # Extract function name and arguments
+        match = re.match(r'^(\w+)\s*\(\s*(.*)\s*\)$', text.strip(), re.DOTALL)
+        if not match:
+            raise ValueError(f"Invalid CQL function call format: {text}")
+        
+        function_name = match.group(1)
+        args_text = match.group(2)
+        
+        # Parse the arguments as CQL expressions
+        args = []
+        if args_text.strip():
+            # For now, assume single argument that's a CQL query
+            # Parse the argument as a CQL query expression
+            lexer = CQLLexer(args_text)
+            tokens = lexer.tokenize()
+            self.tokens = tokens
+            self.position = 0
+            self.current_token = tokens[0] if tokens else None
+            
+            arg_node = self.parse_query_expression()
+            args.append(arg_node)
+        
+        return FunctionCallNode(function_name, args)
     
     def is_simple_fhirpath_expression(self, expression: str) -> bool:
         """
@@ -581,12 +733,16 @@ class CQLParser(FHIRPathParser):
         else:
             # Handle CQL-specific parsing
             if text.strip().startswith('['):
-                # This looks like a retrieve expression
+                # This looks like a CQL query expression with retrieve
                 lexer = CQLLexer(text)
                 tokens = lexer.tokenize()
                 self.tokens = tokens
-                self.current = 0
-                return self.parse_retrieve()
+                self.position = 0
+                self.current_token = tokens[0] if tokens else None
+                return self.parse_query_expression()
+            elif self._is_cql_function_call_with_cql_args(text):
+                # Handle CQL functions like Exists([Patient] P), Count([Patient] P where ...)
+                return self._parse_cql_function_call(text)
             else:
                 # Check if this contains temporal arithmetic
                 import re
@@ -630,7 +786,8 @@ class CQLParser(FHIRPathParser):
                     lexer = CQLLexer(text)
                     tokens = lexer.tokenize()
                     self.tokens = tokens
-                    self.current = 0
+                    self.position = 0
+                    self.current_token = tokens[0] if tokens else None
                     # Try to parse as CQL expression first
                     return self.parse_union_expression()
                 except Exception:

@@ -23,6 +23,9 @@ from ..functions.interval_functions import CQLIntervalFunctionHandler
 from ..functions.collection_functions import CQLCollectionFunctionHandler
 from .unified_registry import UnifiedFunctionRegistry
 from .library_manager import CQLLibraryManager, LibraryMetadata, LibraryVersion
+from ..pipeline.converters.cql_converter import CQLToPipelineConverter
+from ...pipeline.core.base import SQLState, ExecutionContext
+from ...pipeline.core.compiler import PipelineCompiler
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +96,7 @@ class CQLEngine:
         self.nullological_functions = CQLNullologicalFunctionHandler(self.dialect_name)
         self.datetime_functions = CQLDateTimeFunctionHandler(self.dialect_name)
         self.interval_functions = CQLIntervalFunctionHandler(self.dialect_name)
-        self.collection_functions = CQLCollectionFunctionHandler(self, db_connection)
+        self.collection_functions = CQLCollectionFunctionHandler(self.dialect)
         
         # Make all function handlers available to translator
         self.translator.terminology = self.terminology
@@ -106,6 +109,124 @@ class CQLEngine:
         
         # Provide unified registry access to translator for enhanced function routing
         self.translator.unified_registry = self.unified_registry
+        
+        # Initialize pipeline converter for enhanced CQL processing
+        self.pipeline_converter = CQLToPipelineConverter(dialect=self.dialect_name)
+        self.pipeline_compiler = PipelineCompiler(self.dialect)
+        
+        # Configuration for processing mode
+        self.use_pipeline_mode = True  # Enable pipeline mode by default
+        
+        logger.info(f"CQL Engine initialized with {'pipeline' if self.use_pipeline_mode else 'legacy'} processing mode")
+    
+    def evaluate_expression_via_pipeline(self, cql_expression: str, table_name: str = "fhir_resources", 
+                                        json_column: str = "resource") -> str:
+        """
+        Evaluate CQL expression using the new pipeline converter.
+        
+        This method uses the CQL-to-Pipeline converter to directly convert CQL AST nodes
+        to pipeline operations, bypassing the FHIRPath AST intermediate step.
+        
+        Args:
+            cql_expression: CQL expression string
+            table_name: Database table name
+            json_column: JSON column name
+            
+        Returns:
+            SQL query string
+        """
+        logger.info(f"CQL Engine evaluating via pipeline: {cql_expression}")
+        
+        try:
+            # Step 1: Parse CQL expression to AST
+            lexer = CQLLexer(cql_expression)
+            tokens = lexer.tokenize()
+            self.parser.tokens = tokens
+            self.parser.current = 0
+            
+            # Parse to CQL AST
+            cql_ast = self.parser.parse_expression_or_fhirpath(cql_expression)
+            
+            # Step 2: Convert CQL AST directly to pipeline operations
+            pipeline_operation = self.pipeline_converter.convert(cql_ast)
+            
+            # Step 3: Execute pipeline operation to generate SQL
+            context = ExecutionContext(
+                dialect=self.dialect,
+                terminology_client=self.terminology.client if hasattr(self.terminology, 'client') else None
+            )
+            
+            initial_state = SQLState(
+                base_table=table_name,
+                json_column=json_column,
+                sql_fragment=f"{table_name}.{json_column}"
+            )
+            
+            # Handle different types of pipeline operations
+            if hasattr(pipeline_operation, 'execute'):
+                # Single pipeline operation
+                result_state = pipeline_operation.execute(initial_state, context)
+                return result_state.sql_fragment
+            elif hasattr(pipeline_operation, 'compile'):
+                # FHIRPath pipeline
+                compiled_result = pipeline_operation.compile(context, initial_state)
+                return compiled_result.main_sql
+            else:
+                # Fallback to legacy mode
+                logger.warning("Pipeline conversion failed, falling back to legacy mode")
+                return self._evaluate_expression_legacy(cql_expression, table_name, json_column)
+                
+        except Exception as e:
+            logger.error(f"Pipeline evaluation failed: {e}")
+            # Fallback to legacy mode
+            logger.info("Falling back to legacy evaluation mode")
+            return self._evaluate_expression_legacy(cql_expression, table_name, json_column)
+    
+    def _evaluate_expression_legacy(self, cql_expression: str, table_name: str = "fhir_resources", 
+                                   json_column: str = "resource") -> str:
+        """
+        Legacy CQL expression evaluation using FHIRPath AST conversion.
+        
+        This method preserves the original evaluation path for backward compatibility.
+        """
+        logger.debug("Using legacy CQL evaluation path")
+        
+        # Use the existing evaluation logic (extract the core logic from evaluate_expression)
+        lexer = CQLLexer(cql_expression)
+        tokens = lexer.tokenize()
+        self.parser.tokens = tokens
+        self.parser.current = 0
+        
+        # Use the smart parsing method that detects CQL vs FHIRPath
+        cql_ast = self.parser.parse_expression_or_fhirpath(cql_expression)
+        
+        # Step 2: Translate CQL AST to FHIRPath AST
+        fhirpath_ast = self.translator.translate_expression(cql_ast)
+        
+        # Step 3: Generate SQL using existing pipeline architecture
+        if self.dialect:
+            # Use pipeline system
+            from ...pipeline.converters.ast_converter import PipelineASTBridge
+            from ...pipeline.core.base import ExecutionContext, SQLState
+            
+            pipeline_bridge = PipelineASTBridge()
+            pipeline_bridge.set_migration_mode('pipeline_only')
+            
+            # Create execution context
+            context = ExecutionContext(dialect=self.dialect)
+            initial_state = SQLState(
+                base_table=table_name,
+                json_column=json_column,
+                sql_fragment=f"{table_name}.{json_column}"
+            )
+            
+            # Convert AST to pipeline and compile to SQL
+            pipeline = pipeline_bridge.ast_to_pipeline_converter.convert_ast_to_pipeline(fhirpath_ast)
+            compiled_sql = pipeline.compile(context, initial_state)
+            
+            return compiled_sql.main_sql
+        else:
+            raise ValueError("No dialect specified for SQL generation")
         
     def _extract_dialect_name(self, dialect_obj) -> str:
         """Extract dialect name string from dialect object."""
@@ -168,6 +289,14 @@ class CQLEngine:
         logger.info(f"CQL Engine evaluating: {cql_expression}")
         
         try:
+            # Route through new pipeline converter if enabled
+            if self.use_pipeline_mode:
+                try:
+                    return self.evaluate_expression_via_pipeline(cql_expression, table_name, json_column)
+                except Exception as e:
+                    logger.warning(f"Pipeline mode failed: {e}, falling back to legacy mode")
+                    # Continue to legacy evaluation below
+            
             # Check for direct function calls that can be routed through unified registry
             if self._is_direct_function_call(cql_expression):
                 return self._evaluate_function_via_registry(cql_expression, table_name, json_column)
@@ -3100,7 +3229,37 @@ FROM {table_name} {alias.lower()}
                 'is_population_analytics': self.is_population_analytics_mode()
             },
             'libraries': list(self.libraries.keys()),
-            'terminology': self.get_terminology_cache_stats()
+            'terminology': self.get_terminology_cache_stats(),
+            'pipeline_mode': self.use_pipeline_mode
         }
         
         return info
+    
+    def enable_pipeline_mode(self):
+        """Enable the new CQL-to-Pipeline converter for evaluation."""
+        self.use_pipeline_mode = True
+        logger.info("Enabled CQL pipeline mode - using direct CQL AST to Pipeline Operation conversion")
+    
+    def disable_pipeline_mode(self):
+        """Disable pipeline mode and use legacy FHIRPath AST conversion."""
+        self.use_pipeline_mode = False
+        logger.info("Disabled CQL pipeline mode - using legacy FHIRPath AST conversion")
+    
+    def is_pipeline_mode_enabled(self) -> bool:
+        """Check if pipeline mode is currently enabled."""
+        return self.use_pipeline_mode
+    
+    def get_pipeline_converter_info(self) -> Dict[str, Any]:
+        """Get information about the pipeline converter."""
+        if hasattr(self, 'pipeline_converter'):
+            return {
+                'enabled': self.use_pipeline_mode,
+                'dialect': self.pipeline_converter.dialect,
+                'converter_type': 'CQLToPipelineConverter',
+                'current_context': self.pipeline_converter.context.current_context,
+                'library_definitions': len(self.pipeline_converter.context.library_definitions),
+                'parameters': len(self.pipeline_converter.context.parameters),
+                'includes': len(self.pipeline_converter.context.includes)
+            }
+        else:
+            return {'enabled': False, 'error': 'Pipeline converter not initialized'}

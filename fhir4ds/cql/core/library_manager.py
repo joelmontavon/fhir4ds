@@ -171,10 +171,13 @@ class LoadedLibrary:
     load_time: datetime
     dependencies_resolved: bool = False
     parameter_values: Dict[str, Any] = None
+    define_operations: Dict[str, Any] = None  # Store CQLDefineOperation instances
     
     def __post_init__(self):
         if self.parameter_values is None:
             self.parameter_values = {}
+        if self.define_operations is None:
+            self.define_operations = {}
 
 
 class DependencyResolver:
@@ -397,13 +400,17 @@ class CQLLibraryManager:
             # Parse and translate library (this would integrate with existing parser/translator)
             ast, translated_content = self._parse_and_translate_library(name, content)
             
+            # Extract define operations
+            define_operations = translated_content.get('define_operations', {})
+            
             # Create loaded library
             loaded_lib = LoadedLibrary(
                 metadata=metadata,
                 ast=ast,
                 translated_content=translated_content,
                 source_content=content,
-                load_time=datetime.now(timezone.utc)
+                load_time=datetime.now(timezone.utc),
+                define_operations=define_operations
             )
             
             # Store in libraries and cache
@@ -498,6 +505,12 @@ class CQLLibraryManager:
             return None
         
         library = self.libraries[library_name]
+        
+        # First check for pipeline-based define operations
+        if definition_name in library.define_operations:
+            return library.define_operations[definition_name]
+        
+        # Fallback to legacy translated content
         definitions = library.translated_content.get('definitions', {})
         return definitions.get(definition_name)
     
@@ -522,18 +535,112 @@ class CQLLibraryManager:
         # For now, return all definitions
         return list(definitions.keys())
     
+    def resolve_define_dependencies(self, library_name: str) -> List[str]:
+        """
+        Resolve dependencies for define statements in a library.
+        
+        Args:
+            library_name: Name of the library to analyze
+            
+        Returns:
+            List of missing define dependencies
+        """
+        if library_name not in self.libraries:
+            return [f"Library '{library_name}' not found"]
+        
+        library = self.libraries[library_name]
+        missing_deps = []
+        
+        # Analyze each define operation for dependencies
+        for define_name, define_op in library.define_operations.items():
+            # Check if the define operation references other defines
+            # This would require analyzing the pipeline operations
+            # For now, we'll implement basic dependency tracking
+            dependencies = self._extract_define_dependencies(define_op)
+            
+            for dep in dependencies:
+                if not self._is_define_available(dep, library_name):
+                    missing_deps.append(f"Define '{define_name}' requires '{dep}'")
+        
+        return missing_deps
+    
+    def get_cross_library_define(self, library_name: str, define_name: str, access_level: str = "PUBLIC") -> Optional[Any]:
+        """
+        Get a define statement from another library with access level checking.
+        
+        Args:
+            library_name: Name of the library containing the define
+            define_name: Name of the define statement
+            access_level: Required access level
+            
+        Returns:
+            Define operation or None if not accessible
+        """
+        if library_name not in self.libraries:
+            logger.warning(f"Library '{library_name}' not found for cross-library access")
+            return None
+        
+        library = self.libraries[library_name]
+        
+        if define_name not in library.define_operations:
+            logger.warning(f"Define '{define_name}' not found in library '{library_name}'")
+            return None
+        
+        define_op = library.define_operations[define_name]
+        
+        # Check access level
+        if hasattr(define_op, 'access_level'):
+            if define_op.access_level == "PRIVATE" and access_level != "PRIVATE":
+                logger.warning(f"Define '{define_name}' in library '{library_name}' is private")
+                return None
+        
+        return define_op
+    
+    def list_library_defines(self, library_name: str, access_level: str = "PUBLIC") -> List[str]:
+        """
+        List all define statements in a library with specified access level.
+        
+        Args:
+            library_name: Name of the library
+            access_level: Access level filter
+            
+        Returns:
+            List of define statement names
+        """
+        if library_name not in self.libraries:
+            return []
+        
+        library = self.libraries[library_name]
+        defines = []
+        
+        for define_name, define_op in library.define_operations.items():
+            # Check access level
+            if hasattr(define_op, 'access_level'):
+                if access_level == "ALL" or define_op.access_level == access_level:
+                    defines.append(define_name)
+            else:
+                # Default to PUBLIC if no access level specified
+                if access_level in ["PUBLIC", "ALL"]:
+                    defines.append(define_name)
+        
+        return defines
+    
     def get_library_stats(self) -> Dict[str, Any]:
         """Get comprehensive library management statistics."""
         total_libs = len(self.libraries)
         resolved_deps = sum(1 for lib in self.libraries.values() if lib.dependencies_resolved)
         
         version_distribution = {}
+        total_defines = 0
+        
         for lib in self.libraries.values():
             version_str = str(lib.metadata.version)
             version_distribution[version_str] = version_distribution.get(version_str, 0) + 1
+            total_defines += len(lib.define_operations)
         
         return {
             'total_libraries': total_libs,
+            'total_defines': total_defines,
             'dependencies_resolved': resolved_deps,
             'cache_stats': self.cache.stats(),
             'version_distribution': version_distribution,
@@ -543,6 +650,7 @@ class CQLLibraryManager:
                     'version': str(lib.metadata.version),
                     'dependencies': len(lib.metadata.dependencies),
                     'parameters': len(lib.metadata.parameters),
+                    'defines': len(lib.define_operations),
                     'load_time': lib.load_time.isoformat()
                 }
                 for name, lib in self.libraries.items()
@@ -569,6 +677,7 @@ class CQLLibraryManager:
         """Parse and translate library content using existing CQLParser and CQLTranslator."""
         from .parser import CQLParser, CQLLexer
         from .translator import CQLTranslator
+        from ..pipeline.converters.cql_converter import CQLToPipelineConverter
         
         try:
             # Step 1: Tokenize the CQL content
@@ -586,7 +695,24 @@ class CQLLibraryManager:
             translator = CQLTranslator(dialect=getattr(self, 'dialect', 'duckdb'))
             translated = translator.translate_library(ast)
             
-            logger.info(f"Successfully parsed and translated CQL library: {name}")
+            # Step 4: Convert define statements to pipeline operations
+            logger.debug(f"Converting define statements to pipeline operations for {name}")
+            pipeline_converter = CQLToPipelineConverter(dialect=getattr(self, 'dialect', 'duckdb'))
+            
+            # Extract define operations from the library
+            define_operations = {}
+            if hasattr(ast, 'definitions'):
+                for definition in ast.definitions:
+                    from .parser import DefineNode
+                    if isinstance(definition, DefineNode):
+                        define_op = pipeline_converter.convert(definition)
+                        define_operations[definition.name] = define_op
+                        logger.debug(f"Converted define '{definition.name}' to pipeline operation")
+            
+            # Store define operations in translated content for compatibility
+            translated['define_operations'] = define_operations
+            
+            logger.info(f"Successfully parsed and translated CQL library: {name} with {len(define_operations)} define operations")
             return ast, translated
             
         except ValueError as e:
@@ -601,3 +727,64 @@ class CQLLibraryManager:
         except Exception as e:
             logger.error(f"Unexpected error processing CQL library {name}: {e}")
             raise LibraryError(f"Unexpected error in library processing for {name}: {e}")
+    
+    def _extract_define_dependencies(self, define_operation: Any) -> List[str]:
+        """
+        Extract define dependencies from a define operation.
+        
+        Args:
+            define_operation: CQLDefineOperation to analyze
+            
+        Returns:
+            List of define names that this operation depends on
+        """
+        dependencies = []
+        
+        # This is a simplified implementation
+        # In practice, we would need to traverse the pipeline operation tree
+        # to find references to other define statements
+        
+        if hasattr(define_operation, 'definition_metadata'):
+            metadata = define_operation.definition_metadata
+            if isinstance(metadata, dict):
+                original_expr = metadata.get('original_expression', '')
+                # Look for define references in the expression string
+                # This is a basic pattern matching approach
+                import re
+                define_pattern = r'\b([A-Z][a-zA-Z0-9_]*)\b'
+                potential_defines = re.findall(define_pattern, str(original_expr))
+                dependencies.extend(potential_defines)
+        
+        return dependencies
+    
+    def _is_define_available(self, define_name: str, requesting_library: str) -> bool:
+        """
+        Check if a define statement is available to the requesting library.
+        
+        Args:
+            define_name: Name of the define statement
+            requesting_library: Name of the library making the request
+            
+        Returns:
+            True if the define is available
+        """
+        # First check in the same library
+        if requesting_library in self.libraries:
+            library = self.libraries[requesting_library]
+            if define_name in library.define_operations:
+                return True
+        
+        # Check in included libraries
+        for lib_name, library in self.libraries.items():
+            if lib_name != requesting_library:
+                if define_name in library.define_operations:
+                    define_op = library.define_operations[define_name]
+                    # Check if it's public or accessible
+                    if hasattr(define_op, 'access_level'):
+                        if define_op.access_level in ['PUBLIC', 'PROTECTED']:
+                            return True
+                    else:
+                        # Default to public if no access level specified
+                        return True
+        
+        return False
