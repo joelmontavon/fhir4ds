@@ -23,6 +23,7 @@ from ..functions.datetime_functions import CQLDateTimeFunctionHandler
 from ..functions.interval_functions import CQLIntervalFunctionHandler
 from ..functions.nullological_functions import CQLNullologicalFunctionHandler
 from ..functions.clinical import ClinicalFunctions, TerminologyFunctions
+from ..functions.logical_operators import CQLLogicalOperators
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class FunctionCategory(Enum):
     DATETIME = "datetime"
     INTERVAL = "interval"
     NULLOLOGICAL = "nullological"
+    LOGICAL = "logical"
     CLINICAL = "clinical"
     TERMINOLOGY = "terminology"
     UNKNOWN = "unknown"
@@ -158,6 +160,10 @@ class UnifiedFunctionRegistry:
             )
             logger.debug("Initialized CQL terminology function handler")
             
+            # Logical operators
+            self.handlers['logical'] = CQLLogicalOperators()
+            logger.debug("Initialized CQL logical operators handler")
+            
         except Exception as e:
             logger.error(f"Failed to initialize function handlers: {e}")
             raise
@@ -206,6 +212,16 @@ class UnifiedFunctionRegistry:
                     categories=[FunctionCategory.NULLOLOGICAL]
                 )
                 logger.debug(f"Registered {len(nullological_functions)} nullological functions")
+            
+            # Logical operators
+            if 'logical' in self.handlers:
+                logical_functions = self.handlers['logical'].get_supported_functions()
+                self.capabilities['logical'] = HandlerCapability(
+                    handler_type='logical',
+                    supported_functions=logical_functions,
+                    categories=[FunctionCategory.LOGICAL]
+                )
+                logger.debug(f"Registered {len(logical_functions)} logical functions")
             
         except Exception as e:
             logger.error(f"Failed to build capability registry: {e}")
@@ -435,3 +451,4 @@ def reset_global_registry():
     global _global_registry
     _global_registry = None
     logger.info("Global registry reset")
+

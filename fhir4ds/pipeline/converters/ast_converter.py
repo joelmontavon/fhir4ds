@@ -291,6 +291,8 @@ class PipelineASTBridge:
             converter: AST converter to use (creates default if None)
         """
         self.converter = converter or ASTToPipelineConverter()
+        # Add backward compatibility attribute for existing code
+        self.ast_to_pipeline_converter = self.converter
         self.migration_mode = "pipeline_only"  # Legacy translator removed
         self.fallback_to_ast = False  # No fallback available
     

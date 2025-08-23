@@ -709,6 +709,10 @@ class CQLParser(FHIRPathParser):
         duration_calculation_pattern = r'\b(' + '|'.join(['years', 'months', 'days', 'hours', 'minutes', 'seconds']) + r')\s+between\s+'
         if re.search(duration_calculation_pattern, expression_lower):
             return False
+        
+        # If it contains @ date literals (CQL-specific syntax), it's CQL
+        if '@' in expression:
+            return False
                 
         # Otherwise, assume it's FHIRPath
         return True

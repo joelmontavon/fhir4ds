@@ -35,7 +35,7 @@ class LiteralOperation(PipelineOperation[SQLState]):
         
         Args:
             value: The literal value
-            value_type: Type of the literal ('string', 'integer', 'decimal', 'boolean', 'null', 'date', 'time', 'datetime')
+            value_type: Type of the literal ('string', 'integer', 'decimal', 'boolean', 'null', 'date', 'time', 'datetime', 'sql', 'value')
         """
         self.value = value
         self.value_type = value_type
@@ -43,7 +43,7 @@ class LiteralOperation(PipelineOperation[SQLState]):
     
     def _validate_literal(self) -> None:
         """Validate literal value and type."""
-        valid_types = {'string', 'integer', 'decimal', 'boolean', 'null', 'date', 'time', 'datetime'}
+        valid_types = {'string', 'integer', 'decimal', 'boolean', 'null', 'date', 'time', 'datetime', 'sql', 'value'}
         if self.value_type not in valid_types:
             raise ValueError(f"Invalid literal type: {self.value_type}. Must be one of {valid_types}")
         
@@ -148,6 +148,14 @@ class LiteralOperation(PipelineOperation[SQLState]):
                 return f"TIMESTAMP '{datetime_str}'"
             else:
                 return f"'{datetime_str}'"
+        
+        elif self.value_type == 'sql':
+            # SQL expressions should be returned as-is (already SQL)
+            return str(self.value)
+        
+        elif self.value_type == 'value':
+            # Value expressions should be returned as-is (e.g. CURRENT_DATE)
+            return str(self.value)
         
         else:
             raise ValueError(f"Unknown literal type: {self.value_type}")

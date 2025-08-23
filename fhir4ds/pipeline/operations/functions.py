@@ -74,15 +74,33 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
     DATETIME_FUNCTIONS = frozenset({
         'now', 'today', 'timeofday', 'lowboundary', 'highboundary'
     })
+# Logical Functions  
+    LOGICAL_FUNCTIONS = frozenset({
+        'and', 'or', 'not', 'implies', 'xor'
+    })
+    
+    # Interval Functions
+    INTERVAL_FUNCTIONS = frozenset({
+        'interval', 'contains', 'overlaps', 'before', 'after', 'meets', 'during',
+        'includes', 'included_in', 'starts', 'ends', 'same_as', 'same_or_before',
+        'same_or_after', 'width', 'size', 'point_from', 'start', 'end'
+    })
+    
+    # List Functions
+    LIST_FUNCTIONS = frozenset({
+        'list', 'flatten', 'distinct', 'union', 'intersect', 'except',
+        'first', 'last', 'tail', 'take', 'skip', 'singleton', 'repeat'
+    })
     
     # Comparison Operators (8+)
     COMPARISON_FUNCTIONS = frozenset({
-        '=', '!=', '<>', '<', '<=', '>', '>=', 'in', 'contains'
+        '=', '!=', '<>', '<', '<=', '>', '>=', 'in', 'contains', '~'
     })
     
     # All supported functions
     ALL_SUPPORTED_FUNCTIONS = (COLLECTION_FUNCTIONS | STRING_FUNCTIONS | TYPE_FUNCTIONS | 
-                              MATH_FUNCTIONS | DATETIME_FUNCTIONS | COMPARISON_FUNCTIONS)
+                              MATH_FUNCTIONS | DATETIME_FUNCTIONS | COMPARISON_FUNCTIONS |
+                           LOGICAL_FUNCTIONS | INTERVAL_FUNCTIONS | LIST_FUNCTIONS)
     
     def __init__(self, func_name: str, args: List[Any]):
         """
@@ -125,6 +143,12 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
             return self._execute_datetime_function(input_state, context)
         elif self._is_comparison_function():
             return self._execute_comparison_function(input_state, context)
+        elif self._is_logical_function():
+            return self._execute_logical_function(input_state, context)
+        elif self._is_interval_function():
+            return self._execute_interval_function(input_state, context)
+        elif self._is_list_function():
+            return self._execute_list_function(input_state, context)
         else:
             raise ValueError(f"Unknown function category for: {self.func_name}")
     
@@ -151,6 +175,18 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
     def _is_comparison_function(self) -> bool:
         """Check if function is a comparison operator."""
         return self.func_name in self.COMPARISON_FUNCTIONS
+    
+    def _is_logical_function(self) -> bool:
+        """Check if function is a logical operator."""
+        return self.func_name in self.LOGICAL_FUNCTIONS
+    
+    def _is_interval_function(self) -> bool:
+        """Check if function is an interval function."""
+        return self.func_name in self.INTERVAL_FUNCTIONS
+    
+    def _is_list_function(self) -> bool:
+        """Check if function is a list function."""
+        return self.func_name in self.LIST_FUNCTIONS
 
     # ====================================
     # HELPER METHODS FOR CONSISTENT STATE MANAGEMENT
@@ -2460,6 +2496,8 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
             return self._handle_in(input_state, context)
         elif self.func_name == 'contains':
             return self._handle_contains_comparison(input_state, context)
+        elif self.func_name == '~':
+            return self._handle_equivalent(input_state, context)
         else:
             raise ValueError(f"Unknown comparison operator: {self.func_name}")
     
@@ -2672,6 +2710,726 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
             path_context=input_state.path_context,
             variable_bindings=input_state.variable_bindings.copy()
         )
+    
+    def _handle_equivalent(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle equivalent (~) operator with type-aware comparison."""
+        if not self.args:
+            raise ValueError("Equivalent operator requires at least one argument")
+        
+        # Convert argument to SQL fragment - use logical argument evaluator like other operators
+        right_sql = self._evaluate_logical_argument(self.args[0], input_state, context)
+        
+        # The equivalent operator (~) performs type-aware comparison
+        # For numeric types, it compares values accounting for type coercion
+        # For example, 5 ~ 5.0 should return true even though types differ
+        # Simplified version for DuckDB - try numeric conversion first
+        sql_fragment = f"""(
+            CASE 
+                -- Try to compare as numbers first
+                WHEN TRY_CAST({input_state.sql_fragment} AS DECIMAL) IS NOT NULL 
+                     AND TRY_CAST({right_sql} AS DECIMAL) IS NOT NULL THEN
+                    CAST({input_state.sql_fragment} AS DECIMAL) = CAST({right_sql} AS DECIMAL)
+                -- Otherwise, compare as strings
+                ELSE {input_state.sql_fragment} = {right_sql}
+            END
+        )"""
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=False,  # Boolean result is not a collection
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _execute_logical_function(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Execute logical operator with three-valued logic."""
+        
+        if self.func_name == 'and':
+            return self._handle_and(input_state, context)
+        elif self.func_name == 'or':
+            return self._handle_or(input_state, context)
+        elif self.func_name == 'not':
+            return self._handle_not(input_state, context)
+        elif self.func_name == 'implies':
+            return self._handle_implies(input_state, context)
+        elif self.func_name == 'xor':
+            return self._handle_xor(input_state, context)
+        else:
+            raise ValueError(f"Unknown logical operator: {self.func_name}")
+    
+    def _handle_and(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle logical AND with three-valued logic."""
+        if len(self.args) != 2:
+            raise ValueError("AND operator requires exactly 2 arguments")
+        
+        # Convert arguments to SQL fragments
+        left_sql = self._evaluate_logical_argument(self.args[0], input_state, context)
+        right_sql = self._evaluate_logical_argument(self.args[1], input_state, context)
+        
+        # Implement three-valued logic for AND: 
+        # T and T = T, T and F = F, T and null = null
+        # F and T = F, F and F = F, F and null = F  
+        # null and T = null, null and F = F, null and null = null
+        sql_fragment = f"""(
+            CASE 
+                WHEN ({left_sql}) IS FALSE OR ({right_sql}) IS FALSE THEN FALSE
+                WHEN ({left_sql}) IS NULL OR ({right_sql}) IS NULL THEN NULL
+                ELSE ({left_sql}) AND ({right_sql})
+            END
+        )"""
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=False,  # Boolean result is not a collection
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _handle_or(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle logical OR with three-valued logic."""
+        if len(self.args) != 2:
+            raise ValueError("OR operator requires exactly 2 arguments")
+        
+        # Convert arguments to SQL fragments
+        left_sql = self._evaluate_logical_argument(self.args[0], input_state, context)
+        right_sql = self._evaluate_logical_argument(self.args[1], input_state, context)
+        
+        # Implement three-valued logic for OR:
+        # T or T = T, T or F = T, T or null = T
+        # F or T = T, F or F = F, F or null = null
+        # null or T = T, null or F = null, null or null = null
+        sql_fragment = f"""(
+            CASE 
+                WHEN ({left_sql}) IS TRUE OR ({right_sql}) IS TRUE THEN TRUE
+                WHEN ({left_sql}) IS NULL OR ({right_sql}) IS NULL THEN NULL
+                ELSE ({left_sql}) OR ({right_sql})
+            END
+        )"""
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=False,  # Boolean result is not a collection
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _handle_not(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle logical NOT with three-valued logic."""
+        if len(self.args) != 1:
+            raise ValueError("NOT operator requires exactly 1 argument")
+        
+        # Convert argument to SQL fragment
+        operand_sql = self._evaluate_logical_argument(self.args[0], input_state, context)
+        
+        # Implement three-valued logic for NOT:
+        # not T = F, not F = T, not null = null
+        sql_fragment = f"""(
+            CASE 
+                WHEN ({operand_sql}) IS NULL THEN NULL
+                ELSE NOT ({operand_sql})
+            END
+        )"""
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=False,  # Boolean result is not a collection
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _handle_implies(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle logical IMPLIES with three-valued logic."""
+        if len(self.args) != 2:
+            raise ValueError("IMPLIES operator requires exactly 2 arguments")
+        
+        # Convert arguments to SQL fragments
+        left_sql = self._evaluate_logical_argument(self.args[0], input_state, context)
+        right_sql = self._evaluate_logical_argument(self.args[1], input_state, context)
+        
+        # Implement three-valued logic for IMPLIES (A implies B = NOT A OR B):
+        # T implies T = T, T implies F = F, T implies null = null
+        # F implies T = T, F implies F = T, F implies null = T
+        # null implies T = T, null implies F = null, null implies null = null
+        sql_fragment = f"""(
+            CASE 
+                WHEN ({left_sql}) IS FALSE THEN TRUE
+                WHEN ({left_sql}) IS NULL THEN 
+                    CASE 
+                        WHEN ({right_sql}) IS TRUE THEN TRUE
+                        ELSE NULL
+                    END
+                ELSE ({right_sql})
+            END
+        )"""
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=False,  # Boolean result is not a collection
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _handle_xor(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle logical XOR with three-valued logic."""
+        if len(self.args) != 2:
+            raise ValueError("XOR operator requires exactly 2 arguments")
+        
+        # Convert arguments to SQL fragments
+        left_sql = self._evaluate_logical_argument(self.args[0], input_state, context)
+        right_sql = self._evaluate_logical_argument(self.args[1], input_state, context)
+        
+        # Implement three-valued logic for XOR:
+        # T xor T = F, T xor F = T, T xor null = null
+        # F xor T = T, F xor F = F, F xor null = null
+        # null xor T = null, null xor F = null, null xor null = null
+        sql_fragment = f"""(
+            CASE 
+                WHEN ({left_sql}) IS NULL OR ({right_sql}) IS NULL THEN NULL
+                ELSE ({left_sql}) != ({right_sql})
+            END
+        )"""
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=False,  # Boolean result is not a collection
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _evaluate_logical_argument(self, arg: Any, input_state: SQLState, 
+                                   context: ExecutionContext) -> str:
+        """Evaluate logical function argument to SQL fragment."""
+        # Handle simple literals first  
+        if not hasattr(arg, '__class__'):
+            # Simple literal - convert boolean values
+            if arg is True:
+                return "TRUE"
+            elif arg is False:
+                return "FALSE" 
+            elif arg is None:
+                return "NULL"
+            else:
+                return str(arg)
+        
+        # Handle pipeline operations (like LiteralOperation)
+        if hasattr(arg, 'execute'):
+            # This is a pipeline operation - execute it to get the SQL fragment
+            try:
+                result_state = arg.execute(input_state, context)
+                return result_state.sql_fragment
+            except Exception as e:
+                raise InvalidArgumentError(f"Failed to execute pipeline operation argument: {e}")
+        
+        # Handle LiteralOperation objects directly (if not handled by execute)
+        if hasattr(arg, 'value') and hasattr(arg, 'literal_type'):
+            # This is a LiteralOperation from the pipeline
+            if arg.value in ['true', True]:
+                return "TRUE"
+            elif arg.value in ['false', False]:
+                return "FALSE"
+            elif arg.value is None or arg.value == 'null':
+                return "NULL"
+            else:
+                return str(arg.value)
+        
+        # For other complex objects, try AST conversion
+        try:
+            return self._convert_ast_argument_to_sql(arg, input_state, context)
+        except ConversionError as e:
+            raise InvalidArgumentError(f"Failed to evaluate logical argument: {e}")
+    
+    def _execute_interval_function(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Execute interval function with proper SQL generation."""
+        
+        if self.func_name == 'interval':
+            return self._handle_interval_constructor(input_state, context)
+        elif self.func_name == 'contains':
+            return self._handle_interval_contains(input_state, context)
+        elif self.func_name == 'overlaps':
+            return self._handle_interval_overlaps(input_state, context)
+        elif self.func_name == 'before':
+            return self._handle_interval_before(input_state, context)
+        elif self.func_name == 'after':
+            return self._handle_interval_after(input_state, context)
+        elif self.func_name == 'starts':
+            return self._handle_interval_starts(input_state, context)
+        elif self.func_name == 'ends':
+            return self._handle_interval_ends(input_state, context)
+        elif self.func_name == 'meets':
+            return self._handle_interval_meets(input_state, context)
+        elif self.func_name == 'during':
+            return self._handle_interval_during(input_state, context)
+        elif self.func_name == 'includes':
+            return self._handle_interval_includes(input_state, context)
+        elif self.func_name == 'included_in':
+            return self._handle_interval_included_in(input_state, context)
+        elif self.func_name == 'width':
+            return self._handle_interval_width(input_state, context)
+        elif self.func_name == 'size':
+            return self._handle_interval_size(input_state, context)
+        elif self.func_name == 'start':
+            return self._handle_interval_start(input_state, context)
+        elif self.func_name == 'end':
+            return self._handle_interval_end(input_state, context)
+        else:
+            raise ValueError(f"Unknown interval function: {self.func_name}")
+    
+    def _handle_interval_constructor(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle interval constructor: Interval(start, end)"""
+        if len(self.args) != 2:
+            raise ValueError("Interval constructor requires exactly 2 arguments")
+        
+        # Convert arguments to SQL fragments
+        start_sql = self._evaluate_logical_argument(self.args[0], input_state, context)
+        end_sql = self._evaluate_logical_argument(self.args[1], input_state, context)
+        
+        # For now, create a JSON representation of the interval
+        # In a full implementation, this would use database-specific interval types
+        sql_fragment = f"""JSON_OBJECT(
+            'type', 'interval',
+            'start', {start_sql},
+            'end', {end_sql},
+            'startInclusive', true,
+            'endInclusive', true
+        )"""
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=False,  # Interval is not a collection
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _handle_interval_contains(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle interval contains operation: interval contains value"""
+        if len(self.args) != 1:
+            raise ValueError("Interval contains requires exactly 1 argument")
+        
+        # For now, implement basic contains logic
+        # In a full implementation, this would properly parse the interval
+        value_sql = self._evaluate_logical_argument(self.args[0], input_state, context)
+        
+        sql_fragment = f"""(
+            {value_sql} BETWEEN 
+            CAST(JSON_EXTRACT({input_state.sql_fragment}, '$.start') AS NUMERIC) AND
+            CAST(JSON_EXTRACT({input_state.sql_fragment}, '$.end') AS NUMERIC)
+        )"""
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=False,  # Boolean result is not a collection
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _handle_interval_overlaps(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle interval overlaps operation: interval1 overlaps interval2"""
+        # Placeholder implementation - would need full interval comparison logic
+        sql_fragment = "TRUE"  # Simplified for now
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=False,
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    # Placeholder implementations for other interval functions
+    def _handle_interval_before(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle interval before operation.""" 
+        return self._handle_interval_overlaps(input_state, context)  # Placeholder
+    
+    def _handle_interval_after(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle interval after operation."""
+        return self._handle_interval_overlaps(input_state, context)  # Placeholder
+    
+    def _handle_interval_starts(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle interval starts operation."""
+        return self._handle_interval_overlaps(input_state, context)  # Placeholder
+    
+    def _handle_interval_ends(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle interval ends operation."""
+        return self._handle_interval_overlaps(input_state, context)  # Placeholder
+    
+    def _handle_interval_meets(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle interval meets operation."""
+        return self._handle_interval_overlaps(input_state, context)  # Placeholder
+        
+    def _handle_interval_during(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle interval during operation."""
+        return self._handle_interval_overlaps(input_state, context)  # Placeholder
+    
+    def _handle_interval_includes(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle interval includes operation."""
+        return self._handle_interval_overlaps(input_state, context)  # Placeholder
+    
+    def _handle_interval_included_in(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle interval included_in operation."""
+        return self._handle_interval_overlaps(input_state, context)  # Placeholder
+    
+    def _handle_interval_width(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle interval width operation."""
+        sql_fragment = f"""(
+            CAST(JSON_EXTRACT({input_state.sql_fragment}, '$.end') AS NUMERIC) -
+            CAST(JSON_EXTRACT({input_state.sql_fragment}, '$.start') AS NUMERIC)
+        )"""
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=False,
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _handle_interval_size(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle interval size operation (same as width for numeric intervals)."""
+        return self._handle_interval_width(input_state, context)
+    
+    def _handle_interval_start(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle interval start operation."""
+        sql_fragment = f"CAST(JSON_EXTRACT({input_state.sql_fragment}, '$.start') AS NUMERIC)"
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=False,
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _handle_interval_end(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle interval end operation."""
+        sql_fragment = f"CAST(JSON_EXTRACT({input_state.sql_fragment}, '$.end') AS NUMERIC)"
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=False,
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _execute_list_function(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Execute list function with proper SQL generation."""
+        
+        if self.func_name == 'list':
+            return self._handle_list_constructor(input_state, context)
+        elif self.func_name == 'flatten':
+            return self._handle_list_flatten(input_state, context)
+        elif self.func_name == 'distinct':
+            return self._handle_list_distinct(input_state, context)
+        elif self.func_name == 'union':
+            return self._handle_list_union(input_state, context)
+        elif self.func_name == 'intersect':
+            return self._handle_list_intersect(input_state, context)
+        elif self.func_name == 'except':
+            return self._handle_list_except(input_state, context)
+        elif self.func_name == 'first':
+            return self._handle_list_first(input_state, context)
+        elif self.func_name == 'last':
+            return self._handle_list_last(input_state, context)
+        elif self.func_name == 'tail':
+            return self._handle_list_tail(input_state, context)
+        elif self.func_name == 'take':
+            return self._handle_list_take(input_state, context)
+        elif self.func_name == 'skip':
+            return self._handle_list_skip(input_state, context)
+        elif self.func_name == 'singleton':
+            return self._handle_list_singleton(input_state, context)
+        elif self.func_name == 'repeat':
+            return self._handle_list_repeat(input_state, context)
+        else:
+            raise ValueError(f"Unknown list function: {self.func_name}")
+    
+    def _handle_list_constructor(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle list constructor: List(item1, item2, ...)"""
+        # Convert all arguments to SQL fragments
+        item_sqls = []
+        for arg in self.args:
+            item_sql = self._evaluate_logical_argument(arg, input_state, context)
+            item_sqls.append(item_sql)
+        
+        # Create JSON array with all items
+        if item_sqls:
+            sql_fragment = f"json_array({', '.join(item_sqls)})"
+        else:
+            sql_fragment = "json_array()"
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=True,  # List is a collection
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _handle_list_flatten(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle list flatten operation."""
+        # Placeholder implementation - would flatten nested arrays
+        sql_fragment = input_state.sql_fragment  # For now, return as-is
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=True,
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _handle_list_distinct(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle list distinct operation."""
+        # Remove duplicates from array
+        sql_fragment = f"""(
+            SELECT json_group_array(DISTINCT value)
+            FROM json_each({input_state.sql_fragment})
+        )"""
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=True,
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _handle_list_first(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle list first operation."""
+        sql_fragment = f"json_extract({input_state.sql_fragment}, '$[0]')"
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=False,  # Single item is not a collection
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _handle_list_last(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle list last operation."""
+        sql_fragment = f"json_extract({input_state.sql_fragment}, '$[#-1]')"
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=False,
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    # Placeholder implementations for other list functions
+    def _handle_list_union(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle list union operation."""
+        return self._handle_list_flatten(input_state, context)  # Placeholder
+    
+    def _handle_list_intersect(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle list intersect operation."""
+        return self._handle_list_flatten(input_state, context)  # Placeholder
+    
+    def _handle_list_except(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle list except operation."""
+        return self._handle_list_flatten(input_state, context)  # Placeholder
+    
+    def _handle_list_tail(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle list tail operation (all except first)."""
+        sql_fragment = f"""(
+            SELECT json_group_array(value)
+            FROM (
+                SELECT value, row_number() OVER () as rn
+                FROM json_each({input_state.sql_fragment})
+            )
+            WHERE rn > 1
+        )"""
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=True,
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _handle_list_take(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle list take operation."""
+        if len(self.args) != 1:
+            raise ValueError("Take operation requires exactly 1 argument")
+        
+        count_sql = self._evaluate_logical_argument(self.args[0], input_state, context)
+        sql_fragment = f"""(
+            SELECT json_group_array(value)
+            FROM (
+                SELECT value, row_number() OVER () as rn
+                FROM json_each({input_state.sql_fragment})
+            )
+            WHERE rn <= {count_sql}
+        )"""
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=True,
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _handle_list_skip(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle list skip operation."""
+        if len(self.args) != 1:
+            raise ValueError("Skip operation requires exactly 1 argument")
+        
+        count_sql = self._evaluate_logical_argument(self.args[0], input_state, context)
+        sql_fragment = f"""(
+            SELECT json_group_array(value)
+            FROM (
+                SELECT value, row_number() OVER () as rn
+                FROM json_each({input_state.sql_fragment})
+            )
+            WHERE rn > {count_sql}
+        )"""
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=True,
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _handle_list_singleton(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle list singleton operation (return single item if list has exactly one element)."""
+        sql_fragment = f"""
+        CASE 
+            WHEN json_array_length({input_state.sql_fragment}) = 1 THEN 
+                json_extract({input_state.sql_fragment}, '$[0]')
+            ELSE NULL
+        END"""
+        
+        return SQLState(
+            base_table=input_state.base_table,
+            json_column=input_state.json_column,
+            sql_fragment=sql_fragment,
+            ctes=input_state.ctes.copy(),
+            lateral_joins=input_state.lateral_joins.copy(),
+            context_mode=input_state.context_mode,
+            resource_type=input_state.resource_type,
+            is_collection=False,
+            path_context=input_state.path_context,
+            variable_bindings=input_state.variable_bindings.copy()
+        )
+    
+    def _handle_list_repeat(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle list repeat operation."""
+        # Placeholder implementation
+        return self._handle_list_flatten(input_state, context)
     
     # =====================================
     # PIPELINE OPERATION INTERFACE METHODS
