@@ -79,3 +79,16 @@ class IndexerNode(ASTNode):
 class TupleNode(ASTNode):
     """Tuple literal node {key: value, ...}"""
     elements: List[tuple]  # List of (key, value) pairs where key is string or ASTNode and value is ASTNode
+
+
+@dataclass
+class IntervalConstructorNode(ASTNode):
+    """Interval constructor node Interval[start, end]"""
+    start: ASTNode
+    end: ASTNode
+
+
+@dataclass
+class ListLiteralNode(ASTNode):
+    """List literal node {item1, item2, ...}"""
+    elements: List[ASTNode]

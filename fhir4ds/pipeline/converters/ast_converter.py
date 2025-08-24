@@ -16,7 +16,7 @@ from ..operations.functions import FunctionCallOperation
 from ...fhirpath.parser.ast_nodes import (
     ASTNode, ThisNode, VariableNode, LiteralNode, IdentifierNode,
     FunctionCallNode, BinaryOpNode, UnaryOpNode, PathNode, IndexerNode,
-    TupleNode
+    TupleNode, IntervalConstructorNode, ListLiteralNode
 )
 
 logger = logging.getLogger(__name__)
@@ -113,6 +113,10 @@ class ASTToPipelineConverter:
             return self._convert_indexer_node(node)
         elif isinstance(node, TupleNode):
             return self._convert_tuple_node(node)
+        elif isinstance(node, IntervalConstructorNode):
+            return self._convert_interval_constructor_node(node)
+        elif isinstance(node, ListLiteralNode):
+            return self._convert_list_literal_node(node)
         else:
             raise ConversionError(f"Unsupported AST node type: {type(node).__name__}")
     
@@ -241,6 +245,23 @@ class ASTToPipelineConverter:
         operation = CollectionLiteralOperation(elements)
         self.conversion_stats['operations_created'] += 1
         return [operation]
+    
+    def _convert_interval_constructor_node(self, node: IntervalConstructorNode) -> List[PipelineOperation[SQLState]]:
+        """Convert IntervalConstructorNode to pipeline operations."""
+        logger.debug(f"Converting IntervalConstructorNode with start={node.start}, end={node.end}")
+        
+        # Create equivalent FunctionCallNode and convert that instead
+        equivalent_function = FunctionCallNode("Interval", [node.start, node.end])
+        return self._convert_function_call_node(equivalent_function)
+    
+    def _convert_list_literal_node(self, node: ListLiteralNode) -> List[PipelineOperation[SQLState]]:
+        """Convert ListLiteralNode to pipeline operations."""
+        logger.debug(f"Converting ListLiteralNode with {len(node.elements)} elements")
+        
+        # Create equivalent FunctionCallNode and convert that instead
+        equivalent_function = FunctionCallNode("List", node.elements)
+        return self._convert_function_call_node(equivalent_function)
+    
     
     def _create_ast_key(self, node: ASTNode) -> str:
         """

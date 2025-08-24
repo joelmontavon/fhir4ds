@@ -9,10 +9,11 @@ import re
 from enum import Enum
 from dataclasses import dataclass
 from typing import List, Optional
+from contextlib import contextmanager
 
 from .ast_nodes import (
     ASTNode, ThisNode, VariableNode, LiteralNode, IdentifierNode, FunctionCallNode,
-    BinaryOpNode, UnaryOpNode, PathNode, IndexerNode, TupleNode
+    BinaryOpNode, UnaryOpNode, PathNode, IndexerNode, TupleNode, IntervalConstructorNode, ListLiteralNode
 )
 
 
@@ -316,6 +317,17 @@ class FHIRPathParser:
         else:
             self.current_token = self.tokens[self.position]
     
+    @contextmanager
+    def preserve_parser_state(self):
+        """Context manager to safely preserve and restore parser state during lookahead operations."""
+        saved_pos = self.position
+        saved_token = self.current_token
+        try:
+            yield
+        finally:
+            self.position = saved_pos
+            self.current_token = saved_token
+    
     def parse(self) -> ASTNode:
         """Parse the tokens into an AST"""
         return self.parse_union_expression()
@@ -443,11 +455,18 @@ class FHIRPathParser:
             return PathNode(segments)
     
     def parse_tuple_literal(self) -> ASTNode:
-        """Parse tuple literal {key: value, key: value, ...}"""
+        """Parse tuple literal {key: value, ...} or list literal {item1, item2, ...}"""
         
         if self.current_token.type != TokenType.LBRACE:
-            raise ValueError("Expected '{' to start tuple literal")
+            raise ValueError("Expected '{' to start tuple/list literal")
         
+        # Peek ahead to detect list literal vs tuple literal
+        brace_content = self._peek_until_closing_brace()
+        if ':' not in brace_content:
+            # This is a list literal {item1, item2, item3}
+            return self._parse_list_literal()
+        
+        # This is a tuple literal {key: value, key: value, ...}
         self.advance()  # Skip '{'
         
         elements = []
@@ -577,14 +596,120 @@ class FHIRPathParser:
             raise ValueError(f"Unexpected token: {self.current_token}")
 
         # After the primary component (literal, identifier, func call, paren-expr) is parsed,
-        # check if an indexer is applied to it.
+        # check if an indexer is applied to it, or if it's an interval constructor.
         while self.current_token.type == TokenType.LBRACKET:
-            self.advance()  # Skip '['
-            index_expr = self.parse_or_expression()
-            if self.current_token.type == TokenType.RBRACKET:
-                self.advance()  # Skip ']'
+            # Check if this is an interval constructor (Interval[x, y])
+            if (isinstance(node, IdentifierNode) and 
+                node.name == 'Interval' and 
+                ',' in self._peek_until_closing_bracket()):
+                # This is an interval constructor
+                node = self._parse_interval_constructor(node)
             else:
-                raise ValueError(f"Expected ']' after index expression, found {self.current_token}")
-            node = IndexerNode(node, index_expr)
+                # This is a regular indexer
+                self.advance()  # Skip '['
+                index_expr = self.parse_or_expression()
+                if self.current_token.type == TokenType.RBRACKET:
+                    self.advance()  # Skip ']'
+                else:
+                    raise ValueError(f"Expected ']' after index expression, found {self.current_token}")
+                node = IndexerNode(node, index_expr)
         
         return node
+    
+    def _peek_until_closing_delimiter(self, open_token: 'TokenType', close_token: 'TokenType') -> str:
+        """
+        Peek ahead to find content within delimiters for syntax detection.
+        Returns the content between delimiters without consuming tokens.
+        
+        Args:
+            open_token: Opening delimiter token type (LBRACKET or LBRACE)
+            close_token: Closing delimiter token type (RBRACKET or RBRACE)
+            
+        Returns:
+            String content between delimiters
+        """
+        with self.preserve_parser_state():
+            content = ""
+            delimiter_depth = 0
+            
+            # We're currently at the opening delimiter, skip it
+            if self.current_token and self.current_token.type == open_token:
+                delimiter_depth = 1
+                self.advance()
+            
+            # Collect tokens until we find the matching closing delimiter
+            while self.current_token and delimiter_depth > 0:
+                if self.current_token.type == open_token:
+                    delimiter_depth += 1
+                elif self.current_token.type == close_token:
+                    delimiter_depth -= 1
+                
+                if delimiter_depth > 0:  # Don't include the final closing delimiter
+                    content += self.current_token.value + " "
+                
+                self.advance()
+            
+            return content.strip()
+    
+    def _peek_until_closing_bracket(self) -> str:
+        """Peek ahead to find content within brackets for comma detection."""
+        return self._peek_until_closing_delimiter(TokenType.LBRACKET, TokenType.RBRACKET)
+    
+    def _peek_until_closing_brace(self) -> str:
+        """Peek ahead to find content within braces for colon detection."""
+        return self._peek_until_closing_delimiter(TokenType.LBRACE, TokenType.RBRACE)
+    
+    def _parse_interval_constructor(self, identifier_node: ASTNode) -> IntervalConstructorNode:
+        """
+        Parse Interval[start, end] syntax.
+        identifier_node should be 'Interval' identifier.
+        """
+        # We're currently at the opening bracket
+        self.advance()  # Skip '['
+        
+        # Parse start expression
+        start_expr = self.parse_or_expression()
+        
+        # Expect comma
+        if self.current_token.type != TokenType.COMMA:
+            raise ValueError(f"Expected ',' in interval constructor, found {self.current_token}")
+        self.advance()  # Skip comma
+        
+        # Parse end expression
+        end_expr = self.parse_or_expression()
+        
+        # Expect closing bracket
+        if self.current_token.type != TokenType.RBRACKET:
+            raise ValueError(f"Expected ']' in interval constructor, found {self.current_token}")
+        self.advance()  # Skip ']'
+        
+        return IntervalConstructorNode(start_expr, end_expr)
+    
+    def _parse_list_literal(self) -> ListLiteralNode:
+        """
+        Parse {item1, item2, item3} list literal syntax.
+        We're currently at the opening brace.
+        """
+        self.advance()  # Skip '{'
+        
+        elements = []
+        
+        # Handle empty list
+        if self.current_token.type == TokenType.RBRACE:
+            self.advance()  # Skip '}'
+            return ListLiteralNode(elements)
+        
+        # Parse first element
+        elements.append(self.parse_or_expression())
+        
+        # Parse remaining elements
+        while self.current_token.type == TokenType.COMMA:
+            self.advance()  # Skip comma
+            elements.append(self.parse_or_expression())
+        
+        # Expect closing brace
+        if self.current_token.type != TokenType.RBRACE:
+            raise ValueError(f"Expected '}}' or ',' in list literal, found {self.current_token}")
+        self.advance()  # Skip '}'
+        
+        return ListLiteralNode(elements)
