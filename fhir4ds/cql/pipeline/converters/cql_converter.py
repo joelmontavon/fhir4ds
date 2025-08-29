@@ -18,6 +18,7 @@ from ...core.parser import (
 from ....fhirpath.parser.ast_nodes import ASTNode, IdentifierNode, FunctionCallNode, PathNode
 from ....pipeline.core.base import PipelineOperation, SQLState, ExecutionContext
 from ....pipeline.core.builder import FHIRPathPipeline
+from ....pipeline.converters.ast_converter import ASTToPipelineConverter
 from ..operations import (
     CQLRetrieveOperation, 
     CQLTerminologyOperation,
@@ -57,15 +58,19 @@ class CQLToPipelineConverter:
     providing better control over CQL-specific optimizations.
     """
     
-    def __init__(self, dialect: Optional[str] = None):
+    def __init__(self, dialect: Optional[str] = None, define_operations: dict = None):
         """
         Initialize CQL-to-Pipeline converter.
         
         Args:
             dialect: Target database dialect (optional)
+            define_operations: Dictionary of define operations for resolving references
         """
         self.dialect = dialect
         self.context = ConversionContext()
+        
+        # Initialize the AST-to-Pipeline converter for FHIRPath nodes with define operations context
+        self.ast_converter = ASTToPipelineConverter(define_operations=define_operations or {})
         
         # Registry of conversion methods
         self.conversion_registry = {
@@ -94,6 +99,7 @@ class CQLToPipelineConverter:
         
         # Handle CQL-specific nodes
         if isinstance(cql_ast, CQLASTNode):
+            logger.debug(f"Processing CQL-specific node: {type(cql_ast).__name__}")
             node_type = type(cql_ast)
             if node_type in self.conversion_registry:
                 return self.conversion_registry[node_type](cql_ast)
@@ -103,10 +109,13 @@ class CQLToPipelineConverter:
         
         # Handle FHIRPath nodes by building pipeline
         elif isinstance(cql_ast, ASTNode):
+            logger.debug(f"Processing FHIRPath AST node: {type(cql_ast).__name__}")
             # Check if this is a FunctionCallNode with CQL arguments
             if isinstance(cql_ast, FunctionCallNode) and self._is_cql_function_with_query_args(cql_ast):
+                logger.debug(f"Converting as CQL function call")
                 return self._convert_cql_function_call(cql_ast)
             else:
+                logger.debug(f"Converting as FHIRPath pipeline")
                 return self._convert_fhirpath_to_pipeline(cql_ast)
         
         else:
@@ -368,21 +377,13 @@ class CQLToPipelineConverter:
         Returns:
             FHIRPath pipeline
         """
-        # Create pipeline and convert the AST
-        # This is a simplified conversion - the full implementation
-        # would need to handle all FHIRPath constructs
-        pipeline = FHIRPathPipeline()
-        
-        if isinstance(fhirpath_ast, IdentifierNode):
-            pipeline = pipeline.path(fhirpath_ast.name)
-        elif isinstance(fhirpath_ast, PathNode):
-            # PathNode contains segments, add each as a path
-            for segment in fhirpath_ast.segments:
-                if isinstance(segment, IdentifierNode):
-                    pipeline = pipeline.path(segment.name)
-        # TODO: Add more FHIRPath conversions
-        
-        return pipeline
+        # Use the proper AST-to-Pipeline converter for comprehensive FHIRPath support
+        try:
+            return self.ast_converter.convert_ast_to_pipeline(fhirpath_ast)
+        except Exception as e:
+            logger.error(f"Failed to convert FHIRPath AST {type(fhirpath_ast).__name__}: {e}")
+            # Fallback to empty pipeline
+            return FHIRPathPipeline()
     
     def _convert_fallback_to_fhirpath(self, cql_ast: CQLASTNode) -> FHIRPathPipeline:
         """
@@ -412,17 +413,31 @@ class CQLToPipelineConverter:
         # Convert the define expression to a pipeline operation
         converted_expression = self.convert(define.expression)
         
-        # Ensure we have a PipelineOperation
-        if not isinstance(converted_expression, PipelineOperation):
-            logger.warning(f"Define expression did not convert to PipelineOperation: {type(converted_expression)}")
-            # Create a fallback pipeline if needed
-            if hasattr(converted_expression, 'compile'):
+        # Ensure we have a PipelineOperation or can extract one
+        if isinstance(converted_expression, PipelineOperation):
+            # Direct PipelineOperation - wrap in a pipeline
+            expression_pipeline = FHIRPathPipeline([converted_expression])
+        elif isinstance(converted_expression, FHIRPathPipeline):
+            # FHIRPathPipeline - check if we can extract a single operation for simple expressions
+            if len(converted_expression.operations) == 1:
+                # Single operation pipeline - this is likely an arithmetic or simple expression
+                logger.debug(f"Extracted single operation from FHIRPathPipeline for define '{define.name}'")
+                expression_pipeline = converted_expression
+            elif len(converted_expression.operations) > 0:
+                # Multi-operation pipeline - use as is
+                logger.debug(f"Using multi-operation FHIRPathPipeline for define '{define.name}' ({len(converted_expression.operations)} operations)")
                 expression_pipeline = converted_expression
             else:
-                # Last resort: create basic FHIRPath pipeline
+                # Empty pipeline - create basic pipeline
+                logger.warning(f"Empty FHIRPathPipeline for define '{define.name}', creating fallback")
                 expression_pipeline = FHIRPathPipeline()
-        else:
+        elif hasattr(converted_expression, 'compile'):
+            # Some other pipeline-like object
             expression_pipeline = converted_expression
+        else:
+            # Last resort: create basic FHIRPath pipeline
+            logger.warning(f"Unknown converted expression type for define '{define.name}': {type(converted_expression)}")
+            expression_pipeline = FHIRPathPipeline()
         
         # Create the define operation
         define_operation = CQLDefineOperation(

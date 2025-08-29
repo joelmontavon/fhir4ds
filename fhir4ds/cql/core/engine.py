@@ -119,6 +119,25 @@ class CQLEngine:
         
         logger.info(f"CQL Engine initialized with {'pipeline' if self.use_pipeline_mode else 'legacy'} processing mode")
     
+    def set_define_operations_context(self, define_operations: dict) -> None:
+        """
+        Set define operations context for resolving define references.
+        
+        This updates the pipeline converter to use define operations when converting
+        AST nodes, enabling proper resolution of CQL define references.
+        
+        Args:
+            define_operations: Dictionary of define operations from library
+        """
+        logger.debug(f"Setting define operations context with {len(define_operations)} defines")
+        # Recreate pipeline converter with define operations context
+        self.pipeline_converter = CQLToPipelineConverter(
+            dialect=self.dialect_name, 
+            define_operations=define_operations
+        )
+        logger.info(f"Pipeline converter AST converter now has {len(self.pipeline_converter.ast_converter.define_operations)} define operations")
+        logger.debug(f"Define operations keys: {list(self.pipeline_converter.ast_converter.define_operations.keys())}")
+    
     def evaluate_expression_via_pipeline(self, cql_expression: str, table_name: str = "fhir_resources", 
                                         json_column: str = "resource") -> str:
         """
@@ -149,6 +168,7 @@ class CQLEngine:
             
             # Step 2: Convert CQL AST directly to pipeline operations
             pipeline_operation = self.pipeline_converter.convert(cql_ast)
+            logger.debug(f"Pipeline operation type: {type(pipeline_operation).__name__}")
             
             # Step 3: Execute pipeline operation to generate SQL
             context = ExecutionContext(
@@ -294,7 +314,9 @@ class CQLEngine:
                 try:
                     return self.evaluate_expression_via_pipeline(cql_expression, table_name, json_column)
                 except Exception as e:
-                    logger.warning(f"Pipeline mode failed: {e}, falling back to legacy mode")
+                    logger.error(f"Pipeline mode failed: {e}, falling back to legacy mode")
+                    import traceback
+                    logger.debug(f"Pipeline failure traceback: {traceback.format_exc()}")
                     # Continue to legacy evaluation below
             
             # Check for direct function calls that can be routed through unified registry
@@ -718,7 +740,7 @@ WHERE {where_sql}"""
             resource_type = match.group(1)  
             sql = f"""SELECT {json_column}
 FROM {table_name}
-WHERE json_extract({json_column}, '$.resourceType') = '{resource_type}'"""
+WHERE {self._json_extract(json_column, '$.resourceType')} = '{resource_type}'"""
             
             logger.debug(f"Generated interim SQL for basic retrieve: {sql[:100]}...")
             return sql
@@ -3071,6 +3093,229 @@ FROM {table_name} {alias.lower()}
         """Create temporary context scope."""
         temp_context = CQLContext(context)
         return self.context_manager.with_context(temp_context)
+    
+    def generate_population_sql(self, define_statements: dict) -> dict:
+        """
+        Generate population-scale SQL using CTEs and GROUP BY for optimal performance.
+        
+        This method creates efficient population-first queries that process all patients
+        simultaneously rather than iterating through individual patients.
+        
+        Args:
+            define_statements: Dictionary of define name -> CQL expression
+            
+        Returns:
+            Dictionary of define name -> optimized population SQL
+        """
+        logger.info(f"Generating population-scale SQL for {len(define_statements)} define statements")
+        
+        # Ensure we're in population analytics mode
+        if not self.is_population_analytics_mode():
+            self.reset_to_population_analytics()
+        
+        population_queries = {}
+        
+        # Create base population CTE that will be reused across all queries
+        base_population_cte = self._generate_base_population_cte()
+        
+        # Generate resource CTEs for commonly used resource types
+        resource_ctes = self._generate_resource_ctes()
+        
+        # Process each define statement
+        for define_name, cql_expression in define_statements.items():
+            try:
+                logger.debug(f"Generating population SQL for define '{define_name}'")
+                
+                # Generate define-specific CTE and final query
+                define_cte = self._generate_define_cte(define_name, cql_expression)
+                final_query = self._build_population_final_query(
+                    define_name, base_population_cte, resource_ctes, define_cte
+                )
+                
+                population_queries[define_name] = final_query
+                logger.debug(f"Generated population SQL for '{define_name}': {len(final_query)} characters")
+                
+            except Exception as e:
+                logger.error(f"Failed to generate population SQL for '{define_name}': {e}")
+                # Fall back to individual SQL generation
+                try:
+                    fallback_sql = self.evaluate_expression(cql_expression)
+                    population_queries[define_name] = fallback_sql
+                    logger.warning(f"Used fallback SQL generation for '{define_name}'")
+                except Exception as fallback_error:
+                    logger.error(f"Fallback also failed for '{define_name}': {fallback_error}")
+                    population_queries[define_name] = f"-- Error generating SQL for {define_name}: {e}"
+        
+        logger.info(f"Population SQL generation completed: {len(population_queries)} queries generated")
+        return population_queries
+    
+    def _generate_base_population_cte(self) -> str:
+        """
+        Generate base population CTE with patient demographics and filtering.
+        
+        Returns:
+            SQL CTE defining the target patient population
+        """
+        # Default population includes all active patients
+        population_filters = []
+        
+        # Add context-specific filters if available
+        current_context = self.get_current_context()
+        if hasattr(current_context, 'population_filters') and current_context.population_filters:
+            for filter_key, filter_value in current_context.population_filters.items():
+                if filter_key == 'age_range':
+                    # Handle age-based filtering
+                    min_age, max_age = filter_value
+                    population_filters.append(
+                        f"EXTRACT(YEAR FROM CURRENT_DATE) - EXTRACT(YEAR FROM birth_date) BETWEEN {min_age} AND {max_age}"
+                    )
+                elif filter_key == 'gender':
+                    population_filters.append(f"gender = '{filter_value}'")
+                # Add more filter types as needed
+        
+        # Build WHERE clause
+        where_clause = "active = true"
+        if population_filters:
+            where_clause += " AND " + " AND ".join(population_filters)
+        
+        base_cte = f"""
+        patient_population AS (
+            SELECT 
+                patient_id,
+                birth_date,
+                gender,
+                race,
+                ethnicity,
+                EXTRACT(YEAR FROM CURRENT_DATE) - EXTRACT(YEAR FROM birth_date) as age
+            FROM fhir_resources 
+            WHERE {self._json_extract("resource", "$.resourceType")} = 'Patient'
+              AND {where_clause}
+        )"""
+        
+        return base_cte
+    
+    def _generate_resource_ctes(self) -> dict:
+        """
+        Generate commonly used resource CTEs for population queries.
+        
+        Returns:
+            Dictionary of resource type -> CTE SQL
+        """
+        resource_ctes = {}
+        
+        # Common resource types used in quality measures
+        common_resources = ['Condition', 'Encounter', 'MedicationDispense', 'Observation', 'Procedure']
+        
+        for resource_type in common_resources:
+            cte_sql = f"""
+        {resource_type.lower()}_resources AS (
+            SELECT 
+                json_extract(resource, '$.subject.reference') as patient_reference,
+                SUBSTR(json_extract(resource, '$.subject.reference'), 9) as patient_id,
+                resource
+            FROM fhir_resources
+            WHERE {self._json_extract("resource", "$.resourceType")} = '{resource_type}'
+        )"""
+            resource_ctes[resource_type.lower()] = cte_sql
+        
+        return resource_ctes
+    
+    def _generate_define_cte(self, define_name: str, cql_expression: str) -> str:
+        """
+        Generate CTE for a specific define statement with population-level logic.
+        
+        Args:
+            define_name: Name of the define statement
+            cql_expression: CQL expression to convert
+            
+        Returns:
+            CTE SQL for the define statement
+        """
+        # Convert CQL expression to SQL
+        try:
+            sql_expression = self.evaluate_expression(cql_expression)
+            
+            # Wrap in population-level CTE
+            cte_sql = f"""
+        {self._normalize_define_name(define_name)} AS (
+            SELECT 
+                p.patient_id,
+                ({sql_expression}) as result
+            FROM patient_population p
+            LEFT JOIN condition_resources c ON p.patient_id = c.patient_id  
+            LEFT JOIN encounter_resources e ON p.patient_id = e.patient_id
+            LEFT JOIN medicationdispense_resources m ON p.patient_id = m.patient_id
+            LEFT JOIN observation_resources o ON p.patient_id = o.patient_id
+            LEFT JOIN procedure_resources pr ON p.patient_id = pr.patient_id
+            GROUP BY p.patient_id
+        )"""
+            
+            return cte_sql
+            
+        except Exception as e:
+            logger.warning(f"Failed to generate CTE for '{define_name}': {e}")
+            # Return basic CTE structure
+            return f"""
+        {self._normalize_define_name(define_name)} AS (
+            SELECT 
+                p.patient_id,
+                false as result
+            FROM patient_population p
+        )"""
+    
+    def _build_population_final_query(self, define_name: str, base_cte: str, 
+                                     resource_ctes: dict, define_cte: str) -> str:
+        """
+        Build final population-scale query combining all CTEs.
+        
+        Args:
+            define_name: Name of the define statement
+            base_cte: Base population CTE
+            resource_ctes: Dictionary of resource CTEs
+            define_cte: Define-specific CTE
+            
+        Returns:
+            Complete SQL query for population-scale execution
+        """
+        # Combine all CTEs
+        all_ctes = [base_cte]
+        all_ctes.extend(resource_ctes.values())
+        all_ctes.append(define_cte)
+        
+        # Build final query with population-level aggregation
+        normalized_name = self._normalize_define_name(define_name)
+        final_query = f"""
+WITH {','.join(all_ctes)}
+SELECT 
+    patient_id,
+    result,
+    '{define_name}' as define_name,
+    CURRENT_TIMESTAMP as evaluation_time
+FROM {normalized_name}
+ORDER BY patient_id;"""
+        
+        return final_query
+    
+    def _normalize_define_name(self, define_name: str) -> str:
+        """
+        Normalize define name for use in SQL identifiers.
+        
+        Args:
+            define_name: Original define name
+            
+        Returns:
+            SQL-safe identifier
+        """
+        # Remove quotes and special characters, replace spaces with underscores
+        normalized = define_name.strip('"\'')
+        normalized = ''.join(c if c.isalnum() else '_' for c in normalized)
+        normalized = normalized.lower()
+        
+        # Ensure it starts with a letter
+        if normalized and not normalized[0].isalpha():
+            normalized = 'define_' + normalized
+        
+        return normalized or 'unknown_define'
     
     def set_parameter(self, name: str, value: Any):
         """Set a CQL parameter value."""

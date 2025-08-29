@@ -43,7 +43,7 @@ class LiteralOperation(PipelineOperation[SQLState]):
     
     def _validate_literal(self) -> None:
         """Validate literal value and type."""
-        valid_types = {'string', 'integer', 'decimal', 'boolean', 'null', 'date', 'time', 'datetime', 'sql', 'value'}
+        valid_types = {'string', 'integer', 'decimal', 'boolean', 'null', 'date', 'time', 'datetime', 'sql', 'value', 'quantity', 'long_integer'}
         if self.value_type not in valid_types:
             raise ValueError(f"Invalid literal type: {self.value_type}. Must be one of {valid_types}")
         
@@ -67,6 +67,12 @@ class LiteralOperation(PipelineOperation[SQLState]):
         elif self.value_type in ['date', 'time', 'datetime']:
             if not isinstance(self.value, str):
                 raise ValueError(f"Date/time literal must be a string: {self.value}")
+        elif self.value_type == 'quantity':
+            if not isinstance(self.value, dict) or 'value' not in self.value or 'unit' not in self.value:
+                raise ValueError(f"Quantity literal must be a dict with 'value' and 'unit' keys: {self.value}")
+        elif self.value_type == 'long_integer':
+            if not isinstance(self.value, str) or not self.value.endswith('L'):
+                raise ValueError(f"Long integer literal must be a string ending with 'L': {self.value}")
     
     def execute(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """
@@ -156,6 +162,19 @@ class LiteralOperation(PipelineOperation[SQLState]):
         elif self.value_type == 'value':
             # Value expressions should be returned as-is (e.g. CURRENT_DATE)
             return str(self.value)
+        
+        elif self.value_type == 'quantity':
+            # Generate SQL for quantity literals with units
+            value_part = self.value['value']
+            unit_part = self.value['unit']
+            # For now, represent as a JSON object (can be enhanced later for better SQL representation)
+            json_str = f'{{"value": "{value_part}", "unit": "{unit_part}"}}'
+            return f"'{json_str}'"
+        
+        elif self.value_type == 'long_integer':
+            # Generate SQL for long integers (remove L suffix for SQL)
+            numeric_value = self.value.rstrip('L').rstrip('l')
+            return str(int(numeric_value))
         
         else:
             raise ValueError(f"Unknown literal type: {self.value_type}")
@@ -431,3 +450,88 @@ class QuantityLiteralOperation(PipelineOperation[SQLState]):
     def estimate_complexity(self, input_state: SQLState, context: ExecutionContext) -> int:
         """Estimate complexity of quantity literal."""
         return 1  # Slightly more complex than simple literals due to JSON creation
+
+
+class TodayOperation(PipelineOperation[SQLState]):
+    """
+    Operation for Today() CQL function that returns current date.
+    
+    This handles the CQL Today() function by generating appropriate SQL
+    for getting the current date in the target database dialect.
+    """
+    
+    def __init__(self):
+        """Initialize Today operation."""
+        pass
+    
+    def compile(self, context: ExecutionContext, state: SQLState) -> SQLState:
+        """
+        Compile Today() to SQL that returns current date.
+        
+        Args:
+            context: Execution context
+            state: Current SQL state
+            
+        Returns:
+            Updated SQL state with Today() SQL
+        """
+        logger.debug("Compiling Today() function")
+        
+        # Generate dialect-specific SQL for current date
+        dialect_name = getattr(context.dialect, 'name', 'GENERIC').upper()
+        
+        if dialect_name == 'DUCKDB':
+            sql_fragment = "current_date"
+        elif dialect_name == 'POSTGRESQL':
+            sql_fragment = "current_date" 
+        else:
+            # Generic SQL
+            sql_fragment = "current_date"
+        
+        return state.evolve(
+            sql_fragment=sql_fragment,
+            is_collection=False,
+            context_mode=ContextMode.SINGLE_VALUE
+        )
+    
+    def execute(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """
+        Execute Today() by compiling it.
+        
+        Args:
+            input_state: Input SQL state
+            context: Execution context
+            
+        Returns:
+            SQL state with Today() result
+        """
+        return self.compile(context, input_state)
+    
+    def get_operation_name(self) -> str:
+        """Get human-readable operation name."""
+        return "today_function"
+    
+    def validate_preconditions(self, input_state: SQLState, context: ExecutionContext) -> None:
+        """Validate Today() preconditions."""
+        pass  # Today() has no preconditions
+    
+    def estimate_complexity(self, input_state: SQLState, context: ExecutionContext) -> int:
+        """Estimate complexity of Today() function."""
+        return 1  # Simple database function call
+    
+    def optimize_for_dialect(self, dialect) -> 'TodayOperation':
+        """
+        Optimize Today() for specific dialect.
+        
+        Args:
+            dialect: Target dialect for optimization
+            
+        Returns:
+            Optimized Today operation
+        """
+        # Today() is already dialect-optimized in compile method
+        return self
+    
+    def __repr__(self) -> str:
+        """String representation."""
+        return "TodayOperation()"

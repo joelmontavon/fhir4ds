@@ -16,7 +16,7 @@ from ..operations.functions import FunctionCallOperation
 from ...fhirpath.parser.ast_nodes import (
     ASTNode, ThisNode, VariableNode, LiteralNode, IdentifierNode,
     FunctionCallNode, BinaryOpNode, UnaryOpNode, PathNode, IndexerNode,
-    TupleNode, IntervalConstructorNode, ListLiteralNode
+    TupleNode, IntervalConstructorNode, ListLiteralNode, CQLQueryExpressionNode
 )
 
 logger = logging.getLogger(__name__)
@@ -34,14 +34,19 @@ class ASTToPipelineConverter:
         compiled_sql = pipeline.compile(context)
     """
     
-    def __init__(self):
-        """Initialize the AST converter."""
+    def __init__(self, define_operations=None):
+        """Initialize the AST converter.
+        
+        Args:
+            define_operations: Dictionary of define operations for resolving define references
+        """
         self.conversion_stats = {
             'nodes_converted': 0,
             'operations_created': 0,
             'conversions_cached': 0
         }
         self._conversion_cache = {}  # Cache for repeated AST patterns
+        self.define_operations = define_operations or {}  # For resolving CQL define references
     
     def convert_ast_to_pipeline(self, ast_node: ASTNode) -> FHIRPathPipeline:
         """
@@ -117,6 +122,8 @@ class ASTToPipelineConverter:
             return self._convert_interval_constructor_node(node)
         elif isinstance(node, ListLiteralNode):
             return self._convert_list_literal_node(node)
+        elif isinstance(node, CQLQueryExpressionNode):
+            return self._convert_cql_query_expression_node(node)
         else:
             raise ConversionError(f"Unsupported AST node type: {type(node).__name__}")
     
@@ -136,16 +143,38 @@ class ASTToPipelineConverter:
     
     def _convert_literal_node(self, node: LiteralNode) -> List[PipelineOperation[SQLState]]:
         """Convert LiteralNode to pipeline operations."""
-        operation = LiteralOperation(node.value, node.type)
-        self.conversion_stats['operations_created'] += 1
-        return [operation]
+        # Check if this string literal is actually a quoted define reference
+        if node.type == 'string' and node.value in self.define_operations:
+            logger.debug(f"Converting string literal '{node.value}' as define reference")
+            # This is a quoted define reference - create a define reference operation
+            from ..operations.functions import DefineReferenceOperation
+            operation = DefineReferenceOperation(node.value, self.define_operations[node.value], self.define_operations)
+            self.conversion_stats['operations_created'] += 1
+            return [operation]
+        else:
+            # Regular literal
+            operation = LiteralOperation(node.value, node.type)
+            self.conversion_stats['operations_created'] += 1
+            return [operation]
     
     def _convert_identifier_node(self, node: IdentifierNode) -> List[PipelineOperation[SQLState]]:
         """Convert IdentifierNode to pipeline operations."""
-        # Identifiers represent field names in FHIR resources
-        operation = PathNavigationOperation(node.name)
-        self.conversion_stats['operations_created'] += 1
-        return [operation]
+        # Check if this identifier is a CQL define reference first
+        logger.debug(f"Converting IdentifierNode: '{node.name}', define_operations keys: {list(self.define_operations.keys())}")
+        if node.name in self.define_operations:
+            # This is a define reference - create a define reference operation
+            logger.debug(f"Creating DefineReferenceOperation for '{node.name}'")
+            # Pass the full define_operations context for recursive resolution
+            from ..operations.functions import DefineReferenceOperation
+            operation = DefineReferenceOperation(node.name, self.define_operations[node.name], self.define_operations)
+            self.conversion_stats['operations_created'] += 1
+            return [operation]
+        else:
+            # This is a FHIR field path identifier
+            logger.debug(f"Creating PathNavigationOperation for '{node.name}'")
+            operation = PathNavigationOperation(node.name)
+            self.conversion_stats['operations_created'] += 1
+            return [operation]
     
     def _convert_function_call_node(self, node: FunctionCallNode) -> List[PipelineOperation[SQLState]]:
         """Convert FunctionCallNode to pipeline operations."""
@@ -166,8 +195,13 @@ class ASTToPipelineConverter:
         left_ops = self._convert_node(node.left)
         right_ops = self._convert_node(node.right)
         
-        # Create function call for the binary operator
-        operation = FunctionCallOperation(node.operator, left_ops + right_ops)
+        # For binary operations, we need only the final result of each operand as arguments
+        # The final result is represented by the last operation in each sequence
+        left_result = left_ops[-1] if left_ops else None
+        right_result = right_ops[-1] if right_ops else None
+        
+        # Create function call for the binary operator with only 2 arguments
+        operation = FunctionCallOperation(node.operator, [left_result, right_result])
         self.conversion_stats['operations_created'] += 1
         return left_ops + right_ops + [operation]
     
@@ -262,6 +296,51 @@ class ASTToPipelineConverter:
         equivalent_function = FunctionCallNode("List", node.elements)
         return self._convert_function_call_node(equivalent_function)
     
+    def _convert_cql_query_expression_node(self, node: CQLQueryExpressionNode) -> List[PipelineOperation[SQLState]]:
+        """Convert CQLQueryExpressionNode to pipeline operations."""
+        logger.debug(f"Converting CQLQueryExpressionNode with alias '{node.alias}'")
+        
+        from ...cql.pipeline.operations.query import CQLQueryOperation
+        
+        # Convert source expression to pipeline operations
+        source_operations = self._convert_node(node.source)
+        
+        # Convert optional clauses to pipeline operations
+        where_pipeline = None
+        if node.where_clause:
+            where_operations = self._convert_node(node.where_clause)
+            where_pipeline = FHIRPathPipeline(where_operations)
+        
+        sort_pipeline = None
+        if node.sort_clause:
+            sort_operations = self._convert_node(node.sort_clause)
+            sort_pipeline = FHIRPathPipeline(sort_operations)
+        
+        return_pipeline = None
+        if node.return_clause:
+            return_operations = self._convert_node(node.return_clause)
+            return_pipeline = FHIRPathPipeline(return_operations)
+        
+        # Create source pipeline from source operations
+        if source_operations:
+            source_pipeline_op = source_operations[-1]  # Use last operation as source
+        else:
+            # Fallback: create a simple identifier operation
+            from ..operations.path import PathNavigationOperation
+            source_pipeline_op = PathNavigationOperation("")
+        
+        # Create CQL query operation with all the components
+        query_operation = CQLQueryOperation(
+            source_pipeline=source_pipeline_op,
+            where_pipeline=where_pipeline,
+            sort_pipeline=sort_pipeline,
+            sort_direction=node.sort_direction,
+            return_pipeline=return_pipeline,
+            alias=node.alias
+        )
+        
+        # Return all source operations plus the query operation
+        return source_operations + [query_operation]
     
     def _create_ast_key(self, node: ASTNode) -> str:
         """

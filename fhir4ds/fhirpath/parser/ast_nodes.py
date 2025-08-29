@@ -92,3 +92,22 @@ class IntervalConstructorNode(ASTNode):
 class ListLiteralNode(ASTNode):
     """List literal node {item1, item2, ...}"""
     elements: List[ASTNode]
+
+
+@dataclass
+class CQLQueryExpressionNode(ASTNode):
+    """Represents a CQL query expression with optional alias, where, sort clauses"""
+    source: ASTNode  # The source expression (e.g., "Smoking status observation")
+    alias: str = None  # Optional alias (e.g., "O")
+    where_clause: ASTNode = None  # Optional where condition
+    sort_clause: ASTNode = None  # Optional sort expression
+    sort_direction: str = "asc"  # "asc" or "desc"
+    return_clause: ASTNode = None  # Optional return expression
+
+
+@dataclass
+class ResourceQueryNode(ASTNode):
+    """Represents a CQL resource query like [Patient] or [Condition: 'Asthma']"""
+    resource_type: str  # The FHIR resource type (e.g., "Patient", "Condition")
+    code_filter: str = None  # Optional code/value set filter (e.g., "Asthma")
+    code_path: str = None  # Optional code path (defaults to "code")

@@ -229,12 +229,16 @@ class CQLDateTimeFunctionHandler:
             
         return LiteralNode(value=sql, type='sql')
     
-    def age_in_years(self, birthdate_expr: Any) -> LiteralNode:
+    def age_in_years(self, birthdate_expr: Any = None, birth_date: Any = None, 
+                     as_of_date: Any = None, patient_context: Dict[str, Any] = None) -> LiteralNode:
         """
-        CQL 'AgeInYears' function - calculate age in years from birthdate to today.
+        CQL 'AgeInYears' function - calculate age in years with automatic patient context injection.
         
         Args:
-            birthdate_expr: Birthdate expression (Date or DateTime)
+            birthdate_expr: Birthdate expression (Date or DateTime) - legacy parameter
+            birth_date: Patient birth date (can be auto-injected from patient context)
+            as_of_date: Date to calculate age as of (defaults to today)
+            patient_context: Patient data for context injection
             
         Returns:
             LiteralNode with SQL expression for age in years
@@ -250,15 +254,37 @@ class CQLDateTimeFunctionHandler:
             else:
                 return arg
         
-        birthdate_val = extract_value(birthdate_expr)
+        # Determine birth date from various sources
+        birthdate_val = None
         
-        # Calculate age from birthdate to current date
+        # Priority order: explicit birth_date, birthdate_expr, patient_context
+        if birth_date is not None:
+            birthdate_val = extract_value(birth_date)
+            logger.debug(f"Using explicit birth_date: {birthdate_val}")
+        elif birthdate_expr is not None:
+            birthdate_val = extract_value(birthdate_expr)
+            logger.debug(f"Using birthdate_expr: {birthdate_val}")
+        elif patient_context and 'birthDate' in patient_context:
+            birthdate_val = f"'{patient_context['birthDate']}'"
+            logger.debug(f"Auto-injected birth date from patient context: {birthdate_val}")
+        else:
+            raise ValueError("AgeInYears requires birth date - provide birth_date parameter or patient_context with birthDate")
+        
+        # Determine as-of date (defaults to current date)
+        if as_of_date is not None:
+            as_of_val = extract_value(as_of_date)
+            logger.debug(f"Using explicit as_of_date: {as_of_val}")
+        else:
+            as_of_val = "CURRENT_DATE"
+            logger.debug("Using CURRENT_DATE for as_of_date")
+        
+        # Calculate age from birthdate to as-of date
         if self.dialect == "postgresql":
             # PostgreSQL: Use AGE function to get interval, then extract years
-            sql = f"EXTRACT(YEAR FROM AGE(CURRENT_DATE, CAST({birthdate_val} AS DATE)))"
+            sql = f"EXTRACT(YEAR FROM AGE({as_of_val}, CAST({birthdate_val} AS DATE)))"
         else:  # DuckDB
-            # DuckDB: Use DATEDIFF to calculate years between birthdate and today
-            sql = f"DATE_DIFF('year', CAST({birthdate_val} AS DATE), CURRENT_DATE)"
+            # DuckDB: Use DATEDIFF to calculate years between birthdate and as-of date
+            sql = f"DATE_DIFF('year', CAST({birthdate_val} AS DATE), {as_of_val})"
             
         return LiteralNode(value=sql, type='sql')
     
@@ -780,6 +806,36 @@ class CQLDateTimeFunctionHandler:
     def get_supported_functions(self) -> List[str]:
         """Get list of all supported CQL date/time functions."""
         return list(self.function_map.keys())
+    
+    def get_context_requirements(self, function_name: str):
+        """
+        Get context requirements for a specific function.
+        
+        Args:
+            function_name: Name of the function
+            
+        Returns:
+            FunctionContext indicating context requirements
+        """
+        from ..core.function_context import FunctionContext, FunctionContextType
+        
+        # Age calculation functions require patient context
+        if function_name.lower().startswith('age'):
+            return FunctionContext(
+                requires_patient_context=True,
+                primary_context=FunctionContextType.PATIENT,
+                auto_inject_fields={"birth_date": "birthDate"},
+                patient_dependent=True,
+                context_optional=False
+            )
+        
+        # Other datetime functions are generally context-independent
+        return FunctionContext(
+            primary_context=FunctionContextType.NONE,
+            population_evaluable=True,
+            patient_dependent=False,
+            context_optional=True
+        )
     
     def is_temporal_function(self, function_name: str) -> bool:
         """Check if function is a temporal/date-time function."""

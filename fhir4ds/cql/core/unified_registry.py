@@ -71,7 +71,7 @@ class UnifiedFunctionRegistry:
     - Backward compatibility with existing patterns
     """
     
-    def __init__(self, dialect: Union[str, Any] = "duckdb", terminology_client=None, db_connection=None):
+    def __init__(self, dialect: Union[str, Any] = "duckdb", terminology_client=None, db_connection=None, context_provider=None):
         """
         Initialize unified function registry with all function handlers.
         
@@ -79,12 +79,20 @@ class UnifiedFunctionRegistry:
             dialect: Database dialect ("duckdb" or "postgresql") or dialect object
             terminology_client: Optional terminology client for clinical functions
             db_connection: Optional database connection for caching
+            context_provider: Optional context provider for context-aware function calls
         """
         # Convert dialect object to string if needed
         self.dialect = self._normalize_dialect(dialect)
         self.handlers = {}
         self.capabilities = {}
         self.function_map = {}  # Direct function name -> handler mapping
+        
+        # Initialize context provider for smart context detection
+        if context_provider is None:
+            from .context_provider import CQLContextProvider
+            self.context_provider = CQLContextProvider()
+        else:
+            self.context_provider = context_provider
         
         logger.info(f"Initializing UnifiedFunctionRegistry with dialect: {self.dialect}")
         
@@ -223,9 +231,28 @@ class UnifiedFunctionRegistry:
                 )
                 logger.debug(f"Registered {len(logical_functions)} logical functions")
             
+            # Add context requirements for each function
+            self._enhance_capabilities_with_context()
+            
         except Exception as e:
             logger.error(f"Failed to build capability registry: {e}")
             raise
+    
+    def _enhance_capabilities_with_context(self):
+        """Add context requirements metadata to function capabilities."""
+        from .function_context import get_function_context
+        
+        for handler_name, capability in self.capabilities.items():
+            # Add context requirements dict if not exists
+            if not hasattr(capability, 'context_requirements'):
+                capability.context_requirements = {}
+            
+            for func_name in capability.supported_functions:
+                # Get context metadata for this function
+                context = get_function_context(func_name)
+                capability.context_requirements[func_name.lower()] = context
+        
+        logger.debug("Enhanced capabilities with context requirements")
     
     def _build_function_map(self):
         """Build direct function name to handler mapping for fast lookup."""
@@ -330,7 +357,7 @@ class UnifiedFunctionRegistry:
     
     def call_function(self, function_name: str, *args, **kwargs) -> Any:
         """
-        Call a function through the appropriate handler.
+        Call a function through the appropriate handler with context awareness.
         
         Args:
             function_name: Name of the function to call
@@ -343,6 +370,41 @@ class UnifiedFunctionRegistry:
         Raises:
             ValueError: If function is not supported
             Exception: If function call fails
+        """
+        # Check if function needs context injection
+        context_required = self.context_provider.detect_context_requirement(function_name, list(args))
+        
+        if context_required:
+            # Create enhanced function call with context
+            function_call = {
+                'function_name': function_name,
+                **kwargs
+            }
+            
+            # Inject appropriate context
+            if context_required.value == "Patient":
+                enhanced_call = self.context_provider.inject_patient_context(function_call)
+                # Remove function_name from kwargs before passing to handler
+                enhanced_kwargs = {k: v for k, v in enhanced_call.items() if k != 'function_name'}
+                return self._call_without_context(function_name, args, enhanced_kwargs)
+            else:
+                # For other context types, use original parameters for now
+                return self._call_without_context(function_name, args, kwargs)
+        else:
+            # No context needed, call directly
+            return self._call_without_context(function_name, args, kwargs)
+    
+    def _call_without_context(self, function_name: str, args: tuple, kwargs: dict) -> Any:
+        """
+        Call function without context injection (original implementation).
+        
+        Args:
+            function_name: Name of the function to call
+            args: Positional arguments
+            kwargs: Keyword arguments
+            
+        Returns:
+            Result of the function call
         """
         handler = self.get_handler_for_function(function_name)
         if not handler:
@@ -420,6 +482,38 @@ class UnifiedFunctionRegistry:
             debug_info['similar_functions'] = similar[:5]  # Limit to 5 for readability
         
         return debug_info
+    
+    def set_patient_context(self, patient_data: Dict[str, Any]):
+        """
+        Set patient context for context-aware function calls.
+        
+        Args:
+            patient_data: Patient FHIR resource or patient data dictionary
+        """
+        self.context_provider.set_patient_context(patient_data)
+        logger.info(f"Patient context set in registry: patient_id={patient_data.get('id', 'unknown')}")
+    
+    def push_context(self, new_context: str):
+        """
+        Push a new context onto the context stack.
+        
+        Args:
+            new_context: New context to push
+        """
+        self.context_provider.push_context(new_context)
+    
+    def pop_context(self) -> Optional[str]:
+        """
+        Pop the previous context from the context stack.
+        
+        Returns:
+            Previous context, or None if stack is empty
+        """
+        return self.context_provider.pop_context()
+    
+    def get_context_summary(self) -> Dict[str, Any]:
+        """Get summary of current context state."""
+        return self.context_provider.get_context_summary()
 
 
 # Global registry instance (initialized when needed)

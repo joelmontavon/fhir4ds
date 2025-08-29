@@ -697,7 +697,8 @@ class CQLLibraryManager:
             
             # Step 4: Convert define statements to pipeline operations
             logger.debug(f"Converting define statements to pipeline operations for {name}")
-            pipeline_converter = CQLToPipelineConverter(dialect=getattr(self, 'dialect', 'duckdb'))
+            # Create pipeline converter after define operations are available
+            pipeline_converter = None  # Will be created after define_operations
             
             # Extract define operations from the library
             define_operations = {}
@@ -705,9 +706,19 @@ class CQLLibraryManager:
                 for definition in ast.definitions:
                     from .parser import DefineNode
                     if isinstance(definition, DefineNode):
-                        define_op = pipeline_converter.convert(definition)
-                        define_operations[definition.name] = define_op
-                        logger.debug(f"Converted define '{definition.name}' to pipeline operation")
+                        # Store define with original CQL text for proper evaluation
+                        # Avoid problematic pipeline conversion that creates literalnode errors
+                        define_operations[definition.name] = {
+                            'name': definition.name,
+                            'access_level': definition.access_level,
+                            'original_expression': self._reconstruct_define_expression(definition),
+                            'ast_node': definition.expression,
+                            'definition_metadata': {
+                                'source': 'library_parser',
+                                'converted_via': 'direct_cql_text'
+                            }
+                        }
+                        logger.debug(f"Stored define '{definition.name}' with original CQL text")
             
             # Store define operations in translated content for compatibility
             translated['define_operations'] = define_operations
@@ -788,3 +799,74 @@ class CQLLibraryManager:
                         return True
         
         return False
+
+    def _reconstruct_define_expression(self, definition) -> str:
+        """
+        Reconstruct the original CQL expression text from a DefineNode.
+        
+        This method attempts to convert the AST back to readable CQL text
+        to avoid pipeline conversion issues with literalnode errors.
+        
+        Args:
+            definition: DefineNode with expression AST
+            
+        Returns:
+            String representation of the CQL expression
+        """
+        try:
+            # Try to extract original CQL text from AST nodes
+            return self._ast_to_cql_text(definition.expression)
+        except Exception as e:
+            logger.warning(f"Could not reconstruct CQL text for define '{definition.name}': {e}")
+            # Fallback to string representation (may cause issues but better than nothing)
+            return str(definition.expression)
+    
+    def _ast_to_cql_text(self, ast_node) -> str:
+        """
+        Convert AST node back to CQL text.
+        
+        This handles common AST node types and converts them back to
+        readable CQL expressions.
+        """
+        from ...fhirpath.parser.ast_nodes import (
+            BinaryOpNode, UnaryOpNode, LiteralNode, IdentifierNode, 
+            FunctionCallNode, PathNode
+        )
+        
+        if isinstance(ast_node, LiteralNode):
+            # Handle different literal types
+            if ast_node.type == 'string':
+                return f"'{ast_node.value}'"
+            elif ast_node.type == 'boolean':
+                return str(ast_node.value).lower()
+            else:
+                return str(ast_node.value)
+                
+        elif isinstance(ast_node, BinaryOpNode):
+            left_text = self._ast_to_cql_text(ast_node.left)
+            right_text = self._ast_to_cql_text(ast_node.right)
+            return f"{left_text} {ast_node.operator} {right_text}"
+            
+        elif isinstance(ast_node, UnaryOpNode):
+            operand_text = self._ast_to_cql_text(ast_node.operand)
+            return f"{ast_node.operator} {operand_text}"
+            
+        elif isinstance(ast_node, IdentifierNode):
+            return ast_node.name
+            
+        elif isinstance(ast_node, FunctionCallNode):
+            args_text = []
+            for arg in ast_node.args:
+                args_text.append(self._ast_to_cql_text(arg))
+            args_str = ', '.join(args_text) if args_text else ''
+            return f"{ast_node.name}({args_str})"
+            
+        elif isinstance(ast_node, PathNode):
+            segments_text = []
+            for segment in ast_node.segments:
+                segments_text.append(self._ast_to_cql_text(segment))
+            return '.'.join(segments_text)
+            
+        else:
+            # For unknown node types, fall back to string representation
+            return str(ast_node)

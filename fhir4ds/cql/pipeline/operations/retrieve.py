@@ -113,7 +113,7 @@ class CQLRetrieveOperation(PipelineOperation[SQLState]):
         json_column = input_state.json_column
         
         if context.dialect.name.upper() == 'DUCKDB':
-            return f"json_extract({json_column}, '$.resourceType') = '{self.resource_type}'"
+            return f"json_extract_string({json_column}, '$.resourceType') = '{self.resource_type}'"
         else:  # PostgreSQL
             return f"({json_column} ->> 'resourceType') = '{self.resource_type}'"
     
