@@ -151,7 +151,7 @@ class CQLWorkflowEngine:
                 if define_result is not None:
                     # Execute the define statement and get patient-level results
                     # (define operations context already set for CQL engine above)
-                    patient_results = self._execute_define_statement(define_name, define_result, {})
+                    patient_results = self._execute_define_statement(define_name, define_result, {}, library_id)
                     define_results[define_name] = patient_results
                     
                     logger.debug(f"Define '{define_name}' executed successfully: {len(patient_results)} patient results")
@@ -177,6 +177,16 @@ class CQLWorkflowEngine:
         
         logger.info(f"Workflow completed: {execution_summary['define_statements_executed']} defines, "
                    f"{execution_summary['total_patient_results']} total patient results")
+        
+        # Debug: Log execution summary structure for MeasureReport debugging
+        logger.debug(f"Execution summary define_results keys: {list(define_results.keys())}")
+        for define_name, results in define_results.items():
+            if isinstance(results, list) and results:
+                sample_result = results[0]
+                has_patient_id = "patient_id" in sample_result if isinstance(sample_result, dict) else False
+                logger.debug(f"Define '{define_name}': {len(results)} results, has_patient_id: {has_patient_id}")
+            else:
+                logger.debug(f"Define '{define_name}': {type(results)} - {results}")
         
         # Step 7: Transform to MeasureReports if configured
         if self._should_generate_measure_reports(measure_report_config):
@@ -230,7 +240,7 @@ class CQLWorkflowEngine:
             execution_summary['measure_report_error'] = str(e)
             return execution_summary
     
-    def _execute_define_statement(self, define_name: str, define_content: Any, define_operations: dict = None) -> List[Dict[str, Any]]:
+    def _execute_define_statement(self, define_name: str, define_content: Any, define_operations: dict = None, library_name: str = None) -> List[Dict[str, Any]]:
         """
         Execute a single define statement and return patient-level results.
         
@@ -265,11 +275,13 @@ class CQLWorkflowEngine:
             
             logger.debug(f"Executing CQL expression for '{define_name}': {cql_expression}")
             
-            # The CQL engine should handle define references natively through proper AST conversion
-            # No manual resolution needed here
+            # Resolve parameter references in CQL expression before evaluation
+            resolved_expression = self._resolve_parameter_references(cql_expression, library_name)
+            if resolved_expression != cql_expression:
+                logger.info(f"Resolved parameter references: {cql_expression} → {resolved_expression}")
             
             # Execute CQL expression using the engine
-            sql_result = self.cql_engine.evaluate_expression(cql_expression)
+            sql_result = self.cql_engine.evaluate_expression(resolved_expression)
             
             if sql_result and not sql_result.startswith('--'):
                 logger.info(f"CQL expression '{define_name}' successfully translated to SQL")
@@ -495,6 +507,7 @@ class CQLWorkflowEngine:
             
         except Exception as e:
             logger.error(f"SQL execution failed: {e}")
+            logger.error(f"Full failed SQL query:\n{sql_query}")
             logger.debug(f"Failed SQL query: {sql_query[:300]}...")
             
             # Try to provide more specific error information
@@ -701,3 +714,123 @@ class CQLWorkflowEngine:
         # This could be expanded for expressions like: "today + 1" or "MyDefine.field"
         
         return cql_expression
+    
+    def _resolve_parameter_references(self, cql_expression: str, library_name: str) -> str:
+        """
+        Resolve parameter references in CQL expressions.
+        
+        Handles patterns like:
+        - start(Measurement Period) → '2023-01-01T00:00:00.000Z'
+        - end(Measurement Period) → '2023-12-31T23:59:59.999Z'
+        - Measurement Period → Period{'start': '...', 'end': '...'}
+        
+        Args:
+            cql_expression: Original CQL expression with parameter references
+            library_name: Name of the library to get parameters from
+            
+        Returns:
+            CQL expression with parameter references resolved to actual values
+        """
+        # Get library parameters
+        library = self.library_manager.libraries.get(library_name)
+        if not library or not library.parameter_values:
+            return cql_expression
+            
+        resolved_expression = cql_expression
+        
+        # Handle specific parameter patterns
+        for param_name, param_value in library.parameter_values.items():
+            if param_name in resolved_expression:
+                logger.debug(f"Found parameter reference '{param_name}' in expression: {cql_expression}")
+                
+                # Handle start(Parameter Name) pattern
+                start_pattern = f'start({param_name})'
+                if start_pattern in resolved_expression:
+                    if isinstance(param_value, dict) and 'start' in param_value:
+                        start_value = param_value['start']
+                        # Use CQL datetime literal format (@) instead of string literal
+                        resolved_expression = resolved_expression.replace(start_pattern, f"@{start_value}")
+                        logger.info(f"Resolved start({param_name}) → @{start_value}")
+                    else:
+                        logger.warning(f"Parameter '{param_name}' doesn't have start field: {param_value}")
+                
+                # Handle end(Parameter Name) pattern  
+                end_pattern = f'end({param_name})'
+                if end_pattern in resolved_expression:
+                    if isinstance(param_value, dict) and 'end' in param_value:
+                        end_value = param_value['end'] 
+                        # Use CQL datetime literal format (@) instead of string literal
+                        resolved_expression = resolved_expression.replace(end_pattern, f"@{end_value}")
+                        logger.info(f"Resolved end({param_name}) → @{end_value}")
+                    else:
+                        logger.warning(f"Parameter '{param_name}' doesn't have end field: {param_value}")
+                
+                # Handle quoted parameter names like "Measurement Period"
+                quoted_param = f'"{param_name}"'
+                if quoted_param in resolved_expression and start_pattern not in resolved_expression and end_pattern not in resolved_expression:
+                    # This is a direct parameter reference, not inside a function
+                    if isinstance(param_value, dict):
+                        # For complex types, we might need more sophisticated handling
+                        logger.debug(f"Direct parameter reference '{quoted_param}' found, but not substituting complex value")
+                    else:
+                        # For simple values, substitute directly
+                        resolved_expression = resolved_expression.replace(quoted_param, str(param_value))
+                        logger.info(f"Resolved {quoted_param} → {param_value}")
+        
+        return resolved_expression
+    
+    def _format_execution_results(self, define_name: str, cql_expression: str, 
+                                execution_results: Any, sql_query: str) -> List[Dict[str, Any]]:
+        """
+        Format execution results into patient-level format for MeasureReport generation.
+        
+        Args:
+            define_name: Name of the CQL define being executed
+            cql_expression: Original CQL expression
+            execution_results: Raw execution results from SQL
+            sql_query: Generated SQL query
+            
+        Returns:
+            List of patient-level results with patient_id fields
+        """
+        patient_results = []
+        
+        try:
+            # Get all patients from the database for proper patient-level evaluation
+            patient_query = """
+                SELECT DISTINCT json_extract_string(resource, '$.id') as patient_id
+                FROM fhir_resources 
+                WHERE json_extract_string(resource, '$.resourceType') = 'Patient'
+                AND json_extract_string(resource, '$.id') IS NOT NULL
+            """
+            
+            query_result = self.datastore.execute_sql(patient_query)
+            patient_results = query_result.fetchall()
+            
+            if not patient_results:
+                logger.warning("No patients found in database for patient-level evaluation")
+                return [{"define_name": define_name, "result": execution_results, "patient_id": None}]
+            
+            # For each patient, create a patient-level result
+            for patient_row in patient_results:
+                patient_id = patient_row[0] if patient_row else None  # First column is patient_id
+                
+                # For now, create a simple patient-level result
+                # In a full implementation, we'd re-evaluate the CQL per patient
+                patient_result = {
+                    "patient_id": patient_id,
+                    "define_name": define_name, 
+                    "cql_expression": cql_expression,
+                    "result": execution_results,  # Simplified: use library-level result
+                    "sql_query": sql_query[:200] + "..." if len(sql_query) > 200 else sql_query
+                }
+                
+                patient_results.append(patient_result)
+                
+            logger.info(f"✅ Formatted {len(patient_results)} patient-level results for define '{define_name}'")
+            return patient_results
+            
+        except Exception as e:
+            logger.error(f"Error formatting execution results for '{define_name}': {e}")
+            # Return basic result without patient context
+            return [{"define_name": define_name, "result": execution_results, "error": str(e)}]

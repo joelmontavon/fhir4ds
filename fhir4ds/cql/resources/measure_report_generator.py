@@ -33,6 +33,7 @@ class BaseMeasureReportGenerator(ABC):
         """Extract unique patient IDs from execution results."""
         patient_ids = set()
         
+        # First, try to get patient IDs from patient-level results
         define_results = execution_summary.get("define_results", {})
         for define_name, results in define_results.items():
             if isinstance(results, list):
@@ -40,7 +41,59 @@ class BaseMeasureReportGenerator(ABC):
                     if isinstance(result, dict) and "patient_id" in result:
                         patient_ids.add(result["patient_id"])
         
+        # If no patient IDs found, try to infer from library-level results
+        # This is a fallback for library-level evaluation
+        if not patient_ids:
+            logger.info("No patient-level results found, attempting to extract patients from library-level results")
+            
+            # Look for Patient resources or patient references in the results
+            for define_name, results in define_results.items():
+                if isinstance(results, list):
+                    for result in results:
+                        # Try to extract patient ID from various result formats
+                        patient_id = self._extract_patient_id_from_result(result)
+                        if patient_id:
+                            patient_ids.add(patient_id)
+        
+        # Final fallback: if still no patient IDs found, use generic placeholders
+        # This ensures MeasureReport generation can proceed even with library-level results  
+        if not patient_ids:
+            logger.warning("No patient IDs could be extracted from execution results.")
+            logger.info("This may indicate library-level evaluation rather than patient-level evaluation.")
+            logger.info("Consider implementing patient-level CQL evaluation for accurate MeasureReports.")
+            # Use generic placeholder - consuming system should handle appropriately
+            patient_ids = {"patient-unknown"}
+            
         return sorted(list(patient_ids))
+    
+    def _extract_patient_id_from_result(self, result: Any) -> Optional[str]:
+        """Try to extract a patient ID from a result object."""
+        if isinstance(result, dict):
+            # Check for direct patient_id field
+            if "patient_id" in result:
+                return result["patient_id"]
+                
+            # Check for Patient resource
+            if result.get("resourceType") == "Patient":
+                return result.get("id")
+                
+            # Check for subject reference
+            if "subject" in result and isinstance(result["subject"], dict):
+                reference = result["subject"].get("reference", "")
+                if reference.startswith("Patient/"):
+                    return reference.split("/", 1)[1]
+        
+        # Check if result is a Patient resource JSON string
+        if isinstance(result, str):
+            try:
+                import json
+                parsed = json.loads(result)
+                if isinstance(parsed, dict) and parsed.get("resourceType") == "Patient":
+                    return parsed.get("id")
+            except:
+                pass
+                
+        return None
     
     def _get_population_results_for_patient(self, execution_summary: Dict[str, Any], 
                                           patient_id: str) -> Dict[str, bool]:

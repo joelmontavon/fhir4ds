@@ -62,6 +62,7 @@ class CQLDateTimeFunctionHandler:
             
             # Age calculation functions
             'ageinyears': self.age_in_years,
+            'ageinyearsat': self.age_in_years_at,
             
             # Difference calculation functions (boundary crossings)
             'difference_in_years': self.difference_in_years,
@@ -285,6 +286,56 @@ class CQLDateTimeFunctionHandler:
         else:  # DuckDB
             # DuckDB: Use DATEDIFF to calculate years between birthdate and as-of date
             sql = f"DATE_DIFF('year', CAST({birthdate_val} AS DATE), {as_of_val})"
+            
+        return LiteralNode(value=sql, type='sql')
+    
+    def age_in_years_at(self, as_of_date: Any, patient_context: Dict[str, Any] = None) -> LiteralNode:
+        """
+        CQL 'AgeInYearsAt' function - calculate age in years at a specific date.
+        
+        This is the CQL-specific version that takes the as-of date as the first argument
+        and calculates age from patient's birth date to that date.
+        
+        Args:
+            as_of_date: Date to calculate age as of (required)
+            patient_context: Patient data for birth date extraction
+            
+        Returns:
+            LiteralNode with SQL expression for age in years at specified date
+            
+        Example: AgeInYearsAt(start of "Measurement Period") → age at measurement period start
+        """
+        logger.debug("Generating CQL AgeInYearsAt operation")
+        
+        # Extract value from AST node if needed
+        def extract_value(arg):
+            if hasattr(arg, 'value'):
+                return arg.value
+            else:
+                return arg
+        
+        # Get as-of date (required parameter)
+        as_of_val = extract_value(as_of_date)
+        logger.debug(f"Using as_of_date: {as_of_val}")
+        
+        # Determine birth date from patient context
+        if patient_context and 'birthDate' in patient_context:
+            birthdate_val = f"'{patient_context['birthDate']}'"
+            logger.debug(f"Auto-injected birth date from patient context: {birthdate_val}")
+        else:
+            # For EXM126v4 context, we need to extract birth date from the current patient
+            # This should be handled by the context provider, but for now use a placeholder
+            # that will be replaced with actual patient birth date extraction
+            birthdate_val = "(json_extract(resource, '$.birthDate'))"
+            logger.debug("Using patient resource birth date extraction")
+        
+        # Calculate age from birthdate to as-of date
+        if self.dialect == "postgresql":
+            # PostgreSQL: Use AGE function to get interval, then extract years
+            sql = f"EXTRACT(YEAR FROM AGE(CAST({as_of_val} AS DATE), CAST({birthdate_val} AS DATE)))"
+        else:  # DuckDB
+            # DuckDB: Use DATEDIFF to calculate years between birthdate and as-of date
+            sql = f"DATE_DIFF('year', CAST({birthdate_val} AS DATE), CAST({as_of_val} AS DATE))"
             
         return LiteralNode(value=sql, type='sql')
     

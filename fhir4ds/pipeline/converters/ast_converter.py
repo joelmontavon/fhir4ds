@@ -18,6 +18,7 @@ from ...fhirpath.parser.ast_nodes import (
     FunctionCallNode, BinaryOpNode, UnaryOpNode, PathNode, IndexerNode,
     TupleNode, IntervalConstructorNode, ListLiteralNode, CQLQueryExpressionNode
 )
+from ...cql.core.parser import DateTimeLiteralNode
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,8 @@ class ASTToPipelineConverter:
             return self._convert_interval_constructor_node(node)
         elif isinstance(node, ListLiteralNode):
             return self._convert_list_literal_node(node)
+        elif isinstance(node, DateTimeLiteralNode):
+            return self._convert_datetime_literal_node(node)
         elif isinstance(node, CQLQueryExpressionNode):
             return self._convert_cql_query_expression_node(node)
         else:
@@ -156,6 +159,15 @@ class ASTToPipelineConverter:
             operation = LiteralOperation(node.value, node.type)
             self.conversion_stats['operations_created'] += 1
             return [operation]
+    
+    def _convert_datetime_literal_node(self, node: DateTimeLiteralNode) -> List[PipelineOperation[SQLState]]:
+        """Convert DateTimeLiteralNode to pipeline operations."""
+        # DateTimeLiteralNode represents @2023-01-01T00:00:00.000Z
+        # Convert to a LiteralOperation with datetime type
+        operation = LiteralOperation(node.value, 'datetime')
+        self.conversion_stats['operations_created'] += 1
+        logger.debug(f"Converted DateTimeLiteralNode '{node.value}' to LiteralOperation")
+        return [operation]
     
     def _convert_identifier_node(self, node: IdentifierNode) -> List[PipelineOperation[SQLState]]:
         """Convert IdentifierNode to pipeline operations."""

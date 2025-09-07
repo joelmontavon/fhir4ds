@@ -80,11 +80,12 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         'median', 'mode', 'populationstddev', 'populationvariance'  # Statistical functions
     })
     
-    # DateTime Functions (13+) - includes constructors and component extraction
+    # DateTime Functions (14+) - includes constructors and component extraction
     DATETIME_FUNCTIONS = frozenset({
         'now', 'today', 'timeofday', 'lowboundary', 'highboundary',
         'datetime',  # DateTime constructor function
         'ageinyears',  # Context-dependent age calculation function
+        'ageinyearsat',  # CQL AgeInYearsAt function - age calculation with specific date
         # Component extraction functions
         'hour_from', 'minute_from', 'second_from', 'year_from', 'month_from', 'day_from'
     })
@@ -251,6 +252,14 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         if not hasattr(arg, '__class__'):
             return str(arg)  # Simple literal
         
+        # Check if this is a pipeline operation (like FunctionCallOperation)
+        if hasattr(arg, 'execute') and callable(getattr(arg, 'execute')):
+            # This is a pipeline operation - execute it directly
+            base_state = self._create_base_copy(input_state)
+            result_state = arg.execute(base_state, context)
+            return result_state.sql_fragment
+        
+        # For AST nodes, use the AST converter
         try:
             return self._convert_ast_argument_to_sql(arg, input_state, context)
         except ConversionError as e:
@@ -818,13 +827,112 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         first_collection = input_state.sql_fragment
         second_collection = self._evaluate_union_argument(self.args[0], input_state, context)
         
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = self._build_union_sql_duckdb(first_collection, second_collection)
+        # Optimization: Detect resource retrieval queries and use simple UNION ALL
+        if self._is_simple_union_candidate(first_collection) and self._is_simple_union_candidate(second_collection):
+            # Extract clean resource queries and create UNION ALL
+            first_queries = self._extract_resource_queries(first_collection)
+            second_queries = self._extract_resource_queries(second_collection)
+            
+            if first_queries and second_queries:
+                # Combine all queries with UNION ALL
+                all_queries = first_queries + second_queries
+                sql_fragment = f"({' UNION ALL '.join(all_queries)})"
+                logger.debug(f"🔧 Optimized union for {len(all_queries)} resource retrievals: UNION ALL")
+            else:
+                # Fall back to regular union logic
+                sql_fragment = f"({first_collection} UNION ALL {second_collection})"
+                logger.debug(f"🔧 Basic union optimization: UNION ALL")
         else:
-            sql_fragment = self._build_union_sql_postgresql(first_collection, second_collection)
+            # Use complex JSON array union logic for general cases
+            if context.dialect.name.upper() == 'DUCKDB':
+                sql_fragment = self._build_union_sql_duckdb(first_collection, second_collection)
+            else:
+                sql_fragment = self._build_union_sql_postgresql(first_collection, second_collection)
         
         sql_fragment = self._add_debug_info(sql_fragment, "union()", context)
         return self._create_collection_result(input_state, sql_fragment)
+    
+    def _is_resource_retrieval_query(self, sql_fragment: str) -> bool:
+        """Check if SQL fragment is a resource retrieval query."""
+        # Resource retrieval queries typically contain SELECT and fhir_resources
+        sql_clean = sql_fragment.strip().strip('(').strip(')')
+        return (
+            'SELECT resource FROM fhir_resources' in sql_clean or
+            'SELECT resource\n            FROM fhir_resources' in sql_clean
+        )
+    
+    def _is_simple_union_candidate(self, sql_fragment: str) -> bool:
+        """Check if SQL fragment is a candidate for simple UNION ALL optimization."""
+        # Check if it contains resource retrieval queries, even if wrapped in complex logic
+        return (
+            self._is_resource_retrieval_query(sql_fragment) or
+            (
+                'SELECT resource FROM fhir_resources' in sql_fragment and
+                (
+                    'UNION ALL' in sql_fragment or  # Already has UNION ALL
+                    'CASE' in sql_fragment  # Complex CASE with resource queries inside
+                )
+            )
+        )
+    
+    def _extract_resource_queries(self, sql_fragment: str) -> list:
+        """Extract clean resource retrieval queries from potentially complex SQL."""
+        import re
+        
+        queries = []
+        
+        # Clean the fragment
+        sql_clean = sql_fragment.strip().strip('(').strip(')')
+        
+        # Method 1: Try to find complete SELECT statements with balanced parentheses
+        select_starts = []
+        i = 0
+        while i < len(sql_clean):
+            if sql_clean[i:i+6].upper() == 'SELECT':
+                # Found a SELECT - now find the matching end
+                paren_count = 0
+                start = i
+                j = i
+                
+                # Look backwards to find opening paren
+                while start > 0 and sql_clean[start-1] not in '(':
+                    start -= 1
+                if start > 0:
+                    start -= 1  # Include the opening paren
+                
+                # Look forward to find the complete query
+                while j < len(sql_clean):
+                    if sql_clean[j] == '(':
+                        paren_count += 1
+                    elif sql_clean[j] == ')':
+                        paren_count -= 1
+                        if paren_count == 0:
+                            # Found the end
+                            query = sql_clean[start:j+1].strip()
+                            if 'SELECT resource FROM fhir_resources' in query.upper():
+                                queries.append(query)
+                            break
+                    j += 1
+            i += 1
+        
+        # Method 2: If no balanced queries found, try simpler regex
+        if not queries:
+            # Try to match simple pattern
+            pattern = r'\(\s*SELECT resource\s+FROM fhir_resources.*?\)'
+            matches = re.findall(pattern, sql_clean, re.IGNORECASE | re.DOTALL)
+            queries.extend([m.strip() for m in matches if m.strip()])
+        
+        # Method 3: If still no matches but we detect it's a simple resource query
+        if not queries and self._is_resource_retrieval_query(sql_fragment):
+            queries.append(sql_clean)
+        
+        # Remove duplicates while preserving order
+        unique_queries = []
+        for q in queries:
+            if q not in unique_queries:
+                unique_queries.append(q)
+        
+        return unique_queries
     
     def _handle_intersect(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle intersect() function - returns elements common to both collections."""
@@ -3069,6 +3177,8 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
             return self._handle_datetime_constructor(input_state, context)
         elif self.func_name == 'ageinyears':
             return self._handle_ageinyears(input_state, context)
+        elif self.func_name == 'ageinyearsat':
+            return self._handle_ageinyearsat(input_state, context)
         elif self.func_name == 'hour_from':
             return self._handle_hour_from(input_state, context)
         elif self.func_name == 'minute_from':
@@ -3196,6 +3306,34 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
             sql_fragment = f"CAST(EXTRACT(year FROM AGE(CURRENT_DATE, CAST({birthdate_expr} AS DATE))) AS INTEGER)"
         else:  # PostgreSQL
             sql_fragment = f"EXTRACT(year FROM AGE(CURRENT_DATE, CAST({birthdate_expr} AS DATE)))::INTEGER"
+        
+        return input_state.evolve(
+            sql_fragment=sql_fragment,
+            is_collection=False,
+            context_mode=ContextMode.SINGLE_VALUE
+        )
+    
+    def _handle_ageinyearsat(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle AgeInYearsAt(asOf) function - age calculation with specific date."""
+        
+        if not self.args or len(self.args) < 1:
+            raise InvalidArgumentError("AgeInYearsAt function requires at least one argument (asOf date)")
+        
+        # First argument is the asOf date
+        as_of_date_expr = str(self.args[0])
+        
+        # Second argument (if provided) is the birthdate, otherwise use Patient.birthDate from context
+        if len(self.args) > 1:
+            birthdate_expr = str(self.args[1])
+        else:
+            # Context-dependent: assume Patient.birthDate from current context
+            birthdate_expr = "json_extract_string(resource, '$.birthDate')"
+        
+        # Calculate age in years using SQL date functions
+        if context.dialect.name.upper() == 'DUCKDB':
+            sql_fragment = f"CAST(EXTRACT(year FROM AGE(CAST({as_of_date_expr} AS DATE), CAST({birthdate_expr} AS DATE))) AS INTEGER)"
+        else:  # PostgreSQL
+            sql_fragment = f"EXTRACT(year FROM AGE(CAST({as_of_date_expr} AS DATE), CAST({birthdate_expr} AS DATE)))::INTEGER"
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -3415,11 +3553,16 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         if not self.args:
             raise ValueError("Less than operator requires at least one argument")
         
-        # Get the right operand from arguments
+        # Get the right operand from arguments - properly evaluate function calls
         if hasattr(self.args[0], 'value'):
             right_value = str(self.args[0].value)
         else:
-            right_value = str(self.args[0])
+            # For complex objects like function calls, evaluate them properly
+            try:
+                right_value = self._evaluate_union_argument(self.args[0], input_state, context)
+            except Exception:
+                # Fallback to string representation
+                right_value = str(self.args[0])
         
         sql_fragment = f"{input_state.sql_fragment} < {right_value}"
         
@@ -3441,11 +3584,16 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         if not self.args:
             raise ValueError("Less than or equals operator requires at least one argument")
         
-        # Get the right operand from arguments
+        # Get the right operand from arguments - properly evaluate function calls
         if hasattr(self.args[0], 'value'):
             right_value = str(self.args[0].value)
         else:
-            right_value = str(self.args[0])
+            # For complex objects like function calls, evaluate them properly
+            try:
+                right_value = self._evaluate_union_argument(self.args[0], input_state, context)
+            except Exception:
+                # Fallback to string representation
+                right_value = str(self.args[0])
         
         sql_fragment = f"{input_state.sql_fragment} <= {right_value}"
         
@@ -3467,11 +3615,16 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         if not self.args:
             raise ValueError("Greater than operator requires at least one argument")
         
-        # Get the right operand from arguments
+        # Get the right operand from arguments - properly evaluate function calls
         if hasattr(self.args[0], 'value'):
             right_value = str(self.args[0].value)
         else:
-            right_value = str(self.args[0])
+            # For complex objects like function calls, evaluate them properly
+            try:
+                right_value = self._evaluate_union_argument(self.args[0], input_state, context)
+            except Exception:
+                # Fallback to string representation
+                right_value = str(self.args[0])
         
         sql_fragment = f"{input_state.sql_fragment} > {right_value}"
         
@@ -3493,11 +3646,16 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         if not self.args:
             raise ValueError("Greater than or equals operator requires at least one argument")
         
-        # Get the right operand from arguments
+        # Get the right operand from arguments - properly evaluate function calls
         if hasattr(self.args[0], 'value'):
             right_value = str(self.args[0].value)
         else:
-            right_value = str(self.args[0])
+            # For complex objects like function calls, evaluate them properly
+            try:
+                right_value = self._evaluate_union_argument(self.args[0], input_state, context)
+            except Exception:
+                # Fallback to string representation
+                right_value = str(self.args[0])
         
         sql_fragment = f"{input_state.sql_fragment} >= {right_value}"
         

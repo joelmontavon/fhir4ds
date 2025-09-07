@@ -79,7 +79,7 @@ class ParametersHandler:
         value_fields = [
             'valueString', 'valueInteger', 'valueDecimal', 'valueBoolean',
             'valueDate', 'valueDateTime', 'valueTime', 'valueCode', 
-            'valueUri', 'valueId', 'valueReference'
+            'valueUri', 'valueId', 'valueReference', 'valuePeriod'
         ]
         
         for value_field in value_fields:
@@ -99,6 +99,13 @@ class ParametersHandler:
                 elif value_field == 'valueReference':
                     # Return reference as string (e.g., "Library/example-library")
                     return value.get('reference', str(value))
+                elif value_field == 'valuePeriod':
+                    # Return Period as dictionary with start and end
+                    return {
+                        'start': value.get('start'),
+                        'end': value.get('end'),
+                        'type': 'Period'
+                    }
                 else:
                     # String types
                     return str(value)

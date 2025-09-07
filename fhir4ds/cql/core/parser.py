@@ -85,10 +85,22 @@ class IncludeNode(CQLASTNode):
 
 class ParameterNode(CQLASTNode):
     """AST node for CQL parameter definition."""
-    def __init__(self, name: str, parameter_type: Optional[str] = None, default_value: Optional[Any] = None):
+    def __init__(self, name: str, parameter_type: Optional['TypeNode'] = None, default_value: Optional[Any] = None):
         self.name = name
-        self.parameter_type = parameter_type
+        self.parameter_type = parameter_type  # Now supports TypeNode
         self.default_value = default_value
+
+class TypeNode(CQLASTNode):
+    """AST node for CQL type expressions including generic types."""
+    def __init__(self, base_type: str, generic_types: Optional[List['TypeNode']] = None):
+        self.base_type = base_type  # e.g., "Interval", "List", "String"
+        self.generic_types = generic_types or []  # e.g., [DateTime] for Interval<DateTime>
+    
+    def __str__(self):
+        if self.generic_types:
+            generic_str = ', '.join(str(gt) for gt in self.generic_types)
+            return f"{self.base_type}<{generic_str}>"
+        return self.base_type
 
 class ContextNode(CQLASTNode):
     """AST node for CQL context definition."""
@@ -135,6 +147,28 @@ class LetClauseNode(CQLASTNode):
     def __init__(self, identifier: str, expression: Any):
         self.identifier = identifier
         self.expression = expression
+
+class IntervalLiteralNode(CQLASTNode):
+    """AST node for CQL interval literals."""
+    def __init__(self, start_value: Any, end_value: Any, 
+                 start_inclusive: bool = True, end_inclusive: bool = False):
+        self.start_value = start_value
+        self.end_value = end_value
+        self.start_inclusive = start_inclusive
+        self.end_inclusive = end_inclusive
+    
+    def __str__(self):
+        start_bracket = '[' if self.start_inclusive else '('
+        end_bracket = ']' if self.end_inclusive else ')'
+        return f"Interval{start_bracket}{self.start_value}, {self.end_value}{end_bracket}"
+
+class DateTimeLiteralNode(CQLASTNode):
+    """AST node for CQL date/time literals."""
+    def __init__(self, value: str):
+        self.value = value  # The literal value without the @ prefix
+    
+    def __str__(self):
+        return f"@{self.value}"
 
 class CQLLexer(FHIRPathLexer):
     """
@@ -190,15 +224,29 @@ class CQLLexer(FHIRPathLexer):
         return result
     
     def tokenize(self) -> List:
-        """Override tokenization to handle CQL-specific tokens like @ date literals."""
-        # Pre-process the expression to handle @ date literals before standard tokenization
-        processed_expression = self._preprocess_cql_literals(self.expression)
+        """Override tokenization to handle CQL-specific tokens like @ date literals and comments."""
+        # Pre-process the expression to handle comments and @ date literals
+        processed_expression = self._preprocess_comments(self.expression)
+        processed_expression = self._preprocess_cql_literals(processed_expression)
         
         # Create a temporary lexer with the processed expression
         temp_lexer = FHIRPathLexer(processed_expression)
         tokens = temp_lexer.tokenize()
         
         return tokens
+    
+    def _preprocess_comments(self, expression: str) -> str:
+        """Pre-process CQL expression to remove comments."""
+        import re
+        
+        # Remove single-line comments (//.*)
+        # Use negative lookbehind to avoid matching / that is part of an operator like /=
+        expression = re.sub(r'//.*?(?=\n|$)', '', expression)
+        
+        # Remove multi-line comments (/* ... */)
+        expression = re.sub(r'/\*.*?\*/', '', expression, flags=re.DOTALL)
+        
+        return expression
     
     def _preprocess_cql_literals(self, expression: str) -> str:
         """Pre-process CQL expression to convert @ date literals to quoted strings."""
@@ -331,12 +379,12 @@ class CQLParser(FHIRPathParser):
     
     def parse_parameter(self) -> ParameterNode:
         """Parse parameter definition."""
-        param_name = self.consume_identifier()
+        param_name = self.consume_identifier_or_quoted()
         
         # Optional type
         param_type = None
         if self.current_token and self.current_token.type == TokenType.IDENTIFIER:
-            param_type = self.consume_identifier()
+            param_type = self.parse_type_expression()
         
         # Optional default value
         default_value = None
@@ -344,6 +392,189 @@ class CQLParser(FHIRPathParser):
             default_value = self.parse_union_expression()
         
         return ParameterNode(param_name, param_type, default_value)
+    
+    def parse_type_expression(self) -> TypeNode:
+        """
+        Parse type expressions including generic types.
+        
+        Examples:
+        - String
+        - DateTime
+        - Interval<DateTime>
+        - List<String>
+        """
+        logger.debug(f"Parsing type expression at token: {self.current_token}")
+        
+        # Parse base type
+        base_type = self.consume_identifier()
+        logger.debug(f"Parsed base type: {base_type}")
+        
+        # Check for generic type parameters
+        generic_types = []
+        if (self.current_token and 
+            self.current_token.type == TokenType.LESS):
+            
+            logger.debug("Found '<', parsing generic types")
+            self.advance()  # consume '<'
+            
+            # Parse generic type arguments
+            while True:
+                logger.debug(f"Parsing generic type argument at token: {self.current_token}")
+                generic_types.append(self.parse_type_expression())
+                logger.debug(f"Parsed generic type, current token: {self.current_token}")
+                
+                if (self.current_token and 
+                    self.current_token.type == TokenType.COMMA):
+                    self.advance()  # consume ','
+                    continue
+                elif (self.current_token and 
+                      self.current_token.type == TokenType.GREATER):
+                    self.advance()  # consume '>'
+                    logger.debug("Consumed '>', finished parsing generic type")
+                    break
+                else:
+                    raise self.error("Expected ',' or '>' in generic type")
+        
+        result = TypeNode(base_type, generic_types)
+        logger.debug(f"Created TypeNode: {result}")
+        return result
+    
+    def parse_interval_literal(self) -> IntervalLiteralNode:
+        """
+        Parse interval literal expressions.
+        
+        Examples:
+        - Interval[start, end)  
+        - Interval(start, end]
+        - Interval[@2023-01-01, @2023-12-31)
+        """
+        logger.debug(f"Parsing interval literal at token: {self.current_token}")
+        
+        # Consume 'Interval' keyword
+        if not (self.current_token and self.current_token.value == "Interval"):
+            raise self.error("Expected 'Interval' keyword")
+        self.advance()
+        
+        # Determine inclusivity from bracket type
+        start_inclusive = True
+        if self.current_token and self.current_token.type == TokenType.LBRACKET:
+            start_inclusive = True
+            self.advance()  # consume '['
+        elif self.current_token and self.current_token.type == TokenType.LPAREN:
+            start_inclusive = False
+            self.advance()  # consume '('
+        else:
+            raise self.error("Expected '[' or '(' after 'Interval'")
+        
+        # Parse start value
+        start_value = self.parse_union_expression()
+        
+        # Expect comma
+        if not (self.current_token and self.current_token.type == TokenType.COMMA):
+            raise self.error("Expected ',' in interval literal")
+        self.advance()  # consume ','
+        
+        # Parse end value
+        end_value = self.parse_union_expression()
+        
+        # Determine end inclusivity from bracket type
+        end_inclusive = False
+        if self.current_token and self.current_token.type == TokenType.RBRACKET:
+            end_inclusive = True
+            self.advance()  # consume ']'
+        elif self.current_token and self.current_token.type == TokenType.RPAREN:
+            end_inclusive = False
+            self.advance()  # consume ')'
+        else:
+            raise self.error("Expected ']' or ')' to close interval literal")
+        
+        result = IntervalLiteralNode(start_value, end_value, start_inclusive, end_inclusive)
+        logger.debug(f"Created IntervalLiteralNode: {result}")
+        return result
+    
+    def parse_datetime_literal(self) -> DateTimeLiteralNode:
+        """
+        Parse date/time literals with @ prefix.
+        
+        Examples:
+        - @2023-01-01
+        - @2023-01-01T00:00:00.000Z
+        - @T12:30:00
+        """
+        logger.debug(f"Parsing datetime literal at token: {self.current_token}")
+        
+        if not (self.current_token and self.current_token.type == TokenType.STRING):
+            raise self.error("Expected string token for datetime literal")
+        
+        value = self.current_token.value
+        if not value.startswith('@'):
+            raise self.error("DateTime literal must start with '@'")
+        
+        # Remove the @ prefix
+        datetime_value = value[1:]
+        self.advance()
+        
+        result = DateTimeLiteralNode(datetime_value)
+        logger.debug(f"Created DateTimeLiteralNode: {result}")
+        return result
+    
+    def parse_quoted_identifier(self) -> ASTNode:
+        """
+        Parse quoted identifiers as parameter references.
+        
+        In CQL, quoted strings like "Measurement Period" can be parameter references.
+        This creates an IdentifierNode from the FHIRPath parser.
+        """
+        logger.debug(f"Parsing quoted identifier at token: {self.current_token}")
+        
+        if not (self.current_token and self.current_token.type == TokenType.STRING):
+            raise self.error("Expected string token for quoted identifier")
+        
+        identifier_name = self.current_token.value
+        self.advance()
+        
+        # Import IdentifierNode from FHIRPath to create parameter reference
+        from ...fhirpath.parser.ast_nodes import IdentifierNode
+        
+        result = IdentifierNode(identifier_name)
+        logger.debug(f"Created IdentifierNode from quoted string: {identifier_name}")
+        return result
+    
+    def parse_start_end_expression(self) -> ASTNode:
+        """
+        Parse CQL start of / end of expressions.
+        
+        Examples:
+        - start of "Measurement Period"
+        - end of SomeInterval
+        """
+        logger.debug(f"Parsing start/end expression at token: {self.current_token}")
+        
+        # Get the operator (start or end)
+        operator = self.current_token.value.lower()
+        if operator not in ['start', 'end']:
+            raise self.error(f"Expected 'start' or 'end', found {self.current_token.value}")
+        
+        self.advance()  # consume 'start' or 'end'
+        
+        # Expect 'of'
+        if not (self.current_token and 
+                self.current_token.type == TokenType.IDENTIFIER and 
+                self.current_token.value.lower() == 'of'):
+            raise self.error(f"Expected 'of' after '{operator}', found {self.current_token}")
+        
+        self.advance()  # consume 'of'
+        
+        # Parse the operand expression
+        operand = self.parse_primary_expression()
+        
+        # Create a function call node to represent start of / end of
+        # This maps to FHIRPath-style function calls like start() and end()
+        from ...fhirpath.parser.ast_nodes import FunctionCallNode
+        
+        result = FunctionCallNode(operator, [operand])
+        logger.debug(f"Created FunctionCallNode for {operator} of: {result}")
+        return result
     
     def parse_context(self) -> ContextNode:
         """Parse context definition."""
@@ -552,13 +783,62 @@ class CQLParser(FHIRPathParser):
         else:
             raise self.error("Expected identifier")
     
+    def consume_identifier_or_quoted(self) -> str:
+        """
+        Consume and return identifier value, supporting both regular identifiers
+        and quoted identifiers (strings).
+        
+        CQL allows parameter names to be quoted strings like "Measurement Period".
+        """
+        if self.current_token:
+            if self.current_token.type == TokenType.IDENTIFIER:
+                value = self.current_token.value
+                self.advance()
+                return value
+            elif self.current_token.type == TokenType.STRING:
+                # CQL allows quoted identifiers for parameter names
+                value = self.current_token.value
+                self.advance()
+                return value
+        
+        raise self.error("Expected identifier or quoted identifier")
+    
     def parse_primary_expression(self) -> ASTNode:
         """Override FHIRPath primary expression parsing to handle CQL constructs."""
         # Check for CQL resource retrieval syntax [ResourceType]
         if self.current_token and self.current_token.type == TokenType.LBRACKET:
             return self.parse_retrieve()
         
-        # Check for CQL function calls with special argument handling
+        # Check for DateTime literals with @ prefix
+        elif (self.current_token and 
+              self.current_token.type == TokenType.STRING and
+              self.current_token.value.startswith('@')):
+            return self.parse_datetime_literal()
+            
+        # Check for quoted identifiers (parameter references)
+        elif (self.current_token and 
+              self.current_token.type == TokenType.STRING):
+            # In CQL, quoted strings can be parameter references like "Measurement Period"
+            return self.parse_quoted_identifier()
+            
+        # Check for Interval literal syntax: Interval[...] or Interval(...)
+        elif (self.current_token and 
+              self.current_token.type == TokenType.IDENTIFIER and
+              self.current_token.value == "Interval" and
+              self.position + 1 < len(self.tokens) and
+              self.tokens[self.position + 1].type in [TokenType.LBRACKET, TokenType.LPAREN]):
+            return self.parse_interval_literal()
+            
+        # Check for CQL start/end operators (start of, end of)
+        elif (self.current_token and 
+              self.current_token.type == TokenType.IDENTIFIER and
+              self.current_token.value.lower() in ['start', 'end'] and
+              self.position + 1 < len(self.tokens) and
+              self.tokens[self.position + 1].type == TokenType.IDENTIFIER and
+              self.tokens[self.position + 1].value.lower() == 'of'):
+            return self.parse_start_end_expression()
+            
+        # Check for function calls (including CQL functions like AgeInYearsAt)
         elif (self.current_token and 
               self.current_token.type == TokenType.IDENTIFIER):
             
@@ -567,14 +847,8 @@ class CQLParser(FHIRPathParser):
             if (self.position + 1 < len(self.tokens) and 
                 self.tokens[self.position + 1].type == TokenType.LPAREN):
                 
-                # Check if this is a CQL function that takes query arguments
-                cql_query_functions = {
-                    'count', 'exists', 'first', 'last', 'sum', 'max', 'min',
-                    'avg', 'average', 'stddev', 'variance', 'median', 'mode'
-                }
-                
-                if name.lower() in cql_query_functions:
-                    return self.parse_cql_function_call()
+                # Handle ALL function calls with CQL-aware argument parsing
+                return self.parse_cql_function_call()
         
         # Fall back to parent FHIRPath parsing for other cases
         return super().parse_primary_expression()

@@ -477,16 +477,18 @@ class CQLLibraryManager:
                 break
         
         if not param_def:
-            logger.error(f"Parameter '{parameter_name}' not found in library '{library_name}'")
-            return False
-        
-        # Validate parameter value
-        if not param_def.validate_value(value):
-            logger.error(f"Invalid value for parameter '{parameter_name}': {value}")
-            return False
-        
-        # Set parameter value
-        library.parameter_values[parameter_name] = value
+            # Allow external/runtime parameters that aren't declared in the library
+            logger.info(f"External parameter '{parameter_name}' not declared in library '{library_name}', setting as runtime parameter")
+            # Set external parameter value without validation
+            library.parameter_values[parameter_name] = value
+        else:
+            # Validate parameter value for declared parameters
+            if not param_def.validate_value(value):
+                logger.error(f"Invalid value for parameter '{parameter_name}': {value}")
+                return False
+            
+            # Set parameter value
+            library.parameter_values[parameter_name] = value
         logger.info(f"Set parameter '{parameter_name}' = {value} for library '{library_name}'")
         return True
     

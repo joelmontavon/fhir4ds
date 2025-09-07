@@ -1,0 +1,1 @@
+"""Validation and demonstration scripts for CTE pipeline functionality."""

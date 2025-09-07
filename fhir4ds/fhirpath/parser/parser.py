@@ -434,10 +434,12 @@ class FHIRPathParser:
         return self.parse_union_expression()
     
     def parse_union_expression(self) -> ASTNode:
-        """Parse union expressions (collection union operator |)"""
+        """Parse union expressions (collection union operator | or CQL 'union' keyword)"""
         node = self.parse_or_expression()
         
-        while self.current_token.type == TokenType.PIPE:
+        while (self.current_token.type == TokenType.PIPE or 
+               (self.current_token.type == TokenType.IDENTIFIER and 
+                self.current_token.value.lower() == 'union')):
             op = self.current_token.value
             self.advance()
             right = self.parse_or_expression()
@@ -737,6 +739,27 @@ class FHIRPathParser:
             self.advance()
         else:
             name = None
+        
+        # If we already created a node for a literal, return it
+        if node is not None:
+            # Handle post-processing for nodes (like indexers)
+            while self.current_token.type == TokenType.LBRACKET:
+                # Check if this is an interval constructor (Interval[x, y])
+                if (isinstance(node, IdentifierNode) and 
+                    node.name == 'Interval' and 
+                    ',' in self._peek_until_closing_bracket()):
+                    # This is an interval constructor
+                    node = self._parse_interval_constructor(node)
+                else:
+                    # This is a regular indexer
+                    self.advance()  # Skip '['
+                    index_expr = self.parse_or_expression()
+                    if self.current_token.type == TokenType.RBRACKET:
+                        self.advance()  # Skip ']'
+                    else:
+                        raise ValueError(f"Expected ']' after indexer expression, found {self.current_token}")
+                    node = IndexerNode(node, index_expr)
+            return node
             
         if name is not None:
             # Check if it's a function call
@@ -773,7 +796,7 @@ class FHIRPathParser:
                 node = IdentifierNode(name)
         elif self.current_token.type == TokenType.LPAREN:
             self.advance()  # Skip '('
-            inner_node = self.parse_or_expression()
+            inner_node = self.parse_union_expression()
             
             # Check if this might be a CQL query expression with an alias
             if (self.current_token.type == TokenType.IDENTIFIER and 
