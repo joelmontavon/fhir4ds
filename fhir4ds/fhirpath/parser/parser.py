@@ -264,7 +264,22 @@ class FHIRPathLexer:
                 elif value.lower() == 'as':
                     tokens.append(Token(TokenType.AS, value, pos))
                 elif value.lower() == 'where':
-                    tokens.append(Token(TokenType.WHERE, value, pos))
+                    # Check if this is followed by a '(' (function call) by looking ahead
+                    temp_pos = self.position
+                    self.skip_whitespace()
+                    if self.current_char == '(':
+                        # This is .where() function call, treat as identifier
+                        tokens.append(Token(TokenType.IDENTIFIER, value, pos))
+                    else:
+                        # This is the "where" keyword for CQL query expressions
+                        tokens.append(Token(TokenType.WHERE, value, pos))
+                    # Reset position since we only peeked ahead
+                    while self.position > temp_pos:
+                        self.position -= 1
+                        if self.position >= 0:
+                            self.current_char = self.expression[self.position]
+                        else:
+                            self.current_char = None
                 elif value.lower() == 'sort':
                     tokens.append(Token(TokenType.SORT, value, pos))
                 elif value.lower() == 'by':
@@ -1050,12 +1065,39 @@ class FHIRPathParser:
                                    TokenType.AND, TokenType.OR]:
                 return True
             
-            # If at beginning of expression or after certain keywords, likely identifier
+            # If at beginning of expression, likely identifier
             if self.position == 0:
                 return True
             
             prev_token = self.tokens[self.position - 1]
-            if prev_token.type in [TokenType.LPAREN, TokenType.COMMA, TokenType.AND, TokenType.OR]:
+            
+            # Special case: if we're inside function parentheses, strings are usually literals
+            # Look for pattern: IDENTIFIER LPAREN ... STRING
+            if prev_token.type == TokenType.LPAREN and self.position >= 2:
+                # Check if this looks like a function call context
+                before_lparen = self.tokens[self.position - 2]
+                if before_lparen.type == TokenType.IDENTIFIER:
+                    # This is likely a function call argument, treat as string literal
+                    return False
+            
+            # After comma in what could be a function call, also treat as string literal
+            if prev_token.type == TokenType.COMMA:
+                # Look backwards to see if we're in a function call context
+                paren_count = 0
+                for i in range(self.position - 1, -1, -1):
+                    token = self.tokens[i]
+                    if token.type == TokenType.RPAREN:
+                        paren_count += 1
+                    elif token.type == TokenType.LPAREN:
+                        paren_count -= 1
+                        if paren_count < 0:
+                            # Found opening paren, check if preceded by identifier (function name)
+                            if i > 0 and self.tokens[i-1].type == TokenType.IDENTIFIER:
+                                return False  # Function call context, treat as literal
+                            break
+            
+            # Other contexts where it might be an identifier
+            if prev_token.type in [TokenType.AND, TokenType.OR]:
                 return True
         
         # Default to treating as string literal

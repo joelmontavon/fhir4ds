@@ -1248,7 +1248,7 @@ class ViewRunner:
                 # Create execution context and process
                 from fhir4ds.pipeline.core.base import ExecutionContext
                 context = ExecutionContext(dialect=self.dialect)
-                sql = self.fhirpath_pipeline.pipeline_bridge.process_fhirpath_expression(ast_node, context)
+                sql = self.pipeline_bridge.process_fhirpath_expression(ast_node, context)
                 
                 # Clean up the SQL to extract just the expression part
                 expression = sql.replace("fhir_resources.resource", self.json_col)

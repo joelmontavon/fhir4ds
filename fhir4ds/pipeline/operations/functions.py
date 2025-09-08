@@ -3022,17 +3022,6 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
             context_mode=ContextMode.SINGLE_VALUE
         )
     
-    def _handle_count(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle count() function."""
-        # Count the number of arguments plus input
-        total_count = 1 + len(self.args)
-        sql_fragment = str(total_count)
-        
-        return input_state.evolve(
-            sql_fragment=sql_fragment,
-            is_collection=False,
-            context_mode=ContextMode.SINGLE_VALUE
-        )
     
     def _handle_product(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle product() function."""
