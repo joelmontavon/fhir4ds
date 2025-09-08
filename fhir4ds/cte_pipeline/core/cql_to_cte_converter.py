@@ -17,6 +17,62 @@ from .cte_fragment import CTEFragment
 logger = logging.getLogger(__name__)
 
 
+class EnhancedDependencyDetector:
+    """Enhanced dependency detection for CQL define statements - Task 3.2 Enhancement."""
+    
+    def __init__(self):
+        """Initialize the enhanced dependency detector."""
+        # Common CQL patterns that indicate dependencies
+        self.dependency_patterns = [
+            # Direct define references: "Office Visits", 'Emergency Visits'
+            (r'"([^"]+)"', 'direct_quote'),
+            (r"'([^']+)'", 'direct_single_quote'),
+            
+            # Function calls with define references: exists "Some Define"
+            (r'exists\s+["\']([^"\']+)["\']', 'exists_reference'),
+            
+            # Union/intersect operations: "Define A" union "Define B"  
+            (r'["\']([^"\']+)["\']\s+union\s+["\']([^"\']+)["\']', 'union_operation'),
+            (r'["\']([^"\']+)["\']\s+intersect\s+["\']([^"\']+)["\']', 'intersect_operation'),
+            
+            # With/such that clauses: "Define A" with "Define B" such that...
+            (r'["\']([^"\']+)["\']\s+with\s+["\']([^"\']+)["\']', 'with_clause'),
+        ]
+    
+    def detect_dependencies(self, cql_expression: str, available_defines: Set[str]) -> List[str]:
+        """
+        Detect dependencies from a single CQL expression.
+        
+        Args:
+            cql_expression: CQL expression to analyze
+            available_defines: Set of available define names
+            
+        Returns:
+            List of define names this expression depends on
+        """
+        dependencies = set()
+        cql_clean = cql_expression.strip()
+        
+        # Apply dependency detection patterns
+        for pattern, pattern_type in self.dependency_patterns:
+            matches = re.findall(pattern, cql_clean, re.IGNORECASE)
+            
+            if pattern_type in ['union_operation', 'intersect_operation', 'with_clause']:
+                # These patterns return tuples for multiple captures
+                for match_tuple in matches:
+                    if isinstance(match_tuple, tuple):
+                        for match in match_tuple:
+                            if match in available_defines:
+                                dependencies.add(match)
+            else:
+                # Single capture patterns
+                for match in matches:
+                    if match in available_defines:
+                        dependencies.add(match)
+        
+        return list(dependencies)
+
+
 class ResourceTypeDetector:
     """
     Enhanced resource type detector using existing patterns from functions.py.
@@ -370,12 +426,16 @@ class CQLToCTEConverter:
         self.resource_type_detector = ResourceTypeDetector()
         self.pattern_analyzer = CQLPatternAnalyzer(dialect)
         
+        # Task 3.2 Enhancement: Enhanced dependency detection
+        self.dependency_detector = EnhancedDependencyDetector()
+        
         # Conversion statistics for monitoring
         self.conversion_stats = {
             'expressions_converted': 0,
             'resource_types_detected': {},
             'patterns_extracted': 0,
-            'terminology_resolutions': 0
+            'terminology_resolutions': 0,
+            'dependencies_detected': 0  # Task 3.2: track dependency detection
         }
         
         logger.debug(f"Initialized CQL to CTE converter for {self.dialect} dialect")
@@ -447,7 +507,9 @@ class CQLToCTEConverter:
     
     def convert_multiple_defines(self, define_statements: Dict[str, str]) -> Dict[str, CTEFragment]:
         """
-        Convert multiple CQL defines to CTE fragments.
+        Convert multiple CQL defines to CTE fragments with enhanced dependency detection.
+        
+        Task 3.2 Enhancement: Automatic dependency detection and resolution.
         
         Args:
             define_statements: Dictionary mapping define names to CQL expressions
@@ -456,12 +518,37 @@ class CQLToCTEConverter:
             Dictionary mapping define names to CTE fragments
         """
         fragments = {}
+        available_defines = set(define_statements.keys())
         
-        logger.info(f"Converting {len(define_statements)} CQL defines to CTE fragments")
+        logger.info(f"Converting {len(define_statements)} CQL defines to CTE fragments with enhanced dependency detection")
         
         for define_name, cql_expr in define_statements.items():
             try:
                 fragment = self.convert_cql_expression(define_name, cql_expr)
+                
+                # Task 3.2 Enhancement: Detect and set dependencies automatically
+                detected_deps = self.dependency_detector.detect_dependencies(cql_expr, available_defines)
+                if detected_deps:
+                    # Update fragment dependencies (need to convert define names to CTE names)
+                    cte_deps = [dep.lower().replace(' ', '_').replace('-', '_') for dep in detected_deps]
+                    # Create new fragment with detected dependencies
+                    fragment = CTEFragment(
+                        name=fragment.name,
+                        resource_type=fragment.resource_type,
+                        patient_id_extraction=fragment.patient_id_extraction,
+                        select_fields=fragment.select_fields,
+                        from_clause=fragment.from_clause,
+                        where_conditions=fragment.where_conditions,
+                        dependencies=cte_deps,  # Enhanced dependencies
+                        source_cql_expression=fragment.source_cql_expression,
+                        complexity_score=fragment.complexity_score,
+                        define_name=fragment.define_name,
+                        result_type=fragment.result_type
+                    )
+                    
+                    self.conversion_stats['dependencies_detected'] += len(detected_deps)
+                    logger.debug(f"Detected dependencies for '{define_name}': {detected_deps}")
+                
                 fragments[define_name] = fragment
             except Exception as e:
                 logger.error(f"Failed to convert define '{define_name}': {e}")
