@@ -183,6 +183,11 @@ class DuckDBDialect(DatabaseDialect):
         """Extract a JSON object using DuckDB's json_extract"""
         return f"json_extract({column}, '{path}')"
     
+    def extract_json_text(self, column: str, path: str) -> str:
+        """Extract a JSON field as text using DuckDB's json_extract function"""
+        # DuckDB uses same function for both object and text extraction
+        return self.extract_json_object(column, path)
+    
     def iterate_json_array(self, column: str, path: str) -> str:
         """Iterate over JSON array elements using DuckDB's json_each"""
         return f"json_each({column}, '{path}')"
@@ -213,6 +218,14 @@ class DuckDBDialect(DatabaseDialect):
     def coalesce_empty_array(self, expression: str) -> str:
         """COALESCE with empty array using DuckDB syntax"""
         return f"COALESCE({expression}, json_array())"
+    
+    def get_json_array_element(self, json_expr: str, index: int) -> str:
+        """Extract element at index from JSON array."""
+        return f"json_extract({json_expr}, '$[{index}]')"
+    
+    def get_json_extract_string(self, json_expr: str, path: str) -> str:
+        """Extract string value from JSON path."""
+        return f"json_extract_string({json_expr}, '{path}')"
     
     def get_array_iteration_columns(self) -> tuple:
         """Get column names for array iteration - standardized to 'value' and 'ordinality'"""
@@ -414,19 +427,58 @@ class DuckDBDialect(DatabaseDialect):
         ), '')
         """
     
-    def extract_nested_array_path(self, json_base: str, current_path: str, identifier_name: str, new_path: str) -> str:
+    def create_json_array(self, *args) -> str:
+        """Create a JSON array from arguments using DuckDB's json_array"""
+        if args:
+            return f"json_array({', '.join(str(arg) for arg in args)})"
+        return "json_array()"
+    
+    def create_json_object(self, *args) -> str:
+        """Create a JSON object from key-value pairs using DuckDB's json_object"""
+        if args:
+            return f"json_object({', '.join(str(arg) for arg in args)})"
+        return "json_object()"
+    
+    def aggregate_values(self, expression: str, distinct: bool = False) -> str:
+        """Array aggregation using DuckDB's array_agg"""
+        if distinct:
+            return f"array_agg(DISTINCT {expression})"
+        return f"array_agg({expression})"
+    
+    def aggregate_strings(self, expression: str, separator: str) -> str:
+        """String aggregation using DuckDB's string_agg"""
+        return f"string_agg({expression}, {separator})"
+
+    def extract_nested_array_path(self, json_base: str, current_path: str, identifier_name: str, new_path: str, context=None) -> str:
         """Extract path from nested array structures using DuckDB's JSON functions"""
+        # Check if this is a collection operation that needs array preservation
+        try:
+            from fhir4ds.dialects.context import ExtractionContext
+            is_collection_op = context == ExtractionContext.COLLECTION_OPERATION
+        except ImportError:
+            is_collection_op = False
+        
         # Handle root level access (current_path = "$")
         if current_path == "$":
-            # Phase 4.6: Improved array extraction - extract scalar values from single-element arrays
-            return f"""CASE WHEN json_type({json_base}) = 'ARRAY' 
-            THEN 
-                CASE 
-                    WHEN json_array_length({json_base}) = 1 
-                    THEN json_extract({json_base}, '$[0].{identifier_name}')
-                    ELSE json_extract({json_base}, '$[*].{identifier_name}')
-                END
-            ELSE json_extract({json_base}, '$.{identifier_name}') 
+            array_result = f"json_extract({json_base}, '$[*].{identifier_name}')"
+            scalar_result = f"json_extract({json_base}, '$.{identifier_name}')"
+            
+            # For collection operations, always preserve array structure
+            if is_collection_op:
+                return f"""CASE WHEN json_type({json_base}) = 'ARRAY'
+                THEN {array_result}
+                ELSE CASE WHEN {scalar_result} IS NOT NULL THEN json_array({scalar_result}) ELSE NULL END
+                END"""
+            
+            # Context-aware array extraction for non-collection operations:
+            # - For single-element arrays from where(), extract scalar values
+            # - For multi-element arrays, return arrays for collection operations
+            return f"""CASE WHEN json_type({json_base}) = 'ARRAY'
+            THEN CASE WHEN json_array_length({json_base}) = 1
+                 THEN json_extract({json_base}, '$[0].{identifier_name}')
+                 ELSE {array_result}
+                 END
+            ELSE {scalar_result}
             END"""
         
         # Handle missing properties by explicitly checking each array element
@@ -523,6 +575,16 @@ class DuckDBDialect(DatabaseDialect):
         """Remove duplicates from a JSON array."""
         return f"to_json(list_distinct(json_extract({array}, '$[*]')))"
     
+    def get_collection_count_expression(self, collection_expr: str) -> str:
+        """Get count of elements in a collection for DuckDB."""
+        return f"""CASE 
+            WHEN json_type({collection_expr}) = 'ARRAY' 
+            THEN json_array_length({collection_expr})
+            WHEN {collection_expr} IS NULL 
+            THEN 0
+            ELSE 1
+        END"""
+    
     def array_union_function(self, array1: str, array2: str) -> str:
         """Union two JSON arrays or single values into a single JSON array (remove duplicates, preserve order)."""
         # Use a more complex approach to preserve order while removing duplicates
@@ -562,3 +624,94 @@ class DuckDBDialect(DatabaseDialect):
             FROM distinct_ordered
         )
         """
+    
+    # Pipeline-specific optimized implementations for DuckDB
+    
+    def extract_json_path(self, base_expr: str, json_path: str, context_mode: 'ContextMode') -> str:
+        """
+        DuckDB-optimized JSON path extraction with context awareness.
+        """
+        from ..pipeline.core.base import ContextMode
+        
+        if context_mode == ContextMode.COLLECTION:
+            # Use DuckDB's efficient JSON array handling
+            return f"json_extract({base_expr}, '{json_path}')"
+        elif context_mode == ContextMode.WHERE_CLAUSE:
+            # Optimize for boolean evaluation
+            return f"(json_extract({base_expr}, '{json_path}') IS NOT NULL)"
+        else:
+            # Standard string extraction
+            return f"json_extract_string({base_expr}, '{json_path}')"
+    
+    def extract_array_element(self, array_expr: str, index: int) -> str:
+        """DuckDB-optimized array element extraction."""
+        return f"json_extract({array_expr}, '$[{index}]')"
+    
+    def extract_last_array_element(self, array_expr: str) -> str:
+        """DuckDB-optimized last array element extraction."""
+        return f"json_extract({array_expr}, '$[' || (json_array_length({array_expr}) - 1) || ']')"
+    
+    def _extract_collection_path(self, base_expr: str, json_path: str) -> str:
+        """DuckDB-optimized collection path extraction."""
+        # DuckDB handles JSON arrays efficiently with json_extract
+        return f"json_extract({base_expr}, '{json_path}')"
+    
+    def _extract_boolean_path(self, base_expr: str, json_path: str) -> str:
+        """DuckDB-optimized boolean path extraction."""
+        # Use DuckDB's efficient null checking
+        return f"(json_extract({base_expr}, '{json_path}') IS NOT NULL)"
+    
+    # Implementation of new abstract methods for FHIRPath operations
+    
+    def try_cast(self, expression: str, target_type: str) -> str:
+        """DuckDB safe type conversion using TRY_CAST"""
+        return f"TRY_CAST({expression} AS {target_type.upper()})"
+    
+    def string_to_char_array(self, expression: str) -> str:
+        """DuckDB string to character array conversion"""
+        return f"""(
+            SELECT json_group_array(chr)
+            FROM (
+                SELECT substr({expression}, i, 1) as chr
+                FROM (
+                    SELECT generate_series(1, length({expression})) as i
+                )
+            )
+        )"""
+    
+    def regex_matches(self, string_expr: str, pattern: str) -> str:
+        """DuckDB regex pattern matching"""
+        return f"regexp_matches({string_expr}, {pattern})"
+    
+    def regex_replace(self, string_expr: str, pattern: str, replacement: str) -> str:
+        """DuckDB regex pattern replacement"""
+        return f"regexp_replace({string_expr}, {pattern}, {replacement}, 'g')"
+    
+    def json_group_array(self, value_expr: str, from_clause: str = None) -> str:
+        """DuckDB JSON array aggregation"""
+        if from_clause:
+            return f"(SELECT json_group_array({value_expr}) FROM {from_clause})"
+        return f"json_group_array({value_expr})"
+    
+    def json_each(self, json_expr: str, path: str = None) -> str:
+        """DuckDB JSON array iteration"""
+        if path:
+            return f"json_each({json_expr}, '{path}')"
+        return f"json_each({json_expr})"
+    
+    def json_typeof(self, json_expr: str) -> str:
+        """DuckDB JSON type checking"""
+        return f"json_type({json_expr})"
+    
+    def json_array_elements(self, json_expr: str, with_ordinality: bool = False) -> str:
+        """DuckDB JSON array element extraction"""
+        # DuckDB uses json_each for this functionality
+        return f"json_each({json_expr})"
+    
+    def cast_to_timestamp(self, expression: str) -> str:
+        """DuckDB timestamp casting"""
+        return f"CAST({expression} AS TIMESTAMP)"
+    
+    def cast_to_time(self, expression: str) -> str:
+        """DuckDB time casting"""
+        return f"CAST({expression} AS TIME)"

@@ -8,7 +8,7 @@ using the existing FHIR4DS infrastructure.
 from typing import Dict, Any, Optional, List
 import logging
 
-from ...fhirpath.core.generator import SQLGenerator
+# SQLGenerator removed - using pipeline system only
 from ...dialects import DuckDBDialect, PostgreSQLDialect
 from .parser import CQLParser, CQLLexer
 from .translator import CQLTranslator
@@ -23,6 +23,9 @@ from ..functions.interval_functions import CQLIntervalFunctionHandler
 from ..functions.collection_functions import CQLCollectionFunctionHandler
 from .unified_registry import UnifiedFunctionRegistry
 from .library_manager import CQLLibraryManager, LibraryMetadata, LibraryVersion
+from ..pipeline.converters.cql_converter import CQLToPipelineConverter
+from ...pipeline.core.base import SQLState, ExecutionContext
+from ...pipeline.core.compiler import PipelineCompiler
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +96,7 @@ class CQLEngine:
         self.nullological_functions = CQLNullologicalFunctionHandler(self.dialect_name)
         self.datetime_functions = CQLDateTimeFunctionHandler(self.dialect_name)
         self.interval_functions = CQLIntervalFunctionHandler(self.dialect_name)
-        self.collection_functions = CQLCollectionFunctionHandler(self, db_connection)
+        self.collection_functions = CQLCollectionFunctionHandler(self.dialect)
         
         # Make all function handlers available to translator
         self.translator.terminology = self.terminology
@@ -106,6 +109,144 @@ class CQLEngine:
         
         # Provide unified registry access to translator for enhanced function routing
         self.translator.unified_registry = self.unified_registry
+        
+        # Initialize pipeline converter for enhanced CQL processing
+        self.pipeline_converter = CQLToPipelineConverter(dialect=self.dialect_name)
+        self.pipeline_compiler = PipelineCompiler(self.dialect)
+        
+        # Configuration for processing mode
+        self.use_pipeline_mode = True  # Enable pipeline mode by default
+        
+        logger.info(f"CQL Engine initialized with {'pipeline' if self.use_pipeline_mode else 'legacy'} processing mode")
+    
+    def set_define_operations_context(self, define_operations: dict) -> None:
+        """
+        Set define operations context for resolving define references.
+        
+        This updates the pipeline converter to use define operations when converting
+        AST nodes, enabling proper resolution of CQL define references.
+        
+        Args:
+            define_operations: Dictionary of define operations from library
+        """
+        logger.debug(f"Setting define operations context with {len(define_operations)} defines")
+        # Recreate pipeline converter with define operations context
+        self.pipeline_converter = CQLToPipelineConverter(
+            dialect=self.dialect_name, 
+            define_operations=define_operations
+        )
+        logger.info(f"Pipeline converter AST converter now has {len(self.pipeline_converter.ast_converter.define_operations)} define operations")
+        logger.debug(f"Define operations keys: {list(self.pipeline_converter.ast_converter.define_operations.keys())}")
+    
+    def evaluate_expression_via_pipeline(self, cql_expression: str, table_name: str = "fhir_resources", 
+                                        json_column: str = "resource") -> str:
+        """
+        Evaluate CQL expression using the new pipeline converter.
+        
+        This method uses the CQL-to-Pipeline converter to directly convert CQL AST nodes
+        to pipeline operations, bypassing the FHIRPath AST intermediate step.
+        
+        Args:
+            cql_expression: CQL expression string
+            table_name: Database table name
+            json_column: JSON column name
+            
+        Returns:
+            SQL query string
+        """
+        logger.info(f"CQL Engine evaluating via pipeline: {cql_expression}")
+        
+        try:
+            # Step 1: Parse CQL expression to AST
+            lexer = CQLLexer(cql_expression)
+            tokens = lexer.tokenize()
+            self.parser.tokens = tokens
+            self.parser.current = 0
+            
+            # Parse to CQL AST
+            cql_ast = self.parser.parse_expression_or_fhirpath(cql_expression)
+            
+            # Step 2: Convert CQL AST directly to pipeline operations
+            pipeline_operation = self.pipeline_converter.convert(cql_ast)
+            logger.debug(f"Pipeline operation type: {type(pipeline_operation).__name__}")
+            
+            # Step 3: Execute pipeline operation to generate SQL
+            context = ExecutionContext(
+                dialect=self.dialect,
+                terminology_client=self.terminology.client if hasattr(self.terminology, 'client') else None
+            )
+            
+            initial_state = SQLState(
+                base_table=table_name,
+                json_column=json_column,
+                sql_fragment=f"{table_name}.{json_column}"
+            )
+            
+            # Handle different types of pipeline operations
+            if hasattr(pipeline_operation, 'execute'):
+                # Single pipeline operation
+                result_state = pipeline_operation.execute(initial_state, context)
+                return result_state.sql_fragment
+            elif hasattr(pipeline_operation, 'compile'):
+                # FHIRPath pipeline
+                compiled_result = pipeline_operation.compile(context, initial_state)
+                return compiled_result.main_sql
+            else:
+                # Fallback to legacy mode
+                logger.warning("Pipeline conversion failed, falling back to legacy mode")
+                return self._evaluate_expression_legacy(cql_expression, table_name, json_column)
+                
+        except Exception as e:
+            logger.error(f"Pipeline evaluation failed: {e}")
+            # Fallback to legacy mode
+            logger.info("Falling back to legacy evaluation mode")
+            return self._evaluate_expression_legacy(cql_expression, table_name, json_column)
+    
+    def _evaluate_expression_legacy(self, cql_expression: str, table_name: str = "fhir_resources", 
+                                   json_column: str = "resource") -> str:
+        """
+        Legacy CQL expression evaluation using FHIRPath AST conversion.
+        
+        This method preserves the original evaluation path for backward compatibility.
+        """
+        logger.debug("Using legacy CQL evaluation path")
+        
+        # Use the existing evaluation logic (extract the core logic from evaluate_expression)
+        lexer = CQLLexer(cql_expression)
+        tokens = lexer.tokenize()
+        self.parser.tokens = tokens
+        self.parser.current = 0
+        
+        # Use the smart parsing method that detects CQL vs FHIRPath
+        cql_ast = self.parser.parse_expression_or_fhirpath(cql_expression)
+        
+        # Step 2: Translate CQL AST to FHIRPath AST
+        fhirpath_ast = self.translator.translate_expression(cql_ast)
+        
+        # Step 3: Generate SQL using existing pipeline architecture
+        if self.dialect:
+            # Use pipeline system
+            from ...pipeline.converters.ast_converter import PipelineASTBridge
+            from ...pipeline.core.base import ExecutionContext, SQLState
+            
+            pipeline_bridge = PipelineASTBridge()
+            pipeline_bridge.set_migration_mode('pipeline_only')
+            
+            # Create execution context
+            context = ExecutionContext(dialect=self.dialect)
+            initial_state = SQLState(
+                base_table=table_name,
+                json_column=json_column,
+                sql_fragment=f"{table_name}.{json_column}"
+            )
+            
+            # Convert AST to pipeline and compile to SQL
+            pipeline = pipeline_bridge.ast_to_pipeline_converter.convert_ast_to_pipeline(fhirpath_ast)
+            compiled_sql = pipeline.compile(context, initial_state)
+            
+            return compiled_sql.main_sql
+        else:
+            raise ValueError("No dialect specified for SQL generation")
         
     def _extract_dialect_name(self, dialect_obj) -> str:
         """Extract dialect name string from dialect object."""
@@ -127,6 +268,30 @@ class CQLEngine:
         else:
             # Default to DuckDB if unknown dialect
             return DuckDBDialect()
+    
+    def _json_extract(self, column: str, path: str) -> str:
+        """Generate dialect-appropriate JSON extraction call instead of hardcoded functions."""
+        if self.dialect and hasattr(self.dialect, 'extract_json_field'):
+            return self.dialect.extract_json_field(column, path)
+        else:
+            # This should not happen since all supported dialects implement extract_json_field
+            raise ValueError(f"Dialect {self.dialect} does not support extract_json_field method")
+    
+    def _json_extract_object(self, column: str, path: str) -> str:
+        """Generate dialect-appropriate JSON object extraction call."""
+        if self.dialect and hasattr(self.dialect, 'extract_json_object'):
+            return self.dialect.extract_json_object(column, path)
+        else:
+            # This should not happen since all supported dialects implement extract_json_object
+            raise ValueError(f"Dialect {self.dialect} does not support extract_json_object method")
+    
+    def _json_extract_string(self, column: str, path: str) -> str:
+        """Generate dialect-appropriate JSON string extraction call."""
+        if self.dialect and hasattr(self.dialect, 'extract_json_field'):
+            return self.dialect.extract_json_field(column, path)
+        else:
+            # This should not happen since all supported dialects implement extract_json_field
+            raise ValueError(f"Dialect {self.dialect} does not support extract_json_field method")
         
     def evaluate_expression(self, cql_expression: str, table_name: str = "fhir_resources", 
                           json_column: str = "resource") -> str:
@@ -144,6 +309,16 @@ class CQLEngine:
         logger.info(f"CQL Engine evaluating: {cql_expression}")
         
         try:
+            # Route through new pipeline converter if enabled
+            if self.use_pipeline_mode:
+                try:
+                    return self.evaluate_expression_via_pipeline(cql_expression, table_name, json_column)
+                except Exception as e:
+                    logger.error(f"Pipeline mode failed: {e}, falling back to legacy mode")
+                    import traceback
+                    logger.debug(f"Pipeline failure traceback: {traceback.format_exc()}")
+                    # Continue to legacy evaluation below
+            
             # Check for direct function calls that can be routed through unified registry
             if self._is_direct_function_call(cql_expression):
                 return self._evaluate_function_via_registry(cql_expression, table_name, json_column)
@@ -172,12 +347,27 @@ class CQLEngine:
             # Step 2: Translate CQL AST to FHIRPath AST
             fhirpath_ast = self.translator.translate_expression(cql_ast)
             
-            # Step 3: Generate SQL using existing FHIRPath infrastructure
+            # Step 3: Generate SQL using pipeline architecture
             if self.dialect:
-                generator = SQLGenerator(table_name, json_column, dialect=self.dialect)
-                # Provide unified registry access to FHIRPath generator for enhanced function routing
-                generator.unified_registry = self.unified_registry
-                sql = generator.visit(fhirpath_ast)
+                # Use pipeline system instead of legacy SQLGenerator
+                from ...pipeline.converters.ast_converter import PipelineASTBridge
+                from ...pipeline.core.base import ExecutionContext, SQLState
+                
+                pipeline_bridge = PipelineASTBridge()
+                pipeline_bridge.set_migration_mode('pipeline_only')
+                
+                # Create execution context
+                context = ExecutionContext(dialect=self.dialect)
+                initial_state = SQLState(
+                    base_table=table_name,
+                    json_column=json_column,
+                    sql_fragment=f"{table_name}.{json_column}"
+                )
+                
+                # Convert AST to pipeline and compile to SQL
+                pipeline = pipeline_bridge.ast_to_pipeline_converter.convert_ast_to_pipeline(fhirpath_ast)
+                compiled_sql = pipeline.compile(context, initial_state)
+                sql = compiled_sql.get_full_sql()
                 
                 # Step 4: Apply context filtering to generated SQL
                 context_filtered_sql = self.context_manager.current_context.apply_context_to_query(sql, table_name)
@@ -445,16 +635,16 @@ class CQLEngine:
                 
                 # Convert CQL field access to JSON path
                 json_path = self._convert_cql_field_to_json_path(field_expr, alias)
-                sort_parts.append(f"json_extract({json_column}, '{json_path}') {order}")
+                sort_parts.append(f"{self._json_extract(json_column, json_path)} {order}")
             
-            sort_clause = ", ".join(sort_parts) if sort_parts else "json_extract(resource, '$.id')"
+            sort_clause = ", ".join(sort_parts) if sort_parts else self._json_extract("resource", "$.id")
             
             # Handle terminology filtering if present
-            where_sql = f"json_extract({json_column}, '$.resourceType') = '{resource_type}'"
+            where_sql = f"{self._json_extract(json_column, '$.resourceType')} = '{resource_type}'"
             terminology_match = re.search(r'\[(\w+)\s*:\s*"([^"]+)"\]', cql_expression, re.IGNORECASE)
             if terminology_match:
                 terminology = terminology_match.group(2)
-                where_sql += f" AND (json_extract({json_column}, '$.code.coding[0].display') = '{terminology}' OR json_extract({json_column}, '$.code.text') = '{terminology}' OR json_extract({json_column}, '$.category[0].coding[0].display') = '{terminology}')"
+                where_sql += f" AND ({self._json_extract(json_column, '$.code.coding[0].display')} = '{terminology}' OR {self._json_extract(json_column, '$.code.text')} = '{terminology}' OR {self._json_extract(json_column, '$.category[0].coding[0].display')} = '{terminology}')"
             
             sql = f"""SELECT {json_column}
 FROM {table_name}
@@ -476,7 +666,7 @@ ORDER BY {sort_clause}"""
             if return_clause:
                 return_expr = return_clause.replace('return', '').strip()
                 value_expr = self._convert_cql_field_to_json_path(return_expr, alias or resource_type[0])
-                value_expr = f"CAST(json_extract({json_column}, '{value_expr}') AS DOUBLE)"
+                value_expr = f"CAST({self._json_extract(json_column, value_expr)} AS DOUBLE)"
             
             # Map CQL function to SQL
             sql_func = {
@@ -485,7 +675,7 @@ ORDER BY {sort_clause}"""
                 'avg': 'AVG', 'average': 'AVG', 'min': 'MIN', 'max': 'MAX'
             }.get(func_name.lower(), 'COUNT')
             
-            where_sql = f"json_extract({json_column}, '$.resourceType') = '{resource_type}'"
+            where_sql = f"{self._json_extract(json_column, '$.resourceType')} = '{resource_type}'"
             if where_clause:
                 # Simple where clause conversion
                 where_condition = where_clause.replace('where', '').strip()
@@ -511,7 +701,7 @@ WHERE {where_sql}"""
             if return_clause:
                 return_expr = return_clause.replace('return', '').strip()
                 value_expr = self._convert_cql_field_to_json_path(return_expr, alias or resource_type[0])
-                value_expr = f"CAST(json_extract({json_column}, '{value_expr}') AS DOUBLE)"
+                value_expr = f"CAST({self._json_extract(json_column, value_expr)} AS DOUBLE)"
             
             # Map CQL function to SQL
             sql_func = {
@@ -520,14 +710,14 @@ WHERE {where_sql}"""
                 'avg': 'AVG', 'average': 'AVG', 'min': 'MIN', 'max': 'MAX'
             }.get(func_name.lower(), 'COUNT')
             
-            where_sql = f"json_extract({json_column}, '$.resourceType') = '{resource_type}'"
+            where_sql = f"{self._json_extract(json_column, '$.resourceType')} = '{resource_type}'"
             
             # Handle terminology filtering if present in the resource query
             terminology_match = re.search(r'\[(\w+)\s*:\s*"([^"]+)"\]', cql_expression, re.IGNORECASE)
             if terminology_match:
                 terminology = terminology_match.group(2)
                 # Add terminology filtering to SQL - try multiple common FHIR paths
-                where_sql += f" AND (json_extract({json_column}, '$.code.coding[0].display') = '{terminology}' OR json_extract({json_column}, '$.code.text') = '{terminology}' OR json_extract({json_column}, '$.category[0].coding[0].display') = '{terminology}')"
+                where_sql += f" AND ({self._json_extract(json_column, '$.code.coding[0].display')} = '{terminology}' OR {self._json_extract(json_column, '$.code.text')} = '{terminology}' OR {self._json_extract(json_column, '$.category[0].coding[0].display')} = '{terminology}')"
             
             if where_clause:
                 # Simple where clause conversion
@@ -550,7 +740,7 @@ WHERE {where_sql}"""
             resource_type = match.group(1)  
             sql = f"""SELECT {json_column}
 FROM {table_name}
-WHERE json_extract({json_column}, '$.resourceType') = '{resource_type}'"""
+WHERE {self._json_extract(json_column, '$.resourceType')} = '{resource_type}'"""
             
             logger.debug(f"Generated interim SQL for basic retrieve: {sql[:100]}...")
             return sql
@@ -1020,13 +1210,13 @@ WHERE json_extract({json_column}, '$.resourceType') = '{resource_type}'"""
                     # Build SQL with multiple percentile calculations
                     percentile_selects = []
                     for field_name, _, percentile_value in percentile_matches:
-                        percentile_selects.append(f"PERCENTILE_CONT({float(percentile_value)/100}) WITHIN GROUP (ORDER BY CAST(json_extract_string(r.resource, '$.valueQuantity.value') AS DECIMAL)) as {field_name}")
+                        percentile_selects.append(f"PERCENTILE_CONT({float(percentile_value)/100}) WITHIN GROUP (ORDER BY CAST({self._json_extract_string('r.resource', '$.valueQuantity.value')} AS DECIMAL)) as {field_name}")
                     
                     sql = f"""SELECT {', '.join(percentile_selects)}
 FROM fhir_resources r 
-WHERE json_extract_string(r.resource, '$.resourceType') = '{resource_type}'
-  AND json_extract_string(r.resource, '$.code.coding[0].display') = '{code}' 
-  AND json_extract_string(r.resource, '$.valueQuantity.value') IS NOT NULL"""
+WHERE {self._json_extract_string('r.resource', '$.resourceType')} = '{resource_type}'
+  AND {self._json_extract_string('r.resource', '$.code.coding[0].display')} = '{code}' 
+  AND {self._json_extract_string('r.resource', '$.valueQuantity.value')} IS NOT NULL"""
                     
                     logger.debug(f"Generated interim SQL for object construction with percentiles: {sql[:100]}...")
                     return sql
@@ -1043,11 +1233,11 @@ WHERE json_extract_string(r.resource, '$.resourceType') = '{resource_type}'
                 # Common risk score calculation pattern
                 sql = f"""WITH calculated_values AS (
   SELECT 
-    json_extract_string(r.resource, '$.id') as patient_id,
-    DATEDIFF('YEAR', DATE(json_extract_string(r.resource, '$.birthDate')), CURRENT_DATE) as patient_age,
-    CAST(json_extract_string(r.resource, '$.extension[0].valueDecimal') AS DECIMAL) as bmi
+    {self._json_extract_string('r.resource', '$.id')} as patient_id,
+    DATEDIFF('YEAR', DATE({self._json_extract_string('r.resource', '$.birthDate')}), CURRENT_DATE) as patient_age,
+    CAST({self._json_extract_string('r.resource', '$.extension[0].valueDecimal')} AS DECIMAL) as bmi
   FROM fhir_resources r 
-  WHERE json_extract_string(r.resource, '$.resourceType') = '{resource_type}'
+  WHERE {self._json_extract_string('r.resource', '$.resourceType')} = '{resource_type}'
 )
 SELECT 
   patient_id as id,
@@ -1072,15 +1262,15 @@ WHERE bmi IS NOT NULL"""
                 # Build SQL with CASE-based grouping and statistical functions
                 sql = f"""WITH age_groups AS (
   SELECT 
-    json_extract_string(r.resource, '$.id') as patient_id,
-    DATEDIFF('YEAR', DATE(json_extract_string(r.resource, '$.birthDate')), CURRENT_DATE) as patient_age,
+    {self._json_extract_string('r.resource', '$.id')} as patient_id,
+    DATEDIFF('YEAR', DATE({self._json_extract_string('r.resource', '$.birthDate')}), CURRENT_DATE) as patient_age,
     CASE 
-      WHEN DATEDIFF('YEAR', DATE(json_extract_string(r.resource, '$.birthDate')), CURRENT_DATE) < 18 THEN 'Pediatric'
-      WHEN DATEDIFF('YEAR', DATE(json_extract_string(r.resource, '$.birthDate')), CURRENT_DATE) < 65 THEN 'Adult'
+      WHEN DATEDIFF('YEAR', DATE({self._json_extract_string('r.resource', '$.birthDate')}), CURRENT_DATE) < 18 THEN 'Pediatric'
+      WHEN DATEDIFF('YEAR', DATE({self._json_extract_string('r.resource', '$.birthDate')}), CURRENT_DATE) < 65 THEN 'Adult'
       ELSE 'Geriatric'
     END as age_group
   FROM fhir_resources r
-  WHERE json_extract_string(r.resource, '$.resourceType') = '{resource_type}'
+  WHERE {self._json_extract_string('r.resource', '$.resourceType')} = '{resource_type}'
 )
 SELECT 
   age_group as ageGroup,
@@ -1106,13 +1296,13 @@ GROUP BY age_group"""
                 # Build SQL with time-based grouping and statistical functions
                 sql = f"""WITH time_series AS (
   SELECT 
-    json_extract_string(r.resource, '$.id') as observation_id,
-    EXTRACT({time_unit.upper()} FROM CAST(json_extract_string(r.resource, '$.effectiveDateTime') AS TIMESTAMP)) as time_period,
-    CAST(json_extract_string(r.resource, '$.valueQuantity.value') AS DECIMAL) as obs_value
+    {self._json_extract_string('r.resource', '$.id')} as observation_id,
+    EXTRACT({time_unit.upper()} FROM CAST({self._json_extract_string('r.resource', '$.effectiveDateTime')} AS TIMESTAMP)) as time_period,
+    CAST({self._json_extract_string('r.resource', '$.valueQuantity.value')} AS DECIMAL) as obs_value
   FROM fhir_resources r
-  WHERE json_extract_string(r.resource, '$.resourceType') = '{resource_type}'
-    AND json_extract_string(r.resource, '$.code.coding[0].display') = '{code}'
-    AND json_extract_string(r.resource, '$.valueQuantity.value') IS NOT NULL
+  WHERE {self._json_extract_string('r.resource', '$.resourceType')} = '{resource_type}'
+    AND {self._json_extract_string('r.resource', '$.code.coding[0].display')} = '{code}'
+    AND {self._json_extract_string('r.resource', '$.valueQuantity.value')} IS NOT NULL
 )
 SELECT 
   time_period as month,
@@ -1188,16 +1378,16 @@ ORDER BY time_period"""
                         
                         # Convert CQL field access to JSON path
                         json_path = self._convert_cql_field_to_json_path(field_expr, alias)
-                        sort_parts.append(f"json_extract_string({json_column}, '{json_path}') {order}")
+                        sort_parts.append(f"{self._json_extract_string(json_column, json_path)} {order}")
                 
                 sort_clause_sql = ", ".join(sort_parts) if sort_parts else f"{computed_var.lower()} DESC"
                 
                 # Handle terminology filtering if present
-                where_sql = f"json_extract_string({json_column}, '$.resourceType') = '{resource_type}'"
+                where_sql = f"{self._json_extract_string(json_column, '$.resourceType')} = '{resource_type}'"
                 terminology_match = re.search(r'\[(\w+)\s*:\s*"([^"]+)"\]', cql_expression, re.IGNORECASE)
                 if terminology_match:
                     terminology = terminology_match.group(2)
-                    where_sql += f" AND (json_extract_string({json_column}, '$.code.coding[0].display') = '{terminology}' OR json_extract_string({json_column}, '$.code.text') = '{terminology}' OR json_extract_string({json_column}, '$.category[0].coding[0].display') = '{terminology}')"
+                    where_sql += f" AND ({self._json_extract_string(json_column, '$.code.coding[0].display')} = '{terminology}' OR {self._json_extract_string(json_column, '$.code.text')} = '{terminology}' OR {self._json_extract_string(json_column, '$.category[0].coding[0].display')} = '{terminology}')"
                 
                 # Build SQL with computed values and proper sorting
                 sql = f"""WITH computed_values AS (
@@ -1322,7 +1512,7 @@ ORDER BY {sort_clause_sql}"""
   SELECT 
     {outer_cte_columns_str}
   FROM {table_name}
-  WHERE json_extract_string({json_column}, '$.resourceType') = '{resource_type}'
+  WHERE {self._json_extract_string(json_column, '$.resourceType')} = '{resource_type}'
 )
 SELECT {all_return_columns}
 FROM outer_step"""
@@ -1384,7 +1574,7 @@ FROM outer_step"""
     {json_column},
     ({var_sql}) as {var_name.lower()}
   FROM {table_name}
-  WHERE json_extract_string({json_column}, '$.resourceType') = '{resource_type}'
+  WHERE {self._json_extract_string(json_column, '$.resourceType')} = '{resource_type}'
 )"""
                     else:
                         # Subsequent CTEs reference previous step
@@ -1443,7 +1633,7 @@ FROM outer_step"""
 SELECT {all_return_columns}
 FROM {final_step} final"""
             else:
-                sql = f"SELECT {all_return_columns} FROM {table_name} WHERE json_extract_string({json_column}, '$.resourceType') = '{resource_type}'"
+                sql = f"SELECT {all_return_columns} FROM {table_name} WHERE {self._json_extract_string(json_column, '$.resourceType')} = '{resource_type}'"
             
             logger.debug(f"Generated interim SQL for multiple let expressions: {sql[:100]}...")
             return sql
@@ -2695,12 +2885,27 @@ FROM {table_name} {alias.lower()}
             # Translate to FHIRPath AST
             fhirpath_ast = self.translator.translate_expression(cql_ast)
             
-            # Generate SQL
+            # Generate SQL using pipeline architecture
             if self.dialect:
-                generator = SQLGenerator(table_name, json_column, dialect=self.dialect)
-                # Provide unified registry access to FHIRPath generator for enhanced function routing
-                generator.unified_registry = self.unified_registry
-                sql = generator.visit(fhirpath_ast)
+                # Use pipeline system instead of legacy SQLGenerator
+                from ...pipeline.converters.ast_converter import PipelineASTBridge
+                from ...pipeline.core.base import ExecutionContext, SQLState
+                
+                pipeline_bridge = PipelineASTBridge()
+                pipeline_bridge.set_migration_mode('pipeline_only')
+                
+                # Create execution context
+                context = ExecutionContext(dialect=self.dialect)
+                initial_state = SQLState(
+                    base_table=table_name,
+                    json_column=json_column,
+                    sql_fragment=f"{table_name}.{json_column}"
+                )
+                
+                # Convert AST to pipeline and compile to SQL
+                pipeline = pipeline_bridge.ast_to_pipeline_converter.convert_ast_to_pipeline(fhirpath_ast)
+                compiled_sql = pipeline.compile(context, initial_state)
+                sql = compiled_sql.get_full_sql()
                 
                 # Apply context filtering
                 context_filtered_sql = self.context_manager.current_context.apply_context_to_query(sql, table_name)
@@ -2889,6 +3094,229 @@ FROM {table_name} {alias.lower()}
         temp_context = CQLContext(context)
         return self.context_manager.with_context(temp_context)
     
+    def generate_population_sql(self, define_statements: dict) -> dict:
+        """
+        Generate population-scale SQL using CTEs and GROUP BY for optimal performance.
+        
+        This method creates efficient population-first queries that process all patients
+        simultaneously rather than iterating through individual patients.
+        
+        Args:
+            define_statements: Dictionary of define name -> CQL expression
+            
+        Returns:
+            Dictionary of define name -> optimized population SQL
+        """
+        logger.info(f"Generating population-scale SQL for {len(define_statements)} define statements")
+        
+        # Ensure we're in population analytics mode
+        if not self.is_population_analytics_mode():
+            self.reset_to_population_analytics()
+        
+        population_queries = {}
+        
+        # Create base population CTE that will be reused across all queries
+        base_population_cte = self._generate_base_population_cte()
+        
+        # Generate resource CTEs for commonly used resource types
+        resource_ctes = self._generate_resource_ctes()
+        
+        # Process each define statement
+        for define_name, cql_expression in define_statements.items():
+            try:
+                logger.debug(f"Generating population SQL for define '{define_name}'")
+                
+                # Generate define-specific CTE and final query
+                define_cte = self._generate_define_cte(define_name, cql_expression)
+                final_query = self._build_population_final_query(
+                    define_name, base_population_cte, resource_ctes, define_cte
+                )
+                
+                population_queries[define_name] = final_query
+                logger.debug(f"Generated population SQL for '{define_name}': {len(final_query)} characters")
+                
+            except Exception as e:
+                logger.error(f"Failed to generate population SQL for '{define_name}': {e}")
+                # Fall back to individual SQL generation
+                try:
+                    fallback_sql = self.evaluate_expression(cql_expression)
+                    population_queries[define_name] = fallback_sql
+                    logger.warning(f"Used fallback SQL generation for '{define_name}'")
+                except Exception as fallback_error:
+                    logger.error(f"Fallback also failed for '{define_name}': {fallback_error}")
+                    population_queries[define_name] = f"-- Error generating SQL for {define_name}: {e}"
+        
+        logger.info(f"Population SQL generation completed: {len(population_queries)} queries generated")
+        return population_queries
+    
+    def _generate_base_population_cte(self) -> str:
+        """
+        Generate base population CTE with patient demographics and filtering.
+        
+        Returns:
+            SQL CTE defining the target patient population
+        """
+        # Default population includes all active patients
+        population_filters = []
+        
+        # Add context-specific filters if available
+        current_context = self.get_current_context()
+        if hasattr(current_context, 'population_filters') and current_context.population_filters:
+            for filter_key, filter_value in current_context.population_filters.items():
+                if filter_key == 'age_range':
+                    # Handle age-based filtering
+                    min_age, max_age = filter_value
+                    population_filters.append(
+                        f"EXTRACT(YEAR FROM CURRENT_DATE) - EXTRACT(YEAR FROM birth_date) BETWEEN {min_age} AND {max_age}"
+                    )
+                elif filter_key == 'gender':
+                    population_filters.append(f"gender = '{filter_value}'")
+                # Add more filter types as needed
+        
+        # Build WHERE clause
+        where_clause = "active = true"
+        if population_filters:
+            where_clause += " AND " + " AND ".join(population_filters)
+        
+        base_cte = f"""
+        patient_population AS (
+            SELECT 
+                patient_id,
+                birth_date,
+                gender,
+                race,
+                ethnicity,
+                EXTRACT(YEAR FROM CURRENT_DATE) - EXTRACT(YEAR FROM birth_date) as age
+            FROM fhir_resources 
+            WHERE {self._json_extract("resource", "$.resourceType")} = 'Patient'
+              AND {where_clause}
+        )"""
+        
+        return base_cte
+    
+    def _generate_resource_ctes(self) -> dict:
+        """
+        Generate commonly used resource CTEs for population queries.
+        
+        Returns:
+            Dictionary of resource type -> CTE SQL
+        """
+        resource_ctes = {}
+        
+        # Common resource types used in quality measures
+        common_resources = ['Condition', 'Encounter', 'MedicationDispense', 'Observation', 'Procedure']
+        
+        for resource_type in common_resources:
+            cte_sql = f"""
+        {resource_type.lower()}_resources AS (
+            SELECT 
+                json_extract(resource, '$.subject.reference') as patient_reference,
+                SUBSTR(json_extract(resource, '$.subject.reference'), 9) as patient_id,
+                resource
+            FROM fhir_resources
+            WHERE {self._json_extract("resource", "$.resourceType")} = '{resource_type}'
+        )"""
+            resource_ctes[resource_type.lower()] = cte_sql
+        
+        return resource_ctes
+    
+    def _generate_define_cte(self, define_name: str, cql_expression: str) -> str:
+        """
+        Generate CTE for a specific define statement with population-level logic.
+        
+        Args:
+            define_name: Name of the define statement
+            cql_expression: CQL expression to convert
+            
+        Returns:
+            CTE SQL for the define statement
+        """
+        # Convert CQL expression to SQL
+        try:
+            sql_expression = self.evaluate_expression(cql_expression)
+            
+            # Wrap in population-level CTE
+            cte_sql = f"""
+        {self._normalize_define_name(define_name)} AS (
+            SELECT 
+                p.patient_id,
+                ({sql_expression}) as result
+            FROM patient_population p
+            LEFT JOIN condition_resources c ON p.patient_id = c.patient_id  
+            LEFT JOIN encounter_resources e ON p.patient_id = e.patient_id
+            LEFT JOIN medicationdispense_resources m ON p.patient_id = m.patient_id
+            LEFT JOIN observation_resources o ON p.patient_id = o.patient_id
+            LEFT JOIN procedure_resources pr ON p.patient_id = pr.patient_id
+            GROUP BY p.patient_id
+        )"""
+            
+            return cte_sql
+            
+        except Exception as e:
+            logger.warning(f"Failed to generate CTE for '{define_name}': {e}")
+            # Return basic CTE structure
+            return f"""
+        {self._normalize_define_name(define_name)} AS (
+            SELECT 
+                p.patient_id,
+                false as result
+            FROM patient_population p
+        )"""
+    
+    def _build_population_final_query(self, define_name: str, base_cte: str, 
+                                     resource_ctes: dict, define_cte: str) -> str:
+        """
+        Build final population-scale query combining all CTEs.
+        
+        Args:
+            define_name: Name of the define statement
+            base_cte: Base population CTE
+            resource_ctes: Dictionary of resource CTEs
+            define_cte: Define-specific CTE
+            
+        Returns:
+            Complete SQL query for population-scale execution
+        """
+        # Combine all CTEs
+        all_ctes = [base_cte]
+        all_ctes.extend(resource_ctes.values())
+        all_ctes.append(define_cte)
+        
+        # Build final query with population-level aggregation
+        normalized_name = self._normalize_define_name(define_name)
+        final_query = f"""
+WITH {','.join(all_ctes)}
+SELECT 
+    patient_id,
+    result,
+    '{define_name}' as define_name,
+    CURRENT_TIMESTAMP as evaluation_time
+FROM {normalized_name}
+ORDER BY patient_id;"""
+        
+        return final_query
+    
+    def _normalize_define_name(self, define_name: str) -> str:
+        """
+        Normalize define name for use in SQL identifiers.
+        
+        Args:
+            define_name: Original define name
+            
+        Returns:
+            SQL-safe identifier
+        """
+        # Remove quotes and special characters, replace spaces with underscores
+        normalized = define_name.strip('"\'')
+        normalized = ''.join(c if c.isalnum() else '_' for c in normalized)
+        normalized = normalized.lower()
+        
+        # Ensure it starts with a letter
+        if normalized and not normalized[0].isalpha():
+            normalized = 'define_' + normalized
+        
+        return normalized or 'unknown_define'
+    
     def set_parameter(self, name: str, value: Any):
         """Set a CQL parameter value."""
         self.evaluation_context.set_parameter(name, value)
@@ -3046,7 +3474,37 @@ FROM {table_name} {alias.lower()}
                 'is_population_analytics': self.is_population_analytics_mode()
             },
             'libraries': list(self.libraries.keys()),
-            'terminology': self.get_terminology_cache_stats()
+            'terminology': self.get_terminology_cache_stats(),
+            'pipeline_mode': self.use_pipeline_mode
         }
         
         return info
+    
+    def enable_pipeline_mode(self):
+        """Enable the new CQL-to-Pipeline converter for evaluation."""
+        self.use_pipeline_mode = True
+        logger.info("Enabled CQL pipeline mode - using direct CQL AST to Pipeline Operation conversion")
+    
+    def disable_pipeline_mode(self):
+        """Disable pipeline mode and use legacy FHIRPath AST conversion."""
+        self.use_pipeline_mode = False
+        logger.info("Disabled CQL pipeline mode - using legacy FHIRPath AST conversion")
+    
+    def is_pipeline_mode_enabled(self) -> bool:
+        """Check if pipeline mode is currently enabled."""
+        return self.use_pipeline_mode
+    
+    def get_pipeline_converter_info(self) -> Dict[str, Any]:
+        """Get information about the pipeline converter."""
+        if hasattr(self, 'pipeline_converter'):
+            return {
+                'enabled': self.use_pipeline_mode,
+                'dialect': self.pipeline_converter.dialect,
+                'converter_type': 'CQLToPipelineConverter',
+                'current_context': self.pipeline_converter.context.current_context,
+                'library_definitions': len(self.pipeline_converter.context.library_definitions),
+                'parameters': len(self.pipeline_converter.context.parameters),
+                'includes': len(self.pipeline_converter.context.includes)
+            }
+        else:
+            return {'enabled': False, 'error': 'Pipeline converter not initialized'}

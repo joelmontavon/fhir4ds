@@ -11,6 +11,7 @@ import logging
 
 if TYPE_CHECKING:
     from ..datastore import QueryResult
+    from .context import ExtractionContext, ComparisonContext
 import re
 
 
@@ -142,6 +143,16 @@ class DatabaseDialect(ABC):
             return f"{self.json_each_function}({self.json_extract_function}({column}, '{path}'))"
         return f"{self.json_each_function}({column})"
     
+    @abstractmethod
+    def get_json_array_element(self, json_expr: str, index: int) -> str:
+        """Extract element at index from JSON array."""
+        pass
+    
+    @abstractmethod
+    def get_json_extract_string(self, json_expr: str, path: str) -> str:
+        """Extract string value from JSON path."""
+        pass
+    
     def array_agg(self, expression: str, distinct: bool = False) -> str:
         """Generate array aggregation SQL for the dialect"""
         if distinct:
@@ -216,6 +227,23 @@ class DatabaseDialect(ABC):
         """Extract a JSON field as text - database specific implementation"""
         pass
     
+    @abstractmethod
+    def extract_json_text(self, column: str, path: str) -> str:
+        """
+        Extract a JSON field as text/string type for string comparisons and display.
+        
+        This method should return SQL that extracts JSON values as text/string type,
+        suitable for string comparisons, display, and text operations.
+        
+        Args:
+            column: The column containing JSON data
+            path: JSONPath expression (e.g., '$.field', '$.nested.field')
+            
+        Returns:
+            SQL expression that extracts the JSON value as text type
+        """
+        pass
+    
     @abstractmethod 
     def extract_json_object(self, column: str, path: str) -> str:
         """Extract a JSON object - database specific implementation"""
@@ -240,6 +268,42 @@ class DatabaseDialect(ABC):
         """Alias for get_json_type for backward compatibility"""
         return self.get_json_type(column)
     
+    def extract_json_smart(self, column: str, path: str, 
+                          context: Optional['ExtractionContext'] = None,
+                          comparison_context: Optional['ComparisonContext'] = None) -> str:
+        """
+        Smart JSON extraction that selects appropriate method based on context.
+        
+        This method determines whether to use extract_json_object() or extract_json_text()
+        based on the extraction context and comparison context.
+        
+        Args:
+            column: The column containing JSON data
+            path: JSONPath expression
+            context: Explicit extraction context (overrides auto-detection)
+            comparison_context: Context information for comparison operations
+            
+        Returns:
+            SQL expression using appropriate extraction method
+        """
+        # Import here to avoid circular imports
+        from .context import ExtractionContext, determine_extraction_context
+        
+        # Determine context if not explicitly provided
+        if context is None:
+            context = determine_extraction_context(comparison_context)
+        
+        # Route to appropriate extraction method
+        if context in [ExtractionContext.TEXT_COMPARISON, ExtractionContext.TEXT_DISPLAY]:
+            return self.extract_json_text(column, path)
+        else:
+            return self.extract_json_object(column, path)
+
+    # Backward compatibility alias
+    def extract_json_field(self, column: str, path: str) -> str:
+        """Backward compatibility - delegates to extract_json_text()"""
+        return self.extract_json_text(column, path)
+    
     @abstractmethod
     def get_json_array_length(self, column: str, path: str = None) -> str:
         """Get JSON array length - database specific implementation"""
@@ -250,12 +314,51 @@ class DatabaseDialect(ABC):
         # Default implementation - return uppercase for consistency
         return json_type.upper()
     
+    def get_collection_count_expression(self, base_expr: str) -> str:
+        """Generate database-specific count expression for collection functions"""
+        # Default implementation using standard JSON type checking
+        return f"""
+        CASE 
+            WHEN {self.get_json_type(base_expr)} = 'ARRAY' THEN {self.get_json_array_length(base_expr)}
+            WHEN {base_expr} IS NOT NULL THEN 1
+            ELSE 0
+        END
+        """
+    
+    def generate_from_json_each(self, column: str) -> str:
+        """Generate FROM clause for JSON each iteration - database specific implementation"""
+        # Default implementation - subclasses should override for optimal performance
+        return f"json_each({column})"
+    
+    def iterate_json_elements_indexed(self, column: str) -> str:
+        """Iterate JSON elements with proper indexing for both arrays and objects - database specific"""
+        # Default implementation - subclasses should override for optimal performance  
+        return f"json_each({column})"
+    
     @abstractmethod
     def aggregate_to_json_array(self, expression: str) -> str:
         """Aggregate values into a JSON array - database specific implementation"""
         pass
     
     @abstractmethod
+    def create_json_array(self, *args) -> str:
+        """Create a JSON array from arguments - database specific implementation"""
+        pass
+    
+    @abstractmethod
+    def create_json_object(self, *args) -> str:
+        """Create a JSON object from key-value pairs - database specific implementation"""
+        pass
+    
+    @abstractmethod
+    def aggregate_values(self, expression: str, distinct: bool = False) -> str:
+        """Array aggregation function - database specific implementation"""
+        pass
+    
+    @abstractmethod
+    def aggregate_strings(self, expression: str, separator: str) -> str:
+        """String aggregation function - database specific implementation"""
+        pass
     def coalesce_empty_array(self, expression: str) -> str:
         """COALESCE with empty array - database specific implementation"""
         pass
@@ -290,7 +393,144 @@ class DatabaseDialect(ABC):
         """Concatenate two strings - database specific implementation"""
         pass
     
+    # New abstract methods for FHIRPath function operations
+    
+    @abstractmethod
+    def try_cast(self, expression: str, target_type: str) -> str:
+        """Safe type conversion that returns NULL on failure"""
+        pass
+    
+    @abstractmethod
+    def string_to_char_array(self, expression: str) -> str:
+        """Split string into array of individual characters"""
+        pass
+    
+    @abstractmethod
+    def regex_matches(self, string_expr: str, pattern: str) -> str:
+        """Test if string matches regex pattern"""
+        pass
+    
+    @abstractmethod
+    def regex_replace(self, string_expr: str, pattern: str, replacement: str) -> str:
+        """Replace regex pattern matches with replacement string"""
+        pass
+    
+    @abstractmethod
+    def json_group_array(self, value_expr: str, from_clause: str = None) -> str:
+        """Aggregate values into JSON array"""
+        pass
+    
+    @abstractmethod
+    def json_each(self, json_expr: str, path: str = None) -> str:
+        """Iterate over JSON array elements"""
+        pass
+    
+    @abstractmethod
+    def json_typeof(self, json_expr: str) -> str:
+        """Get JSON type of expression"""
+        pass
+    
+    @abstractmethod
+    def json_array_elements(self, json_expr: str, with_ordinality: bool = False) -> str:
+        """Extract array elements from JSON"""
+        pass
+    
+    @abstractmethod
+    def cast_to_timestamp(self, expression: str) -> str:
+        """Cast expression to timestamp/datetime type"""
+        pass
+    
+    @abstractmethod
+    def cast_to_time(self, expression: str) -> str:
+        """Cast expression to time type"""
+        pass
+    
     def optimize_cte_definition(self, cte_name: str, cte_expr: str) -> str:
         """Apply dialect-specific CTE optimizations - database specific implementation"""
         # Default implementation - no optimization
         return f"{cte_name} AS ({cte_expr})"
+    
+    # Pipeline-specific methods for new immutable pipeline architecture
+    
+    def extract_json_path(self, base_expr: str, json_path: str, context_mode: 'ContextMode') -> str:
+        """
+        Extract JSON path with context mode awareness.
+        
+        This method is used by PathNavigationOperation to generate
+        dialect-specific SQL for JSON path extraction.
+        
+        Args:
+            base_expr: Base SQL expression (e.g., "table.resource")
+            json_path: JSON path to extract (e.g., "$.name.family")
+            context_mode: Execution context mode
+            
+        Returns:
+            SQL expression for path extraction
+        """
+        from ..pipeline.core.base import ContextMode
+        
+        if context_mode == ContextMode.COLLECTION:
+            # Collection context - may need to use json_each or similar
+            return self._extract_collection_path(base_expr, json_path)
+        elif context_mode == ContextMode.WHERE_CLAUSE:
+            # WHERE clause context - optimize for boolean evaluation
+            return self._extract_boolean_path(base_expr, json_path)
+        else:
+            # Single value context - standard extraction
+            return self.extract_json_text(base_expr, json_path)
+    
+    def _extract_collection_path(self, base_expr: str, json_path: str) -> str:
+        """Extract JSON path for collection context."""
+        # Default implementation - can be overridden by specific dialects
+        return self.extract_json_text(base_expr, json_path)
+    
+    def _extract_boolean_path(self, base_expr: str, json_path: str) -> str:
+        """Extract JSON path for boolean context (WHERE clauses)."""
+        # Default implementation - check if path exists and is not null
+        return f"({self.extract_json_text(base_expr, json_path)} IS NOT NULL)"
+    
+    def extract_array_element(self, array_expr: str, index: int) -> str:
+        """
+        Extract element from JSON array by index.
+        
+        Used by IndexerOperation for array access.
+        
+        Args:
+            array_expr: SQL expression that evaluates to JSON array
+            index: Zero-based array index
+            
+        Returns:
+            SQL expression for array element extraction
+        """
+        # Default implementation using json_extract with array index
+        return f"json_extract({array_expr}, '$[{index}]')"
+    
+    def extract_last_array_element(self, array_expr: str) -> str:
+        """
+        Extract last element from JSON array.
+        
+        Args:
+            array_expr: SQL expression that evaluates to JSON array
+            
+        Returns:
+            SQL expression for last array element extraction
+        """
+        # Default implementation - get array length and use index
+        return f"json_extract({array_expr}, '$[' || ({self.get_json_array_length(array_expr)} - 1) || ']')"
+    
+    def optimize_pipeline(self, pipeline: 'FHIRPathPipeline') -> 'FHIRPathPipeline':
+        """
+        Apply dialect-specific optimizations to a pipeline.
+        
+        This method can be overridden by specific dialects to apply
+        optimizations like merging operations, using dialect-specific
+        functions, or restructuring for better performance.
+        
+        Args:
+            pipeline: Pipeline to optimize
+            
+        Returns:
+            Optimized pipeline
+        """
+        # Default implementation - no optimization
+        return pipeline

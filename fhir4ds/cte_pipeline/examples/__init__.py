@@ -1,0 +1,1 @@
+"""Examples and integration patterns for CTE Pipeline usage."""
