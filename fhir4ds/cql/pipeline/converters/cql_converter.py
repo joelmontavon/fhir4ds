@@ -18,6 +18,7 @@ from ...core.parser import (
 from ....fhirpath.parser.ast_nodes import ASTNode, IdentifierNode, FunctionCallNode, PathNode
 from ....pipeline.core.base import PipelineOperation, SQLState, ExecutionContext
 from ....pipeline.core.builder import FHIRPathPipeline
+from ....pipeline.converters.ast_converter import ConversionError
 from ....pipeline.converters.ast_converter import ASTToPipelineConverter
 from ..operations import (
     CQLRetrieveOperation, 
@@ -377,13 +378,71 @@ class CQLToPipelineConverter:
         Returns:
             FHIRPath pipeline
         """
+        # Enhanced logging for pipeline conversion debugging
+        logger.debug(f"Converting FHIRPath AST: {type(fhirpath_ast).__name__}")
+        if hasattr(fhirpath_ast, 'name'):
+            logger.debug(f"AST node name: {fhirpath_ast.name}")
+        if hasattr(fhirpath_ast, 'value'):
+            logger.debug(f"AST node value: {fhirpath_ast.value}")
+        
+        # Track conversion attempts for statistics
+        if not hasattr(self, '_conversion_stats'):
+            self._conversion_stats = {'attempts': 0, 'successes': 0, 'failures': 0, 'failures_by_type': {}}
+        
+        self._conversion_stats['attempts'] += 1
+        ast_type = type(fhirpath_ast).__name__
+        
         # Use the proper AST-to-Pipeline converter for comprehensive FHIRPath support
         try:
-            return self.ast_converter.convert_ast_to_pipeline(fhirpath_ast)
+            result = self.ast_converter.convert_ast_to_pipeline(fhirpath_ast)
+            
+            # Check if result is actually empty (problematic pattern)
+            if hasattr(result, 'operations') and len(result.operations) == 0:
+                logger.warning(f"AST converter returned empty pipeline for {ast_type}")
+                logger.warning(f"AST details - name: {getattr(fhirpath_ast, 'name', 'N/A')}, "
+                             f"value: {getattr(fhirpath_ast, 'value', 'N/A')}")
+                self._conversion_stats['failures'] += 1
+                if ast_type not in self._conversion_stats['failures_by_type']:
+                    self._conversion_stats['failures_by_type'][ast_type] = 0
+                self._conversion_stats['failures_by_type'][ast_type] += 1
+                
+                # Raise proper exception instead of returning empty pipeline
+                raise ConversionError(f"AST converter returned empty pipeline for {ast_type}. "
+                                    f"This indicates that {ast_type} is not properly supported in the AST converter. "
+                                    f"AST details - name: {getattr(fhirpath_ast, 'name', 'N/A')}, "
+                                    f"value: {getattr(fhirpath_ast, 'value', 'N/A')}")
+            else:
+                logger.debug(f"Successfully converted {ast_type} to pipeline with {len(result.operations) if hasattr(result, 'operations') else 'unknown'} operations")
+                self._conversion_stats['successes'] += 1
+            
+            return result
+            
+        except ConversionError:
+            # Re-raise ConversionError without wrapping
+            raise
         except Exception as e:
-            logger.error(f"Failed to convert FHIRPath AST {type(fhirpath_ast).__name__}: {e}")
-            # Fallback to empty pipeline
-            return FHIRPathPipeline()
+            logger.error(f"Failed to convert FHIRPath AST {ast_type}: {e}")
+            logger.error(f"Exception details: {type(e).__name__}: {str(e)}")
+            logger.error(f"AST details - name: {getattr(fhirpath_ast, 'name', 'N/A')}, "
+                        f"value: {getattr(fhirpath_ast, 'value', 'N/A')}")
+            logger.debug(f"Full AST content: {repr(fhirpath_ast)}")
+            
+            # Track failures by type for analysis
+            self._conversion_stats['failures'] += 1
+            if ast_type not in self._conversion_stats['failures_by_type']:
+                self._conversion_stats['failures_by_type'][ast_type] = 0
+            self._conversion_stats['failures_by_type'][ast_type] += 1
+            
+            # Log conversion statistics periodically
+            if self._conversion_stats['attempts'] % 10 == 0:
+                logger.info(f"CQL Pipeline Conversion Stats: "
+                          f"{self._conversion_stats['attempts']} attempts, "
+                          f"{self._conversion_stats['successes']} successes, "
+                          f"{self._conversion_stats['failures']} failures")
+                logger.info(f"Failure types: {self._conversion_stats['failures_by_type']}")
+            
+            # Raise proper exception instead of returning empty pipeline
+            raise ConversionError(f"Failed to convert {ast_type} to pipeline: {e}") from e
     
     def _convert_fallback_to_fhirpath(self, cql_ast: CQLASTNode) -> FHIRPathPipeline:
         """
@@ -395,8 +454,38 @@ class CQLToPipelineConverter:
         Returns:
             Basic FHIRPath pipeline
         """
-        logger.warning(f"Using fallback conversion for {type(cql_ast)}")
-        return FHIRPathPipeline()
+        # Enhanced logging for unsupported CQL node types
+        cql_type = type(cql_ast).__name__
+        logger.warning(f"Using fallback conversion for unsupported CQL node: {cql_type}")
+        
+        # Log detailed information about the unsupported node
+        if hasattr(cql_ast, 'name'):
+            logger.warning(f"Unsupported CQL node name: {cql_ast.name}")
+        if hasattr(cql_ast, 'value'):
+            logger.warning(f"Unsupported CQL node value: {cql_ast.value}")
+        if hasattr(cql_ast, 'expression'):
+            logger.warning(f"Unsupported CQL node expression: {type(cql_ast.expression).__name__}")
+        if hasattr(cql_ast, 'resource_type'):
+            logger.warning(f"Unsupported CQL node resource_type: {cql_ast.resource_type}")
+        
+        # Track fallback usage frequency for analysis
+        if not hasattr(self, '_fallback_stats'):
+            self._fallback_stats = {'total_fallbacks': 0, 'fallbacks_by_type': {}}
+        
+        self._fallback_stats['total_fallbacks'] += 1
+        if cql_type not in self._fallback_stats['fallbacks_by_type']:
+            self._fallback_stats['fallbacks_by_type'][cql_type] = 0
+        self._fallback_stats['fallbacks_by_type'][cql_type] += 1
+        
+        # Log fallback statistics periodically
+        if self._fallback_stats['total_fallbacks'] % 5 == 0:
+            logger.warning(f"CQL Fallback Stats: {self._fallback_stats['total_fallbacks']} total fallbacks")
+            logger.warning(f"Fallback types: {self._fallback_stats['fallbacks_by_type']}")
+        
+        # Raise proper exception for unsupported CQL nodes instead of returning empty pipeline
+        raise ConversionError(f"Unsupported CQL node type: {cql_type}. "
+                            f"This CQL construct is not yet supported in the pipeline converter. "
+                            f"Node details: {repr(cql_ast)}")
     
     def _convert_define(self, define: DefineNode) -> CQLDefineOperation:
         """
@@ -627,6 +716,57 @@ class CQLToPipelineConverter:
                 return_expression="resource"
             )
     
+    def get_conversion_statistics(self) -> dict:
+        """
+        Get detailed statistics about conversion attempts.
+        
+        Returns:
+            Dictionary containing conversion statistics
+        """
+        stats = {
+            'fhirpath_conversion': getattr(self, '_conversion_stats', {
+                'attempts': 0, 'successes': 0, 'failures': 0, 'failures_by_type': {}
+            }),
+            'cql_fallbacks': getattr(self, '_fallback_stats', {
+                'total_fallbacks': 0, 'fallbacks_by_type': {}
+            })
+        }
+        
+        # Calculate success rate
+        if stats['fhirpath_conversion']['attempts'] > 0:
+            stats['fhirpath_conversion']['success_rate'] = (
+                stats['fhirpath_conversion']['successes'] / 
+                stats['fhirpath_conversion']['attempts'] * 100
+            )
+        else:
+            stats['fhirpath_conversion']['success_rate'] = 0.0
+        
+        return stats
+    
+    def log_conversion_summary(self):
+        """Log a summary of all conversion statistics."""
+        stats = self.get_conversion_statistics()
+        
+        logger.info("=== CQL Pipeline Conversion Summary ===")
+        logger.info(f"FHIRPath Conversions: {stats['fhirpath_conversion']['attempts']} attempts, "
+                   f"{stats['fhirpath_conversion']['successes']} successes, "
+                   f"{stats['fhirpath_conversion']['failures']} failures "
+                   f"({stats['fhirpath_conversion']['success_rate']:.1f}% success rate)")
+        
+        if stats['fhirpath_conversion']['failures_by_type']:
+            logger.info(f"FHIRPath Failure Types: {stats['fhirpath_conversion']['failures_by_type']}")
+        
+        logger.info(f"CQL Fallbacks: {stats['cql_fallbacks']['total_fallbacks']} total")
+        if stats['cql_fallbacks']['fallbacks_by_type']:
+            logger.info(f"CQL Fallback Types: {stats['cql_fallbacks']['fallbacks_by_type']}")
+        
+        # Highlight critical issues
+        if stats['fhirpath_conversion']['success_rate'] < 50:
+            logger.error(f"CRITICAL: Low FHIRPath conversion success rate: {stats['fhirpath_conversion']['success_rate']:.1f}%")
+        
+        if stats['cql_fallbacks']['total_fallbacks'] > 0:
+            logger.warning(f"WARNING: {stats['cql_fallbacks']['total_fallbacks']} CQL nodes using fallback conversion")
+
     def reset_context(self):
         """Reset conversion context."""
         self.context = ConversionContext()

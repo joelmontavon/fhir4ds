@@ -323,16 +323,10 @@ class CQLEngine:
             if self._is_direct_function_call(cql_expression):
                 return self._evaluate_function_via_registry(cql_expression, table_name, json_column)
             
-            # Try interim pattern-based translation first for common failing patterns
-            if self._has_known_parsing_issues(cql_expression):
-                interim_result = self._try_interim_pattern_translation(cql_expression, table_name, json_column)
-                if interim_result and not interim_result.startswith("--"):
-                    logger.info(f"Successfully translated via interim pattern matcher")
-                    return interim_result
+            # REMOVED: Interim pattern-based translation - pipeline integration handles all patterns now
             
             # Check if this is an advanced CQL construct (Phase 6)
-            # BUT first check if it matches our interim patterns (which take precedence)
-            if self._has_advanced_constructs(cql_expression) and not self._has_known_parsing_issues(cql_expression):
+            if self._has_advanced_constructs(cql_expression):
                 return self.evaluate_advanced_expression(cql_expression, table_name, json_column)
             
             # Step 1: Parse CQL expression to AST
@@ -377,11 +371,7 @@ class CQLEngine:
                 
         except Exception as e:
             logger.error(f"CQL evaluation failed: {e}")
-            # Try interim pattern-based translation before falling back to comment
-            interim_result = self._try_interim_pattern_translation(cql_expression, table_name, json_column)
-            if interim_result and not interim_result.startswith("--"):
-                logger.info(f"Successfully translated via interim pattern matcher")
-                return interim_result
+            # REMOVED: Interim pattern-based translation - pipeline handles all patterns now
             # Final fallback: treat as comment
             return f"-- CQL Expression (error: {e}): {cql_expression}"
     
@@ -2933,12 +2923,7 @@ FROM {table_name} {alias.lower()}
         logger.info(f"CQL Engine evaluating advanced expression: {cql_expression}")
         
         try:
-            # Check interim patterns first before advanced translator (for Pattern 15, etc.)
-            if self._has_known_parsing_issues(cql_expression):
-                interim_result = self._try_interim_pattern_translation(cql_expression, table_name, json_column)
-                if interim_result and not interim_result.startswith("--"):
-                    logger.info(f"Successfully translated via interim pattern matcher in advanced evaluation")
-                    return interim_result
+            # REMOVED: Interim patterns - pipeline integration handles all patterns now
             
             # Use advanced translator for Phase 6 constructs
             sql = self.advanced_translator.translate_advanced_cql(cql_expression)

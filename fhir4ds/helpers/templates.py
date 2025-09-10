@@ -251,7 +251,7 @@ class Templates:
                 "column": [
                     {"name": "patient_id", "path": "id", "type": "id"},
                     {"name": "identifier_use", "path": "use", "type": "code"},
-                    {"name": "identifier_type", "path": "type.coding.code", "type": "code"},
+                    {"name": "identifier_type", "path": "type.coding[0].code", "type": "code"},
                     {"name": "identifier_system", "path": "system", "type": "uri"},
                     {"name": "identifier_value", "path": "value", "type": "string"}
                 ]
@@ -298,8 +298,8 @@ class Templates:
                 "column": [
                     {"name": "id", "path": "id", "type": "id"},
                     {"name": "patient_id", "path": "subject.reference", "type": "string"},
-                    {"name": "code", "path": "code.coding.code", "type": "code"},
-                    {"name": "display", "path": "code.coding.display", "type": "string"},
+                    {"name": "code", "path": "code.coding[0].code", "type": "code"},
+                    {"name": "display", "path": "code.coding[0].display", "type": "string"},
                     {"name": "value_quantity", "path": "valueQuantity.value", "type": "decimal"},
                     {"name": "unit", "path": "valueQuantity.unit", "type": "string"},
                     {"name": "value_string", "path": "valueString", "type": "string"},
@@ -314,7 +314,7 @@ class Templates:
         
         # Add code filtering when specific code is requested
         if code:
-            view_def["select"][0]["where"].append({"path": f"code.coding.code = '{code}'"})
+            view_def["select"][0]["where"].append({"path": f"code.coding[0].code = '{code}'"})
         
         return view_def
     
@@ -348,9 +348,9 @@ class Templates:
                 "column": [
                     {"name": "id", "path": "id", "type": "id"},
                     {"name": "patient_id", "path": "subject.reference", "type": "string"},
-                    {"name": "vital_sign_type", "path": "category.coding.display", "type": "string"},
-                    {"name": "code", "path": "code.coding.code", "type": "code"},
-                    {"name": "display", "path": "code.coding.display", "type": "string"},
+                    {"name": "vital_sign_type", "path": "category[0].coding[0].display", "type": "string"},
+                    {"name": "code", "path": "code.coding[0].code", "type": "code"},
+                    {"name": "display", "path": "code.coding[0].display", "type": "string"},
                     {"name": "value", "path": "valueQuantity.value", "type": "decimal"},
                     {"name": "unit", "path": "valueQuantity.unit", "type": "string"},
                     {"name": "effective_date", "path": "effectiveDateTime", "type": "dateTime"},
@@ -358,7 +358,7 @@ class Templates:
                 ],
                 "where": [
                     {"path": "status = 'final'"},
-                    {"path": "category.coding.code = 'vital-signs' or category.coding.display = 'vital-signs'"}
+                    {"path": "category[0].coding[0].code = 'vital-signs' or category[0].coding[0].display = 'Vital Signs'"}
                 ]
             }]
         }
@@ -397,7 +397,7 @@ class Templates:
         """
         where_clauses = [
             {"path": "status = 'final'"},
-            {"path": "category.coding.code = 'laboratory' or category.coding.display = 'laboratory'"}
+            {"path": "category[0].coding[0].code = 'laboratory' or category[0].coding[0].display = 'Laboratory'"}
         ]
         
         if date_range_start:
@@ -414,12 +414,12 @@ class Templates:
                 "column": [
                     {"name": "id", "path": "id", "type": "id"},
                     {"name": "patient_id", "path": "subject.reference", "type": "string"},
-                    {"name": "test_name", "path": "code.coding.display", "type": "string"},
-                    {"name": "code", "path": "code.coding.code", "type": "code"},
+                    {"name": "test_name", "path": "code.coding[0].display", "type": "string"},
+                    {"name": "code", "path": "code.coding[0].code", "type": "code"},
                     {"name": "value", "path": "valueQuantity.value", "type": "decimal"},
                     {"name": "unit", "path": "valueQuantity.unit", "type": "string"},
                     {"name": "reference_range", "path": "referenceRange.text", "type": "string"},
-                    {"name": "abnormal_flag", "path": "interpretation.coding.code", "type": "code"},
+                    {"name": "abnormal_flag", "path": "interpretation[0].coding[0].code", "type": "code"},
                     {"name": "effective_date", "path": "effectiveDateTime", "type": "dateTime"},
                     {"name": "status", "path": "status", "type": "code"}
                 ],
@@ -459,11 +459,11 @@ class Templates:
                 "column": [
                     {"name": "id", "path": "id", "type": "id"},
                     {"name": "patient_id", "path": "subject.reference", "type": "string"},
-                    {"name": "medication_name", "path": "medicationCodeableConcept.coding.display", "type": "string"},
-                    {"name": "medication_code", "path": "medicationCodeableConcept.coding.code", "type": "code"},
-                    {"name": "dosage_text", "path": "dosageInstruction.text", "type": "string"},
-                    {"name": "route", "path": "dosageInstruction.route.coding.display", "type": "string"},
-                    {"name": "frequency", "path": "dosageInstruction.timing.code.coding.display", "type": "string"},
+                    {"name": "medication_name", "path": "medicationCodeableConcept.coding[0].display", "type": "string"},
+                    {"name": "medication_code", "path": "medicationCodeableConcept.coding[0].code", "type": "code"},
+                    {"name": "dosage_text", "path": "dosageInstruction[0].text", "type": "string"},
+                    {"name": "route", "path": "dosageInstruction[0].route.coding[0].display", "type": "string"},
+                    {"name": "frequency", "path": "dosageInstruction[0].timing.code.coding[0].display", "type": "string"},
                     {"name": "status", "path": "status", "type": "code"},
                     {"name": "intent", "path": "intent", "type": "code"},
                     {"name": "authored_date", "path": "authoredOn", "type": "dateTime"}
@@ -519,7 +519,7 @@ class Templates:
                     {"name": "patient_id", "path": "subject.reference", "type": "string"},
                     {"name": "status", "path": "status", "type": "code"},
                     {"name": "class", "path": "class.code", "type": "code"},
-                    {"name": "type", "path": "type.coding.display", "type": "string"},
+                    {"name": "type", "path": "type[0].coding[0].display", "type": "string"},
                     {"name": "start_time", "path": "period.start", "type": "dateTime"},
                     {"name": "end_time", "path": "period.end", "type": "dateTime"},
                     {"name": "service_provider", "path": "serviceProvider.reference", "type": "string"}
@@ -567,7 +567,7 @@ class Templates:
                 ],
                 "where": [
                     {"path": "status = 'final'"},
-                    {"path": "code.coding.code = '4548-4' or code.coding.display = 'Hemoglobin A1c/Hemoglobin.total in Blood'"}
+                    {"path": "code.coding[0].code = '4548-4' or code.coding[0].display = 'Hemoglobin A1c/Hemoglobin.total in Blood'"}
                 ]
             }]
         }
@@ -599,9 +599,9 @@ class Templates:
         """
         # Build condition filter using OR syntax (FHIRPath doesn't support IN clause)
         if len(conditions) == 1:
-            condition_filter = f"code.coding.code = '{conditions[0]}'"
+            condition_filter = f"code.coding[0].code = '{conditions[0]}'"
         else:
-            condition_filters = [f"code.coding.code = '{condition}'" for condition in conditions]
+            condition_filters = [f"code.coding[0].code = '{condition}'" for condition in conditions]
             condition_filter = " or ".join(condition_filters)
         
         return {
@@ -611,15 +611,15 @@ class Templates:
             "select": [{
                 "column": [
                     {"name": "patient_id", "path": "subject.reference", "type": "string"},
-                    {"name": "condition_code", "path": "code.coding.code", "type": "code"},
-                    {"name": "condition_display", "path": "code.coding.display", "type": "string"},
+                    {"name": "condition_code", "path": "code.coding[0].code", "type": "code"},
+                    {"name": "condition_display", "path": "code.coding[0].display", "type": "string"},
                     {"name": "onset_date", "path": "onsetDateTime", "type": "dateTime"},
-                    {"name": "clinical_status", "path": "clinicalStatus.coding.code", "type": "code"},
-                    {"name": "verification_status", "path": "verificationStatus.coding.code", "type": "code"}
+                    {"name": "clinical_status", "path": "clinicalStatus.coding[0].code", "type": "code"},
+                    {"name": "verification_status", "path": "verificationStatus.coding[0].code", "type": "code"}
                 ],
                 "where": [
                     {"path": condition_filter},
-                    {"path": "clinicalStatus.coding.code = 'active'"}
+                    {"path": "clinicalStatus.coding[0].code = 'active'"}
                 ]
             }]
         }

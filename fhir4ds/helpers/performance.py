@@ -585,6 +585,15 @@ class PerformanceMonitor:
             return None
         return self.query_history[-1]
     
+    def get_all_metrics(self) -> List[QueryMetrics]:
+        """
+        Get all QueryMetrics from the query history.
+        
+        Returns:
+            List of all QueryMetrics objects in chronological order
+        """
+        return self.query_history.copy()
+    
     def get_optimization_suggestions(self) -> OptimizationSuggestions:
         """
         Get optimization suggestions for recent queries.

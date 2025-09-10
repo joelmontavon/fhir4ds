@@ -16,6 +16,7 @@ from typing import List, Any, Optional, Dict, Union
 import logging
 from functools import lru_cache
 from ..core.base import PipelineOperation, SQLState, ExecutionContext, ContextMode
+from .function_handlers import HandlerRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -122,11 +123,16 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         'message', 'error'
     })
     
+    # FHIR-specific Functions
+    FHIR_FUNCTIONS = frozenset({
+        'getvalue', 'resolve'
+    })
+    
     # All supported functions
     ALL_SUPPORTED_FUNCTIONS = (COLLECTION_FUNCTIONS | STRING_FUNCTIONS | TYPE_FUNCTIONS | 
                               MATH_FUNCTIONS | DATETIME_FUNCTIONS | COMPARISON_FUNCTIONS |
                            LOGICAL_FUNCTIONS | INTERVAL_FUNCTIONS | LIST_FUNCTIONS |
-                           QUERY_FUNCTIONS | ERROR_FUNCTIONS)
+                           QUERY_FUNCTIONS | ERROR_FUNCTIONS | FHIR_FUNCTIONS)
     
     def __init__(self, func_name: str, args: List[Any]):
         """
@@ -138,6 +144,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         """
         self.func_name = func_name.lower()
         self.args = args or []
+        self._handler_registry = HandlerRegistry()
         self._validate_function()
     
     def _validate_function(self) -> None:
@@ -156,19 +163,22 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         Returns:
             New SQL state with function applied
         """
-        # Route to appropriate handler based on function category
+        # Try delegation pattern first (new refactored handlers)
+        handler = self._handler_registry.get_handler(self.func_name)
+        if handler is not None:
+            logger.debug(f"Using delegated handler for function '{self.func_name}'")
+            return handler.handle_function(self.func_name, input_state, context, self.args)
+        
+        # Fallback to existing god class dispatch system
+        logger.debug(f"Using legacy dispatch for function '{self.func_name}'")
         if self._is_collection_function():
             return self._execute_collection_function(input_state, context)
         elif self._is_string_function():
             return self._execute_string_function(input_state, context)
-        elif self._is_type_function():
-            return self._execute_type_function(input_state, context)
         elif self._is_math_function():
             return self._execute_math_function(input_state, context)
         elif self._is_datetime_function():
             return self._execute_datetime_function(input_state, context)
-        elif self._is_comparison_function():
-            return self._execute_comparison_function(input_state, context)
         elif self._is_logical_function():
             return self._execute_logical_function(input_state, context)
         elif self._is_interval_function():
@@ -179,6 +189,8 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
             return self._execute_query_function(input_state, context)
         elif self._is_error_function():
             return self._execute_error_function(input_state, context)
+        elif self._is_fhir_function():
+            return self._execute_fhir_function(input_state, context)
         else:
             raise ValueError(f"Unknown function category for: {self.func_name}")
     
@@ -190,10 +202,6 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         """Check if function is a string function."""
         return self.func_name in self.STRING_FUNCTIONS
     
-    def _is_type_function(self) -> bool:
-        """Check if function is a type conversion function."""
-        return self.func_name in self.TYPE_FUNCTIONS
-    
     def _is_math_function(self) -> bool:
         """Check if function is a math function."""
         return self.func_name in self.MATH_FUNCTIONS
@@ -201,10 +209,6 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
     def _is_datetime_function(self) -> bool:
         """Check if function is a datetime function."""
         return self.func_name in self.DATETIME_FUNCTIONS
-    
-    def _is_comparison_function(self) -> bool:
-        """Check if function is a comparison operator."""
-        return self.func_name in self.COMPARISON_FUNCTIONS
     
     def _is_logical_function(self) -> bool:
         """Check if function is a logical operator."""
@@ -225,6 +229,10 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
     def _is_error_function(self) -> bool:
         """Check if function is an error/messaging function."""
         return self.func_name in self.ERROR_FUNCTIONS
+
+    def _is_fhir_function(self) -> bool:
+        """Check if function is a FHIR-specific function."""
+        return self.func_name in self.FHIR_FUNCTIONS
 
     # ====================================
     # HELPER METHODS FOR CONSISTENT STATE MANAGEMENT
@@ -290,43 +298,6 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
             resource_type=input_state.resource_type
         )
     
-    def _build_union_sql_duckdb(self, first_collection: str, second_collection: str) -> str:
-        """Build DuckDB-specific union SQL."""
-        return f"""(
-            CASE 
-                WHEN {first_collection} IS NULL AND {second_collection} IS NULL THEN NULL
-                WHEN {first_collection} IS NULL THEN {second_collection}
-                WHEN {second_collection} IS NULL THEN {first_collection}
-                WHEN json_type({first_collection}) = 'ARRAY' AND json_type({second_collection}) = 'ARRAY' THEN (
-                    SELECT json_group_array(value)
-                    FROM (
-                        SELECT value FROM json_each({first_collection})
-                        UNION
-                        SELECT value FROM json_each({second_collection})
-                    )
-                )
-                ELSE json_array({first_collection}, {second_collection})
-            END
-        )"""
-    
-    def _build_union_sql_postgresql(self, first_collection: str, second_collection: str) -> str:
-        """Build PostgreSQL-specific union SQL."""
-        return f"""(
-            CASE 
-                WHEN {first_collection} IS NULL AND {second_collection} IS NULL THEN NULL
-                WHEN {first_collection} IS NULL THEN {second_collection}
-                WHEN {second_collection} IS NULL THEN {first_collection}
-                WHEN jsonb_typeof({first_collection}) = 'array' AND jsonb_typeof({second_collection}) = 'array' THEN (
-                    SELECT jsonb_agg(value)
-                    FROM (
-                        SELECT value FROM jsonb_array_elements({first_collection})
-                        UNION
-                        SELECT value FROM jsonb_array_elements({second_collection})
-                    ) AS combined
-                )
-                ELSE jsonb_build_array({first_collection}, {second_collection})
-            END
-        )"""
     
     def _add_debug_info(self, sql: str, operation: str, context: ExecutionContext) -> str:
         """Add debug information to SQL when in debug mode."""
@@ -335,22 +306,34 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         return sql
     
     @lru_cache(maxsize=256)
-    def _get_cached_sql_pattern(self, pattern_type: str, dialect_name: str, *args) -> str:
+    def _get_cached_sql_pattern(self, pattern_type: str, context: ExecutionContext, *args) -> str:
         """Get cached SQL patterns for common operations."""
-        cache_key = f"{pattern_type}_{dialect_name}_{args}"
+        cache_key = f"{pattern_type}_{context.dialect.name.upper()}_{args}"
         
-        if pattern_type == "exists_collection" and dialect_name == "DUCKDB":
-            return f"(json_array_length({{fragment}}) > 0)"
-        elif pattern_type == "exists_collection" and dialect_name == "POSTGRESQL":
-            return f"(jsonb_array_length({{fragment}}) > 0)"
-        elif pattern_type == "empty_collection" and dialect_name == "DUCKDB":
-            return f"(json_array_length({{fragment}}) = 0)"
-        elif pattern_type == "empty_collection" and dialect_name == "POSTGRESQL":
-            return f"(jsonb_array_length({{fragment}}) = 0)"
-        elif pattern_type == "exists_scalar":
-            return f"({{fragment}} IS NOT NULL)"
-        elif pattern_type == "empty_scalar":
-            return f"({{fragment}} IS NULL)"
+        if pattern_type in ("exists_collection", "empty_collection"):
+            # Use dialect method for collection checks
+            is_collection = True
+            fragment_placeholder = "{fragment}"
+            pattern = context.dialect.generate_exists_check(fragment_placeholder, is_collection)
+            
+            if pattern_type == "empty_collection":
+                # Negate the exists check for empty
+                if pattern.startswith("(") and pattern.endswith(")"):
+                    # Replace > 0 with = 0 for empty check
+                    pattern = pattern.replace("> 0", "= 0")
+                else:
+                    pattern = f"NOT {pattern}"
+            return pattern
+        elif pattern_type in ("exists_scalar", "empty_scalar"):
+            # Use dialect method for scalar checks  
+            is_collection = False
+            fragment_placeholder = "{fragment}"
+            pattern = context.dialect.generate_exists_check(fragment_placeholder, is_collection)
+            
+            if pattern_type == "empty_scalar":
+                # Negate the exists check for empty
+                pattern = pattern.replace("IS NOT NULL", "IS NULL")
+            return pattern
         else:
             # Return uncached pattern
             return None
@@ -425,14 +408,14 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         """Handle exists() function."""
         if input_state.is_collection:
             # Try to use cached pattern first
-            pattern = self._get_cached_sql_pattern("exists_collection", context.dialect.name.upper())
+            pattern = self._get_cached_sql_pattern("exists_collection", context)
             if pattern:
                 sql_fragment = pattern.format(fragment=input_state.sql_fragment)
             else:
                 sql_fragment = f"({context.dialect.json_array_length(input_state.sql_fragment)} > 0)"
         else:
             # Use cached pattern for scalar
-            pattern = self._get_cached_sql_pattern("exists_scalar", context.dialect.name.upper())
+            pattern = self._get_cached_sql_pattern("exists_scalar", context)
             sql_fragment = pattern.format(fragment=input_state.sql_fragment)
         
         sql_fragment = self._add_debug_info(sql_fragment, "exists()", context)
@@ -472,15 +455,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
     def _handle_last(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle last() function."""
         if input_state.is_collection:
-            if context.dialect.name.upper() == 'DUCKDB':
-                sql_fragment = f"""
-                json_extract({input_state.sql_fragment}, 
-                           '$[' || (json_array_length({input_state.sql_fragment}) - 1) || ']')
-                """
-            else:  # PostgreSQL
-                sql_fragment = f"""
-                ({input_state.sql_fragment} -> (jsonb_array_length({input_state.sql_fragment}) - 1))
-                """
+            sql_fragment = context.dialect.generate_json_extract_last(input_state.sql_fragment)
         else:
             # Single value - last() returns the value itself
             sql_fragment = input_state.sql_fragment
@@ -494,10 +469,8 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
     def _handle_count(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle count() and length() functions."""
         if input_state.is_collection:
-            if context.dialect.name.upper() == 'DUCKDB':
-                sql_fragment = f"json_array_length({input_state.sql_fragment})"
-            else:  # PostgreSQL
-                sql_fragment = f"jsonb_array_length({input_state.sql_fragment})"
+            # Handle null collections by returning 0 instead of NULL
+            sql_fragment = f"COALESCE({context.dialect.generate_json_array_length(input_state.sql_fragment)}, 0)"
         else:
             # Single value - count is 1 if not null, 0 if null
             sql_fragment = f"CASE WHEN {input_state.sql_fragment} IS NOT NULL THEN 1 ELSE 0 END"
@@ -519,17 +492,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         # Generate SQL to filter array elements based on the condition
         collection_expr = input_state.sql_fragment
         
-        if context.dialect.name.upper() == 'DUCKDB':
-            # For DuckDB, we need to filter JSON array elements and preserve them as objects
-            # Use json_group_array to collect all matching items into a single JSON array
-            sql_fragment = f"""(
-                SELECT json_group_array(item.value)
-                FROM json_each({collection_expr}) AS item
-                WHERE {condition_sql.replace('$ITEM', 'item.value')}
-            )"""
-        else:  # PostgreSQL
-            # For PostgreSQL, use jsonb_path_query_array with filter
-            sql_fragment = f"""jsonb_path_query_array({collection_expr}, '$[*] ? ({condition_sql})')"""
+        sql_fragment = context.dialect.generate_where_clause_filter(collection_expr, condition_sql)
         
         return input_state.evolve(
             sql_fragment=sql_fragment.strip(),
@@ -540,21 +503,44 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
     
     def _compile_where_condition(self, condition_arg, context: ExecutionContext) -> str:
         """Compile a where condition argument to SQL."""
-        from ...fhirpath.parser.ast_nodes import BinaryOpNode, IdentifierNode, LiteralNode
+        from ...fhirpath.parser.ast_nodes import BinaryOpNode, IdentifierNode, LiteralNode, PathNode, FunctionCallNode
         
-        # Handle BinaryOpNode (e.g., use = "official")
+        # Handle BinaryOpNode (e.g., use = "official", active != false, age > 18, logical operations)
         if isinstance(condition_arg, BinaryOpNode):
-            if condition_arg.operator == '=':
-                # Extract left field name and right value
-                if isinstance(condition_arg.left, IdentifierNode) and isinstance(condition_arg.right, LiteralNode):
-                    field_name = condition_arg.left.name
-                    value = condition_arg.right.value
-                    
-                    # Return dialect-specific condition
-                    if context.dialect.name.upper() == 'DUCKDB':
-                        return f"json_extract_string($ITEM, '$.{field_name}') = '{value}'"
-                    else:  # PostgreSQL
-                        return f"@.{field_name} == \"{value}\""
+            # Handle logical operators (and, or)
+            if condition_arg.operator.lower() in ['and', 'or']:
+                left_condition = self._compile_where_condition(condition_arg.left, context)
+                right_condition = self._compile_where_condition(condition_arg.right, context)
+                
+                # Combine conditions with logical operator
+                logical_op = condition_arg.operator.upper()
+                return context.dialect.generate_logical_combine(left_condition, logical_op, right_condition)
+            
+            # Map CQL/FHIRPath comparison operators to SQL operators
+            operator_mapping = {
+                '=': ('=', '=='),     # (DuckDB, PostgreSQL)
+                '==': ('=', '=='),
+                '!=': ('!=', '!='), 
+                '<>': ('<>', '!='),
+                '<': ('<', '<'),
+                '>': ('>', '>'),
+                '<=': ('<=', '<='),
+                '>=': ('>=', '>=')
+            }
+            
+            if condition_arg.operator in operator_mapping:
+                duckdb_op, pg_op = operator_mapping[condition_arg.operator]
+                
+                # Extract left field expression and right value
+                left_expr = self._compile_operand(condition_arg.left, context, '$ITEM')
+                right_expr = self._compile_operand(condition_arg.right, context, '$ITEM')
+                
+                # Return dialect-specific condition
+                return context.dialect.generate_path_condition_comparison(left_expr, condition_arg.operator, right_expr)
+        
+        # Handle PathNode with function calls (e.g., url.startsWith('http://example.org'))
+        if isinstance(condition_arg, PathNode):
+            return self._compile_path_condition(condition_arg, context)
         
         # Handle pipeline operations (converted AST nodes)
         if hasattr(condition_arg, 'operations') and condition_arg.operations:
@@ -570,14 +556,143 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
                                 if hasattr(right_op, 'value'):
                                     value = right_op.value
                                     # Return DuckDB-style condition
-                                    if context.dialect.name.upper() == 'DUCKDB':
-                                        return f"json_extract_string($ITEM, '$.use') = '{value}'"
-                                    else:  # PostgreSQL
-                                        return f"@.use == \"{value}\""
+                                    return context.dialect.generate_field_equality_condition('use', value)
         
         # No fallback - raise error for unrecognized conditions
         raise InvalidArgumentError(f"Unrecognized where condition type: {type(condition_arg).__name__}. "
-                                  f"Expected BinaryOpNode or pipeline operation.")
+                                  f"Expected BinaryOpNode, PathNode, or pipeline operation.")
+    
+    def _compile_operand(self, operand, context: ExecutionContext, item_placeholder: str) -> str:
+        """Compile an operand (left or right side of binary operation) to SQL."""
+        from ...fhirpath.parser.ast_nodes import IdentifierNode, LiteralNode, PathNode, FunctionCallNode
+        
+        # Handle simple identifiers (field names)
+        if isinstance(operand, IdentifierNode):
+            field_name = operand.name
+            return context.dialect.generate_field_extraction(item_placeholder, field_name)
+        
+        # Handle literal values
+        elif isinstance(operand, LiteralNode):
+            value = operand.value
+            if isinstance(value, str):
+                return f"'{value}'"
+            elif isinstance(value, bool):
+                return 'true' if value else 'false'
+            elif isinstance(value, (int, float)):
+                return str(value)
+            else:
+                return f"'{value}'"
+        
+        # Handle path expressions (e.g., patient.name.given)
+        elif isinstance(operand, PathNode):
+            if len(operand.segments) == 1 and isinstance(operand.segments[0], IdentifierNode):
+                # Simple single-segment path
+                field_name = operand.segments[0].name
+                return context.dialect.generate_field_extraction(item_placeholder, field_name)
+            elif len(operand.segments) == 2 and isinstance(operand.segments[1], FunctionCallNode):
+                # Handle path.function() pattern (e.g., family.exists(), given.count())
+                field_name = operand.segments[0].name if isinstance(operand.segments[0], IdentifierNode) else str(operand.segments[0])
+                function_call = operand.segments[1]
+                
+                if function_call.name == 'exists':
+                    # Handle field.exists() - check if field is not null
+                    return context.dialect.generate_field_exists_check(item_placeholder, field_name)
+                elif function_call.name in ['count', 'length']:
+                    # Handle field.count() or field.length()
+                    if function_call.name == 'count':
+                        return context.dialect.generate_field_count_operation(item_placeholder, field_name)
+                    else:  # length
+                        return context.dialect.generate_field_length_operation(item_placeholder, field_name)
+                else:
+                    # For other functions, try to handle generically
+                    raise InvalidArgumentError(f"Unsupported function in operand: {field_name}.{function_call.name}()")
+            else:
+                # Complex path - build nested access
+                path_parts = []
+                for segment in operand.segments:
+                    if isinstance(segment, IdentifierNode):
+                        path_parts.append(segment.name)
+                
+                if path_parts:
+                    path_expr = '.'.join(path_parts)
+                    return context.dialect.generate_path_expression_extraction(item_placeholder, path_expr)
+        
+        # Handle function calls directly (not as part of a path)
+        elif isinstance(operand, FunctionCallNode):
+            # This would be for standalone function calls
+            raise InvalidArgumentError(f"Standalone function calls not supported in where conditions: {operand.name}()")
+        
+        # Fallback for unrecognized operand types
+        raise InvalidArgumentError(f"Unrecognized operand type in where condition: {type(operand).__name__}")
+    
+    def _compile_path_condition(self, path_node, context: ExecutionContext) -> str:
+        """Compile a PathNode condition to SQL (e.g., url.startsWith('http://example.org'))."""
+        from ...fhirpath.parser.ast_nodes import IdentifierNode, FunctionCallNode, LiteralNode
+        
+        if len(path_node.segments) == 2:
+            # Handle field.function_call pattern
+            if (isinstance(path_node.segments[0], IdentifierNode) and 
+                isinstance(path_node.segments[1], FunctionCallNode)):
+                
+                field_name = path_node.segments[0].name
+                function_call = path_node.segments[1]
+                
+                # Handle startsWith() function
+                if function_call.name == 'startsWith' and len(function_call.args) == 1:
+                    arg = function_call.args[0]
+                    if isinstance(arg, LiteralNode):
+                        value = arg.value
+                    elif isinstance(arg, IdentifierNode):
+                        # Handle unquoted string literals parsed as identifiers
+                        value = arg.name
+                    else:
+                        # Handle other literal node types (DateTimeLiteralNode, etc.)
+                        if hasattr(arg, 'value'):
+                            value = arg.value
+                        else:
+                            raise InvalidArgumentError(f"Unsupported argument type for startsWith(): {type(arg).__name__}")
+                    return context.dialect.starts_with_condition("$ITEM", field_name, value)
+                
+                # Handle endsWith() function
+                elif function_call.name == 'endsWith' and len(function_call.args) == 1:
+                    arg = function_call.args[0]
+                    if isinstance(arg, LiteralNode):
+                        value = arg.value
+                    elif isinstance(arg, IdentifierNode):
+                        # Handle unquoted string literals parsed as identifiers
+                        value = arg.name
+                    else:
+                        # Handle other literal node types (DateTimeLiteralNode, etc.)
+                        if hasattr(arg, 'value'):
+                            value = arg.value
+                        else:
+                            raise InvalidArgumentError(f"Unsupported argument type for endsWith(): {type(arg).__name__}")
+                    return context.dialect.ends_with_condition("$ITEM", field_name, value)
+                
+                # Handle contains() function
+                elif function_call.name == 'contains' and len(function_call.args) == 1:
+                    arg = function_call.args[0]
+                    if isinstance(arg, LiteralNode):
+                        value = arg.value
+                    elif isinstance(arg, IdentifierNode):
+                        # Handle unquoted string literals parsed as identifiers
+                        value = arg.name
+                    else:
+                        # Handle other literal node types (DateTimeLiteralNode, etc.)
+                        if hasattr(arg, 'value'):
+                            value = arg.value
+                        else:
+                            raise InvalidArgumentError(f"Unsupported argument type for contains(): {type(arg).__name__}")
+                    return context.dialect.contains_condition("$ITEM", field_name, value)
+                
+                # Handle exists() function
+                elif function_call.name == 'exists' and len(function_call.args) == 0:
+                    # Handle field.exists() - check if field is not null
+                    return context.dialect.generate_field_exists_check('$ITEM', field_name)
+        
+        # Fallback for unsupported path conditions
+        raise InvalidArgumentError(f"Unsupported path condition: {path_node}. "
+                                  f"Currently supports field.startsWith(), field.endsWith(), field.contains()")
     
     def _handle_select(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle select() function with transformation."""
@@ -588,18 +703,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         # For now, placeholder implementation
         transform_sql = "."  # This should be compiled from self.args[0]
         
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = f"""
-            json_array(
-                SELECT json_extract(value, '$.{transform_sql}')
-                FROM json_each({input_state.sql_fragment})
-            )
-            """
-        else:  # PostgreSQL
-            sql_fragment = f"""
-            jsonb_agg(elem->>'{transform_sql}')
-            FROM jsonb_array_elements({input_state.sql_fragment}) AS elem
-            """
+        sql_fragment = context.dialect.generate_select_transformation(input_state.sql_fragment, transform_sql)
         
         return input_state.evolve(
             sql_fragment=sql_fragment.strip(),
@@ -609,18 +713,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
     
     def _handle_distinct(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle distinct() function."""
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = f"""
-            json_array(
-                SELECT DISTINCT value
-                FROM json_each({input_state.sql_fragment})
-            )
-            """
-        else:  # PostgreSQL
-            sql_fragment = f"""
-            jsonb_agg(DISTINCT elem)
-            FROM jsonb_array_elements({input_state.sql_fragment}) AS elem
-            """
+        sql_fragment = context.dialect.generate_array_distinct_operation(input_state.sql_fragment)
         
         return input_state.evolve(
             sql_fragment=sql_fragment.strip(),
@@ -638,32 +731,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         first_collection = input_state.sql_fragment
         second_collection = input_state.sql_fragment  # Simplified for x.combine(x) case
         
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {first_collection} IS NULL AND {second_collection} IS NULL THEN NULL
-                    WHEN {first_collection} IS NULL THEN {second_collection}
-                    WHEN {second_collection} IS NULL THEN {first_collection}
-                    WHEN json_type({first_collection}) = 'ARRAY' AND json_type({second_collection}) = 'ARRAY' THEN (
-                        SELECT json_group_array(value)
-                        FROM (
-                            SELECT value FROM json_each({first_collection})
-                            UNION ALL
-                            SELECT value FROM json_each({second_collection})
-                        )
-                    )
-                    ELSE json_array({first_collection}, {second_collection})
-                END
-            )"""
-        else:  # PostgreSQL
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {first_collection} IS NULL AND {second_collection} IS NULL THEN NULL
-                    WHEN {first_collection} IS NULL THEN {second_collection}
-                    WHEN {second_collection} IS NULL THEN {first_collection}
-                    ELSE ({first_collection} || {second_collection})
-                END
-            )"""
+        sql_fragment = context.dialect.generate_collection_combine(first_collection, second_collection)
         
         return input_state.evolve(
             sql_fragment=sql_fragment.strip(),
@@ -676,37 +744,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
     
     def _handle_tail(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle tail() function - all elements except first."""
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {input_state.sql_fragment} IS NULL THEN NULL
-                    WHEN json_type({input_state.sql_fragment}) = 'ARRAY' THEN
-                        CASE 
-                            WHEN json_array_length({input_state.sql_fragment}) <= 1 THEN json_array()
-                            ELSE (
-                                SELECT json_group_array(json_extract({input_state.sql_fragment}, '$[' || idx || ']'))
-                                FROM generate_series(1::BIGINT, CAST(json_array_length({input_state.sql_fragment}) - 1 AS BIGINT)) AS t(idx)
-                            )
-                        END
-                    ELSE json_array()
-                END
-            )"""
-        else:  # PostgreSQL
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {input_state.sql_fragment} IS NULL THEN NULL
-                    WHEN jsonb_typeof({input_state.sql_fragment}) = 'array' THEN
-                        CASE 
-                            WHEN jsonb_array_length({input_state.sql_fragment}) <= 1 THEN '[]'::jsonb
-                            ELSE (
-                                SELECT jsonb_agg(value ORDER BY ordinality)
-                                FROM jsonb_array_elements({input_state.sql_fragment}) WITH ORDINALITY AS t(value, ordinality)
-                                WHERE ordinality > 1
-                            )
-                        END
-                    ELSE '[]'::jsonb
-                END
-            )"""
+        sql_fragment = context.dialect.generate_array_tail_operation(input_state.sql_fragment)
         
         return input_state.evolve(
             sql_fragment=sql_fragment.strip(),
@@ -728,37 +766,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         else:
             skip_count = str(arg)
         
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {input_state.sql_fragment} IS NULL THEN NULL
-                    WHEN json_type({input_state.sql_fragment}) = 'ARRAY' THEN
-                        CASE 
-                            WHEN json_array_length({input_state.sql_fragment}) <= {skip_count} THEN json_array()
-                            ELSE (
-                                SELECT json_group_array(json_extract({input_state.sql_fragment}, '$[' || idx || ']'))
-                                FROM generate_series(CAST({skip_count} AS BIGINT), CAST(json_array_length({input_state.sql_fragment}) - 1 AS BIGINT)) AS t(idx)
-                            )
-                        END
-                    ELSE json_array()
-                END
-            )"""
-        else:  # PostgreSQL
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {input_state.sql_fragment} IS NULL THEN NULL
-                    WHEN jsonb_typeof({input_state.sql_fragment}) = 'array' THEN
-                        CASE 
-                            WHEN jsonb_array_length({input_state.sql_fragment}) <= {skip_count} THEN '[]'::jsonb
-                            ELSE (
-                                SELECT jsonb_agg(value ORDER BY ordinality)
-                                FROM jsonb_array_elements({input_state.sql_fragment}) WITH ORDINALITY AS t(value, ordinality)
-                                WHERE ordinality > {skip_count}
-                            )
-                        END
-                    ELSE '[]'::jsonb
-                END
-            )"""
+        sql_fragment = context.dialect.generate_array_slice_operation(input_state.sql_fragment, int(skip_count))
         
         return input_state.evolve(
             sql_fragment=sql_fragment.strip(),
@@ -780,37 +788,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         else:
             take_count = str(arg)
         
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {input_state.sql_fragment} IS NULL THEN NULL
-                    WHEN json_type({input_state.sql_fragment}) = 'ARRAY' THEN
-                        CASE 
-                            WHEN json_array_length({input_state.sql_fragment}) = 0 THEN json_array()
-                            ELSE (
-                                SELECT json_group_array(json_extract({input_state.sql_fragment}, '$[' || idx || ']'))
-                                FROM generate_series(0::BIGINT, CAST(LEAST({take_count} - 1, json_array_length({input_state.sql_fragment}) - 1) AS BIGINT)) AS t(idx)
-                            )
-                        END
-                    ELSE json_array()
-                END
-            )"""
-        else:  # PostgreSQL
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {input_state.sql_fragment} IS NULL THEN NULL
-                    WHEN jsonb_typeof({input_state.sql_fragment}) = 'array' THEN
-                        CASE 
-                            WHEN jsonb_array_length({input_state.sql_fragment}) = 0 THEN '[]'::jsonb
-                            ELSE (
-                                SELECT jsonb_agg(value ORDER BY ordinality)
-                                FROM jsonb_array_elements({input_state.sql_fragment}) WITH ORDINALITY AS t(value, ordinality)
-                                WHERE ordinality <= {take_count}
-                            )
-                        END
-                    ELSE '[]'::jsonb
-                END
-            )"""
+        sql_fragment = context.dialect.generate_array_slice_operation(input_state.sql_fragment, 0, int(take_count))
         
         return input_state.evolve(
             sql_fragment=sql_fragment.strip(),
@@ -844,10 +822,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
                 logger.debug(f"🔧 Basic union optimization: UNION ALL")
         else:
             # Use complex JSON array union logic for general cases
-            if context.dialect.name.upper() == 'DUCKDB':
-                sql_fragment = self._build_union_sql_duckdb(first_collection, second_collection)
-            else:
-                sql_fragment = self._build_union_sql_postgresql(first_collection, second_collection)
+            sql_fragment = context.dialect.generate_union_operation(first_collection, second_collection)
         
         sql_fragment = self._add_debug_info(sql_fragment, "union()", context)
         return self._create_collection_result(input_state, sql_fragment)
@@ -942,58 +917,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         first_collection = input_state.sql_fragment
         second_collection = self._evaluate_union_argument(self.args[0], input_state, context)
         
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {first_collection} IS NULL OR {second_collection} IS NULL THEN NULL
-                    WHEN json_type({first_collection}) = 'ARRAY' AND json_type({second_collection}) = 'ARRAY' THEN
-                        CASE 
-                            WHEN json_array_length({first_collection}) = 0 OR json_array_length({second_collection}) = 0 THEN json_array()
-                            ELSE (
-                                SELECT CASE 
-                                    WHEN COUNT(*) = 0 THEN json_array()
-                                    ELSE json_group_array(DISTINCT base_value)
-                                END
-                                FROM (
-                                    SELECT base_val.value as base_value
-                                    FROM json_each({first_collection}) base_val
-                                    WHERE base_val.value IS NOT NULL
-                                      AND EXISTS (
-                                          SELECT 1 FROM json_each({second_collection}) other_val
-                                          WHERE other_val.value = base_val.value
-                                      )
-                                )
-                            )
-                        END
-                    ELSE json_array()
-                END
-            )"""
-        else:  # PostgreSQL
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {first_collection} IS NULL OR {second_collection} IS NULL THEN NULL
-                    WHEN jsonb_typeof({first_collection}) = 'array' AND jsonb_typeof({second_collection}) = 'array' THEN
-                        CASE 
-                            WHEN jsonb_array_length({first_collection}) = 0 OR jsonb_array_length({second_collection}) = 0 THEN '[]'::jsonb
-                            ELSE (
-                                SELECT CASE 
-                                    WHEN COUNT(*) = 0 THEN '[]'::jsonb
-                                    ELSE jsonb_agg(DISTINCT base_value)
-                                END
-                                FROM (
-                                    SELECT base_val.value as base_value
-                                    FROM jsonb_array_elements({first_collection}) base_val
-                                    WHERE base_val.value IS NOT NULL
-                                      AND EXISTS (
-                                          SELECT 1 FROM jsonb_array_elements({second_collection}) other_val
-                                          WHERE other_val.value = base_val.value
-                                      )
-                                )
-                            )
-                        END
-                    ELSE '[]'::jsonb
-                END
-            )"""
+        sql_fragment = context.dialect.generate_intersect_operation(first_collection, second_collection)
         
         return self._create_collection_result(input_state, sql_fragment)
     
@@ -1005,271 +929,28 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         first_collection = input_state.sql_fragment
         second_collection = self._evaluate_union_argument(self.args[0], input_state, context)
         
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {first_collection} IS NULL THEN NULL
-                    WHEN {second_collection} IS NULL THEN 
-                        CASE 
-                            WHEN json_type({first_collection}) = 'ARRAY' THEN {first_collection}
-                            ELSE json_array({first_collection})
-                        END
-                    WHEN json_type({first_collection}) = 'ARRAY' AND json_type({second_collection}) = 'ARRAY' THEN (
-                        SELECT CASE 
-                            WHEN COUNT(*) = 0 THEN json_array()
-                            ELSE json_group_array(DISTINCT base_value)
-                        END
-                        FROM (
-                            SELECT base_val.value as base_value
-                            FROM json_each({first_collection}) base_val
-                            WHERE base_val.value IS NOT NULL
-                              AND NOT EXISTS (
-                                  SELECT 1 FROM json_each({second_collection}) other_val
-                                  WHERE other_val.value = base_val.value
-                              )
-                        )
-                    )
-                    ELSE json_array({first_collection})
-                END
-            )"""
-        else:  # PostgreSQL
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {first_collection} IS NULL THEN NULL
-                    WHEN {second_collection} IS NULL THEN 
-                        CASE 
-                            WHEN jsonb_typeof({first_collection}) = 'array' THEN {first_collection}
-                            ELSE jsonb_build_array({first_collection})
-                        END
-                    WHEN jsonb_typeof({first_collection}) = 'array' AND jsonb_typeof({second_collection}) = 'array' THEN (
-                        SELECT CASE 
-                            WHEN COUNT(*) = 0 THEN '[]'::jsonb
-                            ELSE jsonb_agg(DISTINCT base_value)
-                        END
-                        FROM (
-                            SELECT base_val.value as base_value
-                            FROM jsonb_array_elements({first_collection}) base_val
-                            WHERE base_val.value IS NOT NULL
-                              AND NOT EXISTS (
-                                  SELECT 1 FROM jsonb_array_elements({second_collection}) other_val
-                                  WHERE other_val.value = base_val.value
-                              )
-                        )
-                    )
-                    ELSE jsonb_build_array({first_collection})
-                END
-            )"""
+        sql_fragment = context.dialect.generate_exclude_operation(first_collection, second_collection)
         
         return self._create_collection_result(input_state, sql_fragment)
     
     def _handle_boolean_collection(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle allTrue/allFalse/anyTrue/anyFalse functions."""
-        if context.dialect.name.upper() == 'DUCKDB':
-            if self.func_name == 'alltrue':
-                sql_fragment = f"""(
-                    CASE 
-                        WHEN {input_state.sql_fragment} IS NULL THEN NULL
-                        WHEN json_type({input_state.sql_fragment}) = 'ARRAY' THEN
-                            CASE 
-                                WHEN json_array_length({input_state.sql_fragment}) = 0 THEN NULL
-                                ELSE (
-                                    SELECT COUNT(*) = COUNT(CASE WHEN 
-                                        json_extract_string(value, '$') = 'true' THEN 1 END)
-                                    FROM json_each({input_state.sql_fragment})
-                                    WHERE json_extract_string(value, '$') IN ('true', 'false')
-                                )
-                            END
-                        ELSE 
-                            CASE 
-                                WHEN json_extract_string({input_state.sql_fragment}, '$') = 'true' THEN true
-                                WHEN json_extract_string({input_state.sql_fragment}, '$') = 'false' THEN false
-                                ELSE NULL
-                            END
-                    END
-                )"""
-            elif self.func_name == 'allfalse':
-                sql_fragment = f"""(
-                    CASE 
-                        WHEN {input_state.sql_fragment} IS NULL THEN NULL
-                        WHEN json_type({input_state.sql_fragment}) = 'ARRAY' THEN
-                            CASE 
-                                WHEN json_array_length({input_state.sql_fragment}) = 0 THEN NULL
-                                ELSE (
-                                    SELECT COUNT(*) = COUNT(CASE WHEN 
-                                        json_extract_string(value, '$') = 'false' THEN 1 END)
-                                    FROM json_each({input_state.sql_fragment})
-                                    WHERE json_extract_string(value, '$') IN ('true', 'false')
-                                )
-                            END
-                        ELSE 
-                            CASE 
-                                WHEN json_extract_string({input_state.sql_fragment}, '$') = 'false' THEN true
-                                WHEN json_extract_string({input_state.sql_fragment}, '$') = 'true' THEN false
-                                ELSE NULL
-                            END
-                    END
-                )"""
-            elif self.func_name == 'anytrue':
-                sql_fragment = f"""(
-                    CASE 
-                        WHEN {input_state.sql_fragment} IS NULL THEN NULL
-                        WHEN json_type({input_state.sql_fragment}) = 'ARRAY' THEN
-                            CASE 
-                                WHEN json_array_length({input_state.sql_fragment}) = 0 THEN NULL
-                                ELSE EXISTS (
-                                    SELECT 1 FROM json_each({input_state.sql_fragment})
-                                    WHERE json_extract_string(value, '$') = 'true'
-                                )
-                            END
-                        ELSE 
-                            CASE 
-                                WHEN json_extract_string({input_state.sql_fragment}, '$') = 'true' THEN true
-                                ELSE false
-                            END
-                    END
-                )"""
-            elif self.func_name == 'anyfalse':
-                sql_fragment = f"""(
-                    CASE 
-                        WHEN {input_state.sql_fragment} IS NULL THEN NULL
-                        WHEN json_type({input_state.sql_fragment}) = 'ARRAY' THEN
-                            CASE 
-                                WHEN json_array_length({input_state.sql_fragment}) = 0 THEN NULL
-                                ELSE EXISTS (
-                                    SELECT 1 FROM json_each({input_state.sql_fragment})
-                                    WHERE json_extract_string(value, '$') = 'false'
-                                )
-                            END
-                        ELSE 
-                            CASE 
-                                WHEN json_extract_string({input_state.sql_fragment}, '$') = 'false' THEN true
-                                ELSE false
-                            END
-                    END
-                )"""
-            else:
-                raise ValueError(f"Unknown boolean function: {self.func_name}")
-        else:  # PostgreSQL
-            if self.func_name == 'alltrue':
-                # Handle both JSONB and TEXT input by wrapping in appropriate conversion
-                collection_expr = input_state.sql_fragment
-                
-                # If the expression uses ->> (text extraction), convert to -> (jsonb extraction)
-                if '->>' in collection_expr:
-                    # Replace ->> with -> to get JSONB instead of TEXT
-                    jsonb_expr = collection_expr.replace('->>', '->')
-                else:
-                    jsonb_expr = collection_expr
-                
-                sql_fragment = f"""(
-                    CASE 
-                        WHEN {jsonb_expr} IS NULL THEN NULL
-                        WHEN jsonb_typeof({jsonb_expr}) = 'array' THEN
-                            CASE 
-                                WHEN jsonb_array_length({jsonb_expr}) = 0 THEN NULL
-                                ELSE (
-                                    SELECT COUNT(*) = COUNT(CASE WHEN 
-                                        value::text = 'true' THEN 1 END)
-                                    FROM jsonb_array_elements({jsonb_expr}) AS value
-                                    WHERE value::text IN ('true', 'false')
-                                )
-                            END
-                        ELSE 
-                            CASE 
-                                WHEN {jsonb_expr}::text = 'true' THEN true
-                                WHEN {jsonb_expr}::text = 'false' THEN false
-                                ELSE NULL
-                            END
-                    END
-                )"""
-            elif self.func_name == 'allfalse':
-                # Handle both JSONB and TEXT input
-                collection_expr = input_state.sql_fragment
-                if '->>' in collection_expr:
-                    jsonb_expr = collection_expr.replace('->>', '->')
-                else:
-                    jsonb_expr = collection_expr
-                
-                sql_fragment = f"""(
-                    CASE 
-                        WHEN {jsonb_expr} IS NULL THEN NULL
-                        WHEN jsonb_typeof({jsonb_expr}) = 'array' THEN
-                            CASE 
-                                WHEN jsonb_array_length({jsonb_expr}) = 0 THEN NULL
-                                ELSE (
-                                    SELECT COUNT(*) = COUNT(CASE WHEN 
-                                        value::text = 'false' THEN 1 END)
-                                    FROM jsonb_array_elements({jsonb_expr}) AS value
-                                    WHERE value::text IN ('true', 'false')
-                                )
-                            END
-                        ELSE 
-                            CASE 
-                                WHEN {jsonb_expr}::text = 'false' THEN true
-                                WHEN {jsonb_expr}::text = 'true' THEN false
-                                ELSE NULL
-                            END
-                    END
-                )"""
-            elif self.func_name == 'anytrue':
-                # Handle both JSONB and TEXT input
-                collection_expr = input_state.sql_fragment
-                if '->>' in collection_expr:
-                    jsonb_expr = collection_expr.replace('->>', '->')
-                else:
-                    jsonb_expr = collection_expr
-                
-                sql_fragment = f"""(
-                    CASE 
-                        WHEN {jsonb_expr} IS NULL THEN NULL
-                        WHEN jsonb_typeof({jsonb_expr}) = 'array' THEN
-                            CASE 
-                                WHEN jsonb_array_length({jsonb_expr}) = 0 THEN NULL
-                                ELSE (
-                                    SELECT COUNT(CASE WHEN value::text = 'true' THEN 1 END) > 0
-                                    FROM jsonb_array_elements({jsonb_expr}) AS value
-                                    WHERE value::text IN ('true', 'false')
-                                )
-                            END
-                        ELSE 
-                            CASE 
-                                WHEN {jsonb_expr}::text = 'true' THEN true
-                                ELSE false
-                            END
-                    END
-                )"""
-            elif self.func_name == 'anyfalse':
-                # Handle both JSONB and TEXT input
-                collection_expr = input_state.sql_fragment
-                if '->>' in collection_expr:
-                    jsonb_expr = collection_expr.replace('->>', '->')
-                else:
-                    jsonb_expr = collection_expr
-                
-                sql_fragment = f"""(
-                    CASE 
-                        WHEN {jsonb_expr} IS NULL THEN NULL
-                        WHEN jsonb_typeof({jsonb_expr}) = 'array' THEN
-                            CASE 
-                                WHEN jsonb_array_length({jsonb_expr}) = 0 THEN NULL
-                                ELSE (
-                                    SELECT COUNT(CASE WHEN value::text = 'false' THEN 1 END) > 0
-                                    FROM jsonb_array_elements({jsonb_expr}) AS value
-                                    WHERE value::text IN ('true', 'false')
-                                )
-                            END
-                        ELSE 
-                            CASE 
-                                WHEN {jsonb_expr}::text = 'false' THEN true
-                                ELSE false
-                            END
-                    END
-                )"""
-            else:
-                sql_fragment = f"/* {self.func_name} not implemented for PostgreSQL */"
+        if self.func_name == 'alltrue':
+            sql_fragment = context.dialect.generate_boolean_all_true(input_state.sql_fragment)
+        elif self.func_name == 'allfalse':
+            sql_fragment = context.dialect.generate_boolean_all_false(input_state.sql_fragment)
+        elif self.func_name == 'anytrue':
+            sql_fragment = context.dialect.generate_boolean_any_true(input_state.sql_fragment)
+        elif self.func_name == 'anyfalse':
+            sql_fragment = context.dialect.generate_boolean_any_false(input_state.sql_fragment)
+        else:
+            raise ValueError(f"Unknown boolean function: {self.func_name}")
         
-        return self._create_scalar_result(input_state, sql_fragment)
-    
+        return input_state.evolve(
+            sql_fragment=sql_fragment.strip(),
+            is_collection=False,
+            context_mode=ContextMode.SINGLE
+        )
     def _handle_contains_collection(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle contains() for collections.
         
@@ -1282,34 +963,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         # Get the element to search for
         search_element = str(self.args[0])
         
-        if context.dialect.name.upper() == 'DUCKDB':
-            # DuckDB: Check if any element in the JSON array equals the search element
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {input_state.sql_fragment} IS NULL THEN false
-                    WHEN json_type({input_state.sql_fragment}) = 'ARRAY' THEN (
-                        EXISTS (
-                            SELECT 1 FROM json_each({input_state.sql_fragment})
-                            WHERE value = {search_element}
-                        )
-                    )
-                    ELSE {input_state.sql_fragment} = {search_element}
-                END
-            )"""
-        else:  # PostgreSQL
-            # PostgreSQL: Check if any element in the JSONB array equals the search element
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {input_state.sql_fragment} IS NULL THEN false
-                    WHEN jsonb_typeof({input_state.sql_fragment}) = 'array' THEN (
-                        EXISTS (
-                            SELECT 1 FROM jsonb_array_elements({input_state.sql_fragment}) AS elem
-                            WHERE elem = {search_element}
-                        )
-                    )
-                    ELSE {input_state.sql_fragment} = {search_element}
-                END
-            )"""
+        sql_fragment = context.dialect.generate_collection_contains_element(input_state.sql_fragment, search_element)
         
         return self._create_scalar_result(input_state, sql_fragment)
     
@@ -1319,38 +973,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         Returns a collection with all immediate child nodes of all items in the input collection.
         For JSON/JSONB data, this means all direct properties/elements of an object/array.
         """
-        if context.dialect.name.upper() == 'DUCKDB':
-            # DuckDB: Extract all immediate children from JSON object/array
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {input_state.sql_fragment} IS NULL THEN json_array()
-                    WHEN json_type({input_state.sql_fragment}) = 'OBJECT' THEN (
-                        SELECT json_group_array(value)
-                        FROM json_each({input_state.sql_fragment})
-                    )
-                    WHEN json_type({input_state.sql_fragment}) = 'ARRAY' THEN (
-                        SELECT json_group_array(value)
-                        FROM json_each({input_state.sql_fragment})
-                    )
-                    ELSE json_array({input_state.sql_fragment})
-                END
-            )"""
-        else:  # PostgreSQL
-            # PostgreSQL: Extract all immediate children from JSONB object/array
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {input_state.sql_fragment} IS NULL THEN '[]'::jsonb
-                    WHEN jsonb_typeof({input_state.sql_fragment}) = 'object' THEN (
-                        SELECT jsonb_agg(value)
-                        FROM jsonb_each({input_state.sql_fragment})
-                    )
-                    WHEN jsonb_typeof({input_state.sql_fragment}) = 'array' THEN (
-                        SELECT jsonb_agg(value)
-                        FROM jsonb_array_elements({input_state.sql_fragment}) AS value
-                    )
-                    ELSE jsonb_build_array({input_state.sql_fragment})
-                END
-            )"""
+        sql_fragment = context.dialect.generate_children_extraction(input_state.sql_fragment)
         
         return self._create_collection_result(input_state, sql_fragment)
     
@@ -1360,60 +983,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         Returns a collection with all descendant nodes (all nested children at any level)
         of all items in the input collection. This is similar to children() but recursive.
         """
-        if context.dialect.name.upper() == 'DUCKDB':
-            # DuckDB: Recursively extract all descendants using recursive CTE
-            sql_fragment = f"""(
-                WITH RECURSIVE descendants AS (
-                    -- Base case: direct children  
-                    SELECT value, json_type(value) as type, 0 as level
-                    FROM json_each({input_state.sql_fragment})
-                    WHERE json_type({input_state.sql_fragment}) IN ('OBJECT', 'ARRAY')
-                    
-                    UNION ALL
-                    
-                    -- Recursive case: children of children
-                    SELECT child_value.value, json_type(child_value.value) as type, d.level + 1
-                    FROM descendants d
-                    CROSS JOIN json_each(d.value) as child_value
-                    WHERE d.type IN ('OBJECT', 'ARRAY') AND d.level < 10  -- Prevent infinite recursion
-                )
-                SELECT COALESCE(json_group_array(value), json_array()) 
-                FROM descendants
-            )"""
-        else:  # PostgreSQL
-            # PostgreSQL: Recursively extract all descendants using recursive CTE
-            sql_fragment = f"""(
-                WITH RECURSIVE descendants AS (
-                    -- Base case: direct children
-                    SELECT value, jsonb_typeof(value) as type, 0 as level
-                    FROM jsonb_each({input_state.sql_fragment})
-                    WHERE jsonb_typeof({input_state.sql_fragment}) = 'object'
-                    
-                    UNION ALL
-                    
-                    SELECT value, jsonb_typeof(value) as type, 0 as level  
-                    FROM jsonb_array_elements({input_state.sql_fragment}) as value
-                    WHERE jsonb_typeof({input_state.sql_fragment}) = 'array'
-                    
-                    UNION ALL
-                    
-                    -- Recursive case: children of children (objects)
-                    SELECT child_value.value, jsonb_typeof(child_value.value) as type, d.level + 1
-                    FROM descendants d
-                    CROSS JOIN jsonb_each(d.value) as child_value
-                    WHERE d.type = 'object' AND d.level < 10  -- Prevent infinite recursion
-                    
-                    UNION ALL
-                    
-                    -- Recursive case: children of children (arrays)
-                    SELECT child_element as value, jsonb_typeof(child_element) as type, d.level + 1
-                    FROM descendants d
-                    CROSS JOIN jsonb_array_elements(d.value) as child_element
-                    WHERE d.type = 'array' AND d.level < 10  -- Prevent infinite recursion
-                )
-                SELECT COALESCE(jsonb_agg(value), '[]'::jsonb)
-                FROM descendants
-            )"""
+        sql_fragment = context.dialect.generate_recursive_descendants_with_cte(input_state.sql_fragment)
         
         return self._create_collection_result(input_state, sql_fragment)
     
@@ -1423,30 +993,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         Returns true if all items in the collection are distinct (no duplicates).
         Returns true for empty collections and single-item collections.
         """
-        if context.dialect.name.upper() == 'DUCKDB':
-            # DuckDB: Compare total count with distinct count
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {input_state.sql_fragment} IS NULL THEN true
-                    WHEN json_type({input_state.sql_fragment}) = 'ARRAY' THEN (
-                        (SELECT COUNT(*) FROM json_each({input_state.sql_fragment})) = 
-                        (SELECT COUNT(DISTINCT value) FROM json_each({input_state.sql_fragment}))
-                    )
-                    ELSE true  -- Single values are always distinct
-                END
-            )"""
-        else:  # PostgreSQL
-            # PostgreSQL: Compare total count with distinct count  
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {input_state.sql_fragment} IS NULL THEN true
-                    WHEN jsonb_typeof({input_state.sql_fragment}) = 'array' THEN (
-                        (SELECT COUNT(*) FROM jsonb_array_elements({input_state.sql_fragment})) = 
-                        (SELECT COUNT(DISTINCT value) FROM jsonb_array_elements({input_state.sql_fragment}) AS value)
-                    )
-                    ELSE true  -- Single values are always distinct
-                END
-            )"""
+        sql_fragment = context.dialect.generate_collection_distinct_check(input_state.sql_fragment)
         
         return self._create_scalar_result(input_state, sql_fragment)
     
@@ -1463,77 +1010,18 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         
         if self.func_name == 'subsetof':
             # Check if all elements in input_state are also in other_collection
-            if context.dialect.name.upper() == 'DUCKDB':
-                sql_fragment = f"""(
-                    CASE 
-                        WHEN {input_state.sql_fragment} IS NULL THEN true
-                        WHEN json_type({input_state.sql_fragment}) = 'ARRAY' AND json_type({other_collection}) = 'ARRAY' THEN (
-                            NOT EXISTS (
-                                SELECT 1 FROM json_each({input_state.sql_fragment}) AS elem1
-                                WHERE NOT EXISTS (
-                                    SELECT 1 FROM json_each({other_collection}) AS elem2
-                                    WHERE elem1.value = elem2.value
-                                )
-                            )
-                        )
-                        ELSE false
-                    END
-                )"""
-            else:  # PostgreSQL
-                sql_fragment = f"""(
-                    CASE 
-                        WHEN {input_state.sql_fragment} IS NULL THEN true
-                        WHEN jsonb_typeof({input_state.sql_fragment}) = 'array' AND jsonb_typeof({other_collection}) = 'array' THEN (
-                            NOT EXISTS (
-                                SELECT 1 FROM jsonb_array_elements({input_state.sql_fragment}) AS elem1
-                                WHERE NOT EXISTS (
-                                    SELECT 1 FROM jsonb_array_elements({other_collection}) AS elem2
-                                    WHERE elem1 = elem2
-                                )
-                            )
-                        )
-                        ELSE false
-                    END
-                )"""
-        
+            sql_fragment = context.dialect.generate_subset_check(input_state.sql_fragment, other_collection)
         elif self.func_name == 'supersetof':
             # Check if all elements in other_collection are also in input_state
-            if context.dialect.name.upper() == 'DUCKDB':
-                sql_fragment = f"""(
-                    CASE 
-                        WHEN {other_collection} IS NULL THEN true
-                        WHEN json_type({input_state.sql_fragment}) = 'ARRAY' AND json_type({other_collection}) = 'ARRAY' THEN (
-                            NOT EXISTS (
-                                SELECT 1 FROM json_each({other_collection}) AS elem1
-                                WHERE NOT EXISTS (
-                                    SELECT 1 FROM json_each({input_state.sql_fragment}) AS elem2
-                                    WHERE elem1.value = elem2.value
-                                )
-                            )
-                        )
-                        ELSE false
-                    END
-                )"""
-            else:  # PostgreSQL
-                sql_fragment = f"""(
-                    CASE 
-                        WHEN {other_collection} IS NULL THEN true
-                        WHEN jsonb_typeof({input_state.sql_fragment}) = 'array' AND jsonb_typeof({other_collection}) = 'array' THEN (
-                            NOT EXISTS (
-                                SELECT 1 FROM jsonb_array_elements({other_collection}) AS elem1
-                                WHERE NOT EXISTS (
-                                    SELECT 1 FROM jsonb_array_elements({input_state.sql_fragment}) AS elem2
-                                    WHERE elem1 = elem2
-                                )
-                            )
-                        )
-                        ELSE false
-                    END
-                )"""
+            sql_fragment = context.dialect.generate_superset_check(input_state.sql_fragment, other_collection)
         else:
-            raise InvalidArgumentError(f"Unknown set operation: {self.func_name}")
+            raise ValueError(f"Unknown set comparison function: {self.func_name}")
         
-        return self._create_scalar_result(input_state, sql_fragment)
+        return input_state.evolve(
+            sql_fragment=sql_fragment.strip(),
+            is_collection=False,
+            context_mode=ContextMode.SINGLE
+        )
     
     def _handle_iif(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle iif() function (inline if).
@@ -1548,24 +1036,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         true_result = str(self.args[1])
         false_result = str(self.args[2]) if len(self.args) > 2 else "NULL"
         
-        if context.dialect.name.upper() == 'DUCKDB':
-            # DuckDB: Use CASE WHEN for conditional logic
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {condition} IS NULL THEN NULL
-                    WHEN {condition} THEN {true_result}
-                    ELSE {false_result}
-                END
-            )"""
-        else:  # PostgreSQL
-            # PostgreSQL: Use CASE WHEN for conditional logic  
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {condition} IS NULL THEN NULL
-                    WHEN {condition} THEN {true_result}
-                    ELSE {false_result}
-                END
-            )"""
+        sql_fragment = context.dialect.generate_iif_expression(condition, true_result, false_result)
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -1586,42 +1057,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         expression = str(self.args[0])
         max_iterations = 10  # Prevent infinite recursion
         
-        if context.dialect.name.upper() == 'DUCKDB':
-            # DuckDB: Use recursive CTE to apply the expression repeatedly
-            sql_fragment = f"""(
-                WITH RECURSIVE repeat_result AS (
-                    -- Base case: initial input
-                    SELECT {input_state.sql_fragment} as value, 0 as iteration
-                    
-                    UNION ALL
-                    
-                    -- Recursive case: apply expression to previous results
-                    SELECT {expression} as value, iteration + 1
-                    FROM repeat_result
-                    WHERE iteration < {max_iterations} AND value IS NOT NULL
-                )
-                SELECT json_group_array(DISTINCT value) 
-                FROM repeat_result 
-                WHERE value IS NOT NULL
-            )"""
-        else:  # PostgreSQL
-            # PostgreSQL: Use recursive CTE to apply the expression repeatedly
-            sql_fragment = f"""(
-                WITH RECURSIVE repeat_result AS (
-                    -- Base case: initial input  
-                    SELECT {input_state.sql_fragment} as value, 0 as iteration
-                    
-                    UNION ALL
-                    
-                    -- Recursive case: apply expression to previous results
-                    SELECT {expression} as value, iteration + 1
-                    FROM repeat_result
-                    WHERE iteration < {max_iterations} AND value IS NOT NULL
-                )
-                SELECT jsonb_agg(DISTINCT value)
-                FROM repeat_result
-                WHERE value IS NOT NULL
-            )"""
+        sql_fragment = context.dialect.generate_repeat_operation(input_state.sql_fragment, expression, max_iterations)
         
         return self._create_collection_result(input_state, sql_fragment)
     
@@ -1637,65 +1073,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         aggregator_expr = str(self.args[0])
         init_value = str(self.args[1]) if len(self.args) > 1 else "NULL"
         
-        if context.dialect.name.upper() == 'DUCKDB':
-            # DuckDB: Use a subquery to simulate folding/reducing behavior
-            sql_fragment = f"""(
-                WITH RECURSIVE aggregate_result AS (
-                    -- Base case: initialize with first element or init value
-                    SELECT 
-                        CASE 
-                            WHEN {init_value} IS NOT NULL THEN {init_value}
-                            ELSE (SELECT value FROM json_each({input_state.sql_fragment}) LIMIT 1)
-                        END as accumulator,
-                        1 as pos
-                    FROM (SELECT 1) as dummy
-                    WHERE json_type({input_state.sql_fragment}) = 'ARRAY'
-                    
-                    UNION ALL
-                    
-                    -- Recursive case: apply aggregator to each subsequent element
-                    SELECT 
-                        {aggregator_expr} as accumulator,
-                        pos + 1
-                    FROM aggregate_result ar
-                    CROSS JOIN (
-                        SELECT value, ROW_NUMBER() OVER() as rn 
-                        FROM json_each({input_state.sql_fragment})
-                    ) elem
-                    WHERE elem.rn = ar.pos + 1
-                )
-                SELECT accumulator FROM aggregate_result ORDER BY pos DESC LIMIT 1
-            )"""
-        else:  # PostgreSQL
-            # PostgreSQL: Use a subquery to simulate folding/reducing behavior
-            sql_fragment = f"""(
-                WITH RECURSIVE aggregate_result AS (
-                    -- Base case: initialize with first element or init value
-                    SELECT 
-                        CASE 
-                            WHEN {init_value} IS NOT NULL THEN {init_value}
-                            ELSE (SELECT value FROM jsonb_array_elements({input_state.sql_fragment}) LIMIT 1)
-                        END as accumulator,
-                        1 as pos
-                    FROM (SELECT 1) as dummy
-                    WHERE jsonb_typeof({input_state.sql_fragment}) = 'array'
-                    
-                    UNION ALL
-                    
-                    -- Recursive case: apply aggregator to each subsequent element  
-                    SELECT 
-                        {aggregator_expr} as accumulator,
-                        pos + 1
-                    FROM aggregate_result ar
-                    CROSS JOIN (
-                        SELECT value, ROW_NUMBER() OVER() as rn 
-                        FROM jsonb_array_elements({input_state.sql_fragment}) as value
-                    ) elem
-                    WHERE elem.rn = ar.pos + 1
-                )
-                SELECT accumulator FROM aggregate_result ORDER BY pos DESC LIMIT 1
-            )"""
-        
+        sql_fragment = context.dialect.generate_aggregate_operation(input_state.sql_fragment, aggregator_expr, init_value)
         return self._create_scalar_result(input_state, sql_fragment)
     
     def _handle_flatten(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
@@ -1704,48 +1082,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         Flattens a collection by concatenating nested collections into a single collection.
         For example, [[1,2], [3,4]] becomes [1,2,3,4].
         """
-        if context.dialect.name.upper() == 'DUCKDB':
-            # DuckDB: Flatten nested JSON arrays
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {input_state.sql_fragment} IS NULL THEN json_array()
-                    WHEN json_type({input_state.sql_fragment}) = 'ARRAY' THEN (
-                        SELECT json_group_array(nested_value)
-                        FROM (
-                            SELECT 
-                                CASE 
-                                    WHEN json_type(value) = 'ARRAY' THEN 
-                                        (SELECT nested_value FROM json_each(value) AS nested)
-                                    ELSE value
-                                END as nested_value
-                            FROM json_each({input_state.sql_fragment})
-                        ) flattened
-                        WHERE flattened.nested_value IS NOT NULL
-                    )
-                    ELSE json_array({input_state.sql_fragment})
-                END
-            )"""
-        else:  # PostgreSQL
-            # PostgreSQL: Flatten nested JSONB arrays
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {input_state.sql_fragment} IS NULL THEN '[]'::jsonb
-                    WHEN jsonb_typeof({input_state.sql_fragment}) = 'array' THEN (
-                        SELECT jsonb_agg(nested_value)
-                        FROM (
-                            SELECT 
-                                CASE 
-                                    WHEN jsonb_typeof(value) = 'array' THEN 
-                                        (SELECT nested_value FROM jsonb_array_elements(value) AS nested_value)
-                                    ELSE value
-                                END as nested_value
-                            FROM jsonb_array_elements({input_state.sql_fragment}) AS value
-                        ) flattened
-                        WHERE flattened.nested_value IS NOT NULL
-                    )
-                    ELSE jsonb_build_array({input_state.sql_fragment})
-                END
-            )"""
+        sql_fragment = context.dialect.generate_flatten_operation(input_state.sql_fragment)
         
         return self._create_collection_result(input_state, sql_fragment)
     
@@ -1760,65 +1097,13 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         
         collection = str(self.args[0])
         
-        if context.dialect.name.upper() == 'DUCKDB':
-            # DuckDB: Check if input value exists in the collection
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {collection} IS NULL THEN false
-                    WHEN json_type({collection}) = 'ARRAY' THEN (
-                        EXISTS (
-                            SELECT 1 FROM json_each({collection})
-                            WHERE value = {input_state.sql_fragment}
-                        )
-                    )
-                    ELSE {input_state.sql_fragment} = {collection}
-                END
-            )"""
-        else:  # PostgreSQL
-            # PostgreSQL: Check if input value exists in the collection
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {collection} IS NULL THEN false
-                    WHEN jsonb_typeof({collection}) = 'array' THEN (
-                        EXISTS (
-                            SELECT 1 FROM jsonb_array_elements({collection}) AS elem
-                            WHERE elem = {input_state.sql_fragment}
-                        )
-                    )
-                    ELSE {input_state.sql_fragment} = {collection}
-                END
-            )"""
+        sql_fragment = context.dialect.generate_element_in_collection(input_state.sql_fragment, collection)
         
         return self._create_scalar_result(input_state, sql_fragment)
     
     def _handle_single(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle single() function - returns single element or error if not exactly one."""
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {input_state.sql_fragment} IS NULL THEN NULL
-                    WHEN json_type({input_state.sql_fragment}) = 'ARRAY' THEN
-                        CASE 
-                            WHEN json_array_length({input_state.sql_fragment}) = 1 THEN 
-                                json_extract({input_state.sql_fragment}, '$[0]')
-                            ELSE NULL  -- Error: not exactly one element
-                        END
-                    ELSE {input_state.sql_fragment}  -- Single value already
-                END
-            )"""
-        else:  # PostgreSQL
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {input_state.sql_fragment} IS NULL THEN NULL
-                    WHEN jsonb_typeof({input_state.sql_fragment}) = 'array' THEN
-                        CASE 
-                            WHEN jsonb_array_length({input_state.sql_fragment}) = 1 THEN 
-                                {input_state.sql_fragment} -> 0
-                            ELSE NULL  -- Error: not exactly one element
-                        END
-                    ELSE {input_state.sql_fragment}  -- Single value already
-                END
-            )"""
+        sql_fragment = context.dialect.generate_single_element_check(input_state.sql_fragment)
         
         return self._create_scalar_result(input_state, sql_fragment)
     
@@ -1833,34 +1118,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         
         criteria = str(self.args[0])
         
-        if context.dialect.name.upper() == 'DUCKDB':
-            # DuckDB: Check if all elements satisfy the criteria
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {input_state.sql_fragment} IS NULL THEN true
-                    WHEN json_type({input_state.sql_fragment}) = 'ARRAY' THEN (
-                        NOT EXISTS (
-                            SELECT 1 FROM json_each({input_state.sql_fragment})
-                            WHERE NOT ({criteria})
-                        )
-                    )
-                    ELSE ({criteria})
-                END
-            )"""
-        else:  # PostgreSQL
-            # PostgreSQL: Check if all elements satisfy the criteria
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {input_state.sql_fragment} IS NULL THEN true
-                    WHEN jsonb_typeof({input_state.sql_fragment}) = 'array' THEN (
-                        NOT EXISTS (
-                            SELECT 1 FROM jsonb_array_elements({input_state.sql_fragment}) AS value
-                            WHERE NOT ({criteria})
-                        )
-                    )
-                    ELSE ({criteria})
-                END
-            )"""
+        sql_fragment = context.dialect.generate_all_criteria_check(input_state.sql_fragment, criteria)
         
         return self._create_scalar_result(input_state, sql_fragment)
     
@@ -1910,10 +1168,10 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         start_pos = str(self.args[0])
         length_expr = f", {self.args[1]}" if len(self.args) > 1 else ""
         
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = f"substring({input_state.sql_fragment}, {start_pos}{length_expr})"
-        else:  # PostgreSQL
-            sql_fragment = f"substring({input_state.sql_fragment} FROM {start_pos}{' FOR ' + str(self.args[1]) if len(self.args) > 1 else ''})"
+        if len(self.args) > 1:
+            sql_fragment = context.dialect.generate_substring_sql(input_state.sql_fragment, start_pos, str(self.args[1]))
+        else:
+            sql_fragment = context.dialect.generate_substring_sql(input_state.sql_fragment, start_pos)
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -2057,44 +1315,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         # Use dialect-specific string aggregation
         collection_expr = input_state.sql_fragment
         
-        if context.dialect.name == "POSTGRESQL":
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {collection_expr} IS NULL THEN ''
-                    WHEN jsonb_typeof({collection_expr}) = 'array' THEN (
-                        SELECT COALESCE(string_agg(
-                            CASE 
-                                WHEN jsonb_typeof(value) = 'string' THEN value #>> '{{}}'
-                                WHEN jsonb_typeof(value) = 'array' THEN (
-                                    SELECT string_agg(elem #>> '{{}}', {separator})
-                                    FROM jsonb_array_elements(value) AS elem
-                                )
-                                ELSE value #>> '{{}}'
-                            END, {separator}), '')
-                        FROM jsonb_array_elements({collection_expr})
-                    )
-                    ELSE COALESCE({collection_expr} #>> '{{}}', '')
-                END
-            )"""
-        else:  # DuckDB
-            sql_fragment = f"""(
-                CASE 
-                    WHEN {collection_expr} IS NULL THEN ''
-                    WHEN json_type({collection_expr}) = 'ARRAY' THEN (
-                        SELECT COALESCE(string_agg(
-                            CASE 
-                                WHEN json_type(value) = 'ARRAY' THEN (
-                                    SELECT string_agg(json_extract_string(nested_item.value, '$'), {separator})
-                                    FROM json_each(value) AS nested_item
-                                )
-                                ELSE json_extract_string(value, '$')
-                            END, {separator}), '')
-                        FROM json_each({collection_expr}) AS item
-                        WHERE item.value IS NOT NULL
-                    )
-                    ELSE COALESCE(json_extract_string({collection_expr}, '$'), '')
-                END
-            )"""
+        sql_fragment = context.dialect.generate_join_operation(collection_expr, separator)
         
         return self._create_scalar_result(input_state, sql_fragment)
     
@@ -2152,456 +1373,6 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
     # ==========================================
     # TYPE CONVERSION FUNCTIONS (15+ functions)
     # ==========================================
-    
-    def _execute_type_function(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Execute type conversion function with dialect optimization."""
-        
-        if self.func_name == 'toboolean':
-            return self._handle_toboolean(input_state, context)
-        elif self.func_name == 'tostring':
-            return self._handle_tostring(input_state, context)
-        elif self.func_name == 'tointeger':
-            return self._handle_tointeger(input_state, context)
-        elif self.func_name == 'todecimal':
-            return self._handle_todecimal(input_state, context)
-        elif self.func_name == 'todate':
-            return self._handle_todate(input_state, context)
-        elif self.func_name == 'todatetime':
-            return self._handle_todatetime(input_state, context)
-        elif self.func_name == 'totime':
-            return self._handle_totime(input_state, context)
-        elif self.func_name == 'toquantity':
-            return self._handle_toquantity(input_state, context)
-        elif self.func_name == 'quantity':
-            return self._handle_quantity(input_state, context)
-        elif self.func_name == 'valueset':
-            return self._handle_valueset(input_state, context)
-        elif self.func_name == 'code':
-            return self._handle_code(input_state, context)
-        elif self.func_name == 'toconcept':
-            return self._handle_toconcept(input_state, context)
-        elif self.func_name == 'tuple':
-            return self._handle_tuple(input_state, context)
-        elif self.func_name.startswith('converts'):
-            return self._handle_converts_functions(input_state, context)
-        elif self.func_name in ['as', 'is', 'oftype']:
-            return self._handle_type_checking(input_state, context)
-        else:
-            raise ValueError(f"Unknown type function: {self.func_name}")
-    
-    def _handle_toboolean(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle toBoolean() function."""
-        sql_fragment = f"""
-        CASE 
-            WHEN LOWER({input_state.sql_fragment}) IN ('true', '1', 't', 'yes', 'y') THEN TRUE
-            WHEN LOWER({input_state.sql_fragment}) IN ('false', '0', 'f', 'no', 'n') THEN FALSE
-            ELSE NULL
-        END
-        """
-        
-        return input_state.evolve(
-            sql_fragment=sql_fragment.strip(),
-            is_collection=False,
-            context_mode=ContextMode.SINGLE_VALUE
-        )
-    
-    def _handle_tostring(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle toString() function."""
-        sql_fragment = f"CAST({input_state.sql_fragment} AS TEXT)"
-        
-        return input_state.evolve(
-            sql_fragment=sql_fragment,
-            is_collection=False,
-            context_mode=ContextMode.SINGLE_VALUE
-        )
-    
-    def _handle_tointeger(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle toInteger() function."""
-        sql_fragment = f"CAST({input_state.sql_fragment} AS INTEGER)"
-        
-        return input_state.evolve(
-            sql_fragment=sql_fragment,
-            is_collection=False,
-            context_mode=ContextMode.SINGLE_VALUE
-        )
-    
-    def _handle_todecimal(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle toDecimal() function."""
-        sql_fragment = f"CAST({input_state.sql_fragment} AS DECIMAL)"
-        
-        return input_state.evolve(
-            sql_fragment=sql_fragment,
-            is_collection=False,
-            context_mode=ContextMode.SINGLE_VALUE
-        )
-    
-    # Placeholder implementations for remaining type functions
-    def _handle_todate(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle toDate() function.
-        
-        Converts a string to a date value, or returns empty if conversion fails.
-        """
-        sql_fragment = context.dialect.try_cast(input_state.sql_fragment, 'date')
-        return self._create_scalar_result(input_state, sql_fragment)
-    
-    def _handle_todatetime(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle toDateTime() function.
-        
-        Converts a string to a datetime/timestamp value, or returns empty if conversion fails.
-        """
-        sql_fragment = context.dialect.try_cast(input_state.sql_fragment, 'timestamp')
-        return self._create_scalar_result(input_state, sql_fragment)
-    
-    def _handle_totime(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle toTime() function.
-        
-        Converts a string to a time value, or returns empty if conversion fails.
-        """
-        sql_fragment = context.dialect.try_cast(input_state.sql_fragment, 'time')
-        return self._create_scalar_result(input_state, sql_fragment)
-    
-    def _handle_toquantity(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle toQuantity() function.
-        
-        Converts a string or number to a FHIR Quantity. For SQL purposes, we'll try to
-        parse numeric values and return them as decimals.
-        """
-        sql_fragment = context.dialect.try_cast(input_state.sql_fragment, 'decimal')
-        return self._create_scalar_result(input_state, sql_fragment)
-    
-    def _handle_quantity(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle Quantity() constructor function.
-        
-        Creates a FHIR Quantity from value and unit arguments.
-        Expected usage: Quantity(value, unit) or Quantity(value, 'unit_string')
-        """
-        if len(self.args) < 2:
-            raise InvalidArgumentError("Quantity function requires at least 2 arguments: value and unit")
-        
-        # Extract raw values from arguments, handling literal() wrappers
-        value_arg = str(self.args[0])
-        if value_arg.startswith("literal(") and value_arg.endswith(")"):
-            value_arg = value_arg[8:-1]  # Remove literal() wrapper
-        
-        unit_arg = str(self.args[1])
-        if unit_arg.startswith("literal(") and unit_arg.endswith(")"):
-            unit_arg = unit_arg[8:-1]  # Remove literal() wrapper
-        
-        # Remove quotes from unit if it's a string literal
-        if unit_arg.startswith("'") and unit_arg.endswith("'"):
-            unit_arg = unit_arg[1:-1]
-        
-        # Generate JSON object for the quantity
-        json_str = f'{{"value": {value_arg}, "unit": "{unit_arg}"}}'
-        sql_fragment = f"'{json_str}'"
-        
-        return input_state.evolve(
-            sql_fragment=sql_fragment,
-            is_collection=False,
-            context_mode=ContextMode.SINGLE_VALUE
-        )
-    
-    def _handle_valueset(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle System.ValueSet constructor function.
-        
-        Creates a FHIR ValueSet system object with provided properties.
-        Expected usage: System.ValueSet{id: '123'} or ValueSet{id: '123', name: 'test'}
-        """
-        # For system constructors, the arguments come as property assignments
-        # The parser handles these as key-value pairs from the {} syntax
-        if not self.args:
-            # Empty constructor - create minimal ValueSet object
-            json_str = '{"resourceType": "ValueSet"}'
-        else:
-            # Build ValueSet object from provided properties
-            properties = []
-            properties.append('"resourceType": "ValueSet"')
-            
-            # Process arguments as property assignments
-            for i, arg in enumerate(self.args):
-                arg_str = str(arg)
-                # Handle key-value pairs from {id: '123'} syntax
-                if ':' in arg_str:
-                    # Split key-value pair and clean up
-                    key_value = arg_str.split(':', 1)
-                    key = key_value[0].strip().strip("'\"")
-                    value = key_value[1].strip()
-                    
-                    # Ensure value is properly quoted for JSON
-                    if not (value.startswith('"') and value.endswith('"')) and not (value.startswith("'") and value.endswith("'")):
-                        if not value.isdigit() and value not in ['true', 'false', 'null']:
-                            value = f'"{value}"'
-                    elif value.startswith("'") and value.endswith("'"):
-                        value = f'"{value[1:-1]}"'  # Convert single quotes to double quotes for JSON
-                    
-                    properties.append(f'"{key}": {value}')
-                else:
-                    # Handle single values (fallback)
-                    properties.append(f'"value": "{arg_str}"')
-            
-            json_str = '{' + ', '.join(properties) + '}'
-        
-        sql_fragment = f"'{json_str}'"
-        
-        return input_state.evolve(
-            sql_fragment=sql_fragment,
-            is_collection=False,
-            context_mode=ContextMode.SINGLE_VALUE
-        )
-    
-    def _handle_code(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle Code constructor function.
-        
-        Creates a FHIR Code system object with provided properties.
-        Expected usage: Code { code: '8480-6' } or Code { code: '8480-6', system: 'http://loinc.org' }
-        """
-        # For system constructors, the arguments come as property assignments
-        # The parser handles these as key-value pairs from the {} syntax
-        if not self.args:
-            # Empty constructor - create minimal Code object
-            json_str = '{"resourceType": "Code"}'
-        else:
-            # Build Code object from provided properties
-            properties = []
-            properties.append('"resourceType": "Code"')
-            
-            # Process arguments as property assignments
-            for i, arg in enumerate(self.args):
-                arg_str = str(arg)
-                # Handle key-value pairs from {code: '8480-6'} syntax
-                if ':' in arg_str:
-                    # Split key-value pair and clean up
-                    key_value = arg_str.split(':', 1)
-                    key = key_value[0].strip().strip("'\"")
-                    value = key_value[1].strip()
-                    
-                    # Ensure value is properly quoted for JSON
-                    if not (value.startswith('"') and value.endswith('"')) and not (value.startswith("'") and value.endswith("'")):
-                        if not value.isdigit() and value not in ['true', 'false', 'null']:
-                            value = f'"{value}"'
-                    elif value.startswith("'") and value.endswith("'"):
-                        value = f'"{value[1:-1]}"'  # Convert single quotes to double quotes for JSON
-                    
-                    properties.append(f'"{key}": {value}')
-                else:
-                    # Handle single values (fallback)
-                    properties.append(f'"value": "{arg_str}"')
-            
-            json_str = '{' + ', '.join(properties) + '}'
-        
-        sql_fragment = f"'{json_str}'"
-        
-        return input_state.evolve(
-            sql_fragment=sql_fragment,
-            is_collection=False,
-            context_mode=ContextMode.SINGLE_VALUE
-        )
-    
-    def _handle_toconcept(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle ToConcept function.
-        
-        Converts a Code object to a Concept object.
-        Expected usage: ToConcept(Code { code: '8480-6' })
-        """
-        if not self.args:
-            raise InvalidArgumentError("ToConcept function requires 1 argument: a Code object")
-        
-        # The input argument should be a Code object (JSON string)
-        # We need to wrap it in a Concept structure
-        code_sql = self._evaluate_logical_argument(self.args[0], input_state, context)
-        
-        # Generate Concept JSON structure with the Code as the 'codes' property
-        # The expected output format is: Concept { codes: Code { code: '8480-6' } }
-        concept_json = f'{{"resourceType": "Concept", "codes": {code_sql}}}'
-        sql_fragment = f"'{concept_json}'"
-        
-        return input_state.evolve(
-            sql_fragment=sql_fragment,
-            is_collection=False,
-            context_mode=ContextMode.SINGLE_VALUE
-        )
-    
-    def _handle_tuple(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle Tuple constructor function.
-        
-        Creates a CQL Tuple object from key-value pairs.
-        Expected usage: Tuple { Id : 1, Name : 'John' }
-        """
-        # Tuple constructor takes arguments as property assignments from {} syntax
-        if not self.args:
-            # Empty tuple constructor - create empty tuple object
-            json_str = '{}'
-        else:
-            # Build tuple object from provided property assignments
-            properties = []
-            
-            # Process arguments as property assignments
-            for i, arg in enumerate(self.args):
-                arg_str = str(arg)
-                # Handle key-value pairs from { Id : 1, Name : 'John' } syntax
-                if ':' in arg_str:
-                    # Split key-value pair and clean up
-                    key_value = arg_str.split(':', 1)
-                    key = key_value[0].strip().strip("'\"")
-                    value = key_value[1].strip()
-                    
-                    # Ensure value is properly quoted for JSON
-                    if not (value.startswith('"') and value.endswith('"')) and not (value.startswith("'") and value.endswith("'")):
-                        # Check if it's a number, boolean, or null
-                        if not (value.replace('.', '').replace('-', '').isdigit() or value in ['true', 'false', 'null']):
-                            value = f'"{value}"'
-                    elif value.startswith("'") and value.endswith("'"):
-                        value = f'"{value[1:-1]}"'  # Convert single quotes to double quotes for JSON
-                    
-                    properties.append(f'"{key}": {value}')
-                else:
-                    # Handle single values (fallback) - shouldn't happen in tuple constructor
-                    properties.append(f'"value{i}": "{arg_str}"')
-            
-            json_str = '{' + ', '.join(properties) + '}'
-        
-        sql_fragment = f"'{json_str}'"
-        
-        return input_state.evolve(
-            sql_fragment=sql_fragment,
-            is_collection=False,
-            context_mode=ContextMode.SINGLE_VALUE
-        )
-    
-    def _handle_converts_functions(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle convertsTo* functions.
-        
-        These functions test whether a value can be converted to a specific type.
-        They return true/false without performing the actual conversion.
-        """
-        # Extract the target type from function name (e.g., 'convertstoboolean' -> 'boolean')
-        target_type = self.func_name.replace('convertsto', '').lower()
-        
-        if context.dialect.name.upper() == 'DUCKDB':
-            if target_type == 'boolean':
-                # Check if value can be converted to boolean
-                sql_fragment = f"""(
-                    {input_state.sql_fragment} IS NOT NULL AND 
-                    LOWER({input_state.sql_fragment}::text) IN ('true', 'false', '1', '0', 't', 'f', 'yes', 'no')
-                )"""
-            elif target_type in ('integer', 'decimal'):
-                # Check if value is numeric
-                sql_fragment = f"TRY_CAST({input_state.sql_fragment} AS {target_type.upper()}) IS NOT NULL"
-            elif target_type in ('date', 'datetime', 'time'):
-                # Check if value can be converted to temporal type
-                cast_type = 'TIMESTAMP' if target_type == 'datetime' else target_type.upper()
-                sql_fragment = f"TRY_CAST({input_state.sql_fragment} AS {cast_type}) IS NOT NULL"
-            else:
-                # Default: check if not null (can convert to string)
-                sql_fragment = f"{input_state.sql_fragment} IS NOT NULL"
-        else:  # PostgreSQL
-            if target_type == 'boolean':
-                # PostgreSQL boolean conversion check
-                sql_fragment = f"""(
-                    {input_state.sql_fragment} IS NOT NULL AND 
-                    LOWER({input_state.sql_fragment}::text) ~ '^(true|false|t|f|yes|no|y|n|1|0)$'
-                )"""
-            elif target_type in ('integer', 'decimal'):
-                # Check if value matches numeric pattern
-                sql_fragment = f"""(
-                    {input_state.sql_fragment} IS NOT NULL AND
-                    {input_state.sql_fragment}::text ~ '^[+-]?[0-9]*\\.?[0-9]+([eE][+-]?[0-9]+)?$'
-                )"""
-            elif target_type == 'date':
-                # Check date pattern
-                sql_fragment = f"""(
-                    {input_state.sql_fragment} IS NOT NULL AND
-                    {input_state.sql_fragment}::text ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$'
-                )"""
-            elif target_type in ('datetime', 'time'):
-                # Check datetime/time patterns
-                pattern = '^[0-9]{2}:[0-9]{2}:[0-9]{2}' if target_type == 'time' else '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}'
-                sql_fragment = f"""(
-                    {input_state.sql_fragment} IS NOT NULL AND
-                    {input_state.sql_fragment}::text ~ '{pattern}'
-                )"""
-            else:
-                # Default: check if not null
-                sql_fragment = f"{input_state.sql_fragment} IS NOT NULL"
-        
-        return self._create_scalar_result(input_state, sql_fragment)
-    
-    def _handle_type_checking(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle as/is/ofType functions.
-        
-        - as(type): Cast to the specified type, returns empty if cast fails
-        - is(type): Returns true if the value is of the specified type  
-        - ofType(type): Filters a collection to include only items of the specified type
-        """
-        if not self.args:
-            raise InvalidArgumentError(f"{self.func_name}() function requires a type argument")
-        
-        target_type = str(self.args[0]).lower().strip("'\"")
-        
-        if self.func_name == 'as':
-            # Cast to target type, return null if cast fails
-            if context.dialect.name.upper() == 'DUCKDB':
-                if target_type in ('integer', 'decimal', 'boolean', 'date', 'time'):
-                    cast_type = 'TIMESTAMP' if target_type == 'datetime' else target_type.upper()
-                    sql_fragment = f"TRY_CAST({input_state.sql_fragment} AS {cast_type})"
-                else:
-                    sql_fragment = f"CAST({input_state.sql_fragment} AS STRING)"
-            else:  # PostgreSQL
-                # PostgreSQL doesn't have TRY_CAST, so use CASE for safe casting
-                if target_type == 'integer':
-                    sql_fragment = f"""(
-                        CASE WHEN {input_state.sql_fragment}::text ~ '^[+-]?[0-9]+$' 
-                             THEN CAST({input_state.sql_fragment} AS INTEGER)
-                             ELSE NULL END
-                    )"""
-                elif target_type == 'boolean':
-                    sql_fragment = f"""(
-                        CASE WHEN LOWER({input_state.sql_fragment}::text) ~ '^(true|false|t|f|1|0)$'
-                             THEN CAST({input_state.sql_fragment} AS BOOLEAN)
-                             ELSE NULL END
-                    )"""
-                else:
-                    sql_fragment = f"CAST({input_state.sql_fragment} AS TEXT)"
-            
-            return self._create_scalar_result(input_state, sql_fragment)
-            
-        elif self.func_name == 'is':
-            # Check if value is of the specified type
-            if target_type == 'string':
-                sql_fragment = f"(json_typeof({input_state.sql_fragment}) = 'string')" if context.dialect.name.upper() == 'DUCKDB' else f"(jsonb_typeof({input_state.sql_fragment}) = 'string')"
-            elif target_type == 'number':
-                sql_fragment = f"(json_typeof({input_state.sql_fragment}) = 'number')" if context.dialect.name.upper() == 'DUCKDB' else f"(jsonb_typeof({input_state.sql_fragment}) = 'number')"
-            elif target_type == 'boolean':
-                sql_fragment = f"(json_typeof({input_state.sql_fragment}) = 'boolean')" if context.dialect.name.upper() == 'DUCKDB' else f"(jsonb_typeof({input_state.sql_fragment}) = 'boolean')"
-            else:
-                # Default to true for basic type checking
-                sql_fragment = "true"
-            
-            return self._create_scalar_result(input_state, sql_fragment)
-            
-        elif self.func_name == 'oftype':
-            # Filter collection to include only items of specified type
-            if context.dialect.name.upper() == 'DUCKDB':
-                sql_fragment = f"""(
-                    SELECT json_group_array(value)
-                    FROM json_each({input_state.sql_fragment})
-                    WHERE json_typeof(value) = '{target_type}'
-                )"""
-            else:  # PostgreSQL
-                sql_fragment = f"""(
-                    SELECT jsonb_agg(value)
-                    FROM jsonb_array_elements({input_state.sql_fragment}) AS value
-                    WHERE jsonb_typeof(value) = '{target_type}'
-                )"""
-            
-            return self._create_collection_result(input_state, sql_fragment)
-        
-        else:
-            raise InvalidArgumentError(f"Unknown type checking function: {self.func_name}")
-    
-    # ===============================
-    # MATH FUNCTIONS (10+ functions)
-    # ===============================
     
     def _execute_math_function(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Execute math function with dialect optimization."""
@@ -2709,10 +1480,8 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
     # Placeholder implementations for remaining math functions
     def _handle_sqrt(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle sqrt() function."""
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = f"SQRT(CAST({input_state.sql_fragment} AS DECIMAL))"
-        else:  # PostgreSQL
-            sql_fragment = f"SQRT(CAST({input_state.sql_fragment} AS DECIMAL))"
+        cast_operand = f"CAST({input_state.sql_fragment} AS DECIMAL)"
+        sql_fragment = context.dialect.generate_mathematical_function('sqrt', cast_operand)
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -2722,10 +1491,8 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
     
     def _handle_truncate(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle truncate() function."""
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = f"TRUNC(CAST({input_state.sql_fragment} AS DECIMAL))"
-        else:  # PostgreSQL
-            sql_fragment = f"TRUNC(CAST({input_state.sql_fragment} AS DECIMAL))"
+        cast_operand = f"CAST({input_state.sql_fragment} AS DECIMAL)"
+        sql_fragment = context.dialect.generate_mathematical_function('truncate', cast_operand)
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -2735,10 +1502,8 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
     
     def _handle_exp(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle exp() function."""
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = f"EXP(CAST({input_state.sql_fragment} AS DECIMAL))"
-        else:  # PostgreSQL  
-            sql_fragment = f"EXP(CAST({input_state.sql_fragment} AS DECIMAL))"
+        cast_operand = f"CAST({input_state.sql_fragment} AS DECIMAL)"
+        sql_fragment = context.dialect.generate_mathematical_function('exp', cast_operand)
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -2748,10 +1513,8 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
     
     def _handle_ln(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle ln() function."""
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = f"LN(CAST({input_state.sql_fragment} AS DECIMAL))"
-        else:  # PostgreSQL
-            sql_fragment = f"LN(CAST({input_state.sql_fragment} AS DECIMAL))"
+        cast_operand = f"CAST({input_state.sql_fragment} AS DECIMAL)"
+        sql_fragment = context.dialect.generate_mathematical_function('ln', cast_operand)
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -2761,11 +1524,9 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
     
     def _handle_log(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle log() function."""
+        cast_operand = f"CAST({input_state.sql_fragment} AS DECIMAL)"
         base = f", {self.args[0]}" if self.args else ""  # Optional base argument
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = f"LOG(CAST({input_state.sql_fragment} AS DECIMAL){base})"
-        else:  # PostgreSQL
-            sql_fragment = f"LOG(CAST({input_state.sql_fragment} AS DECIMAL){base})"
+        sql_fragment = context.dialect.generate_mathematical_function('log', cast_operand + base)
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -2779,10 +1540,8 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
             raise InvalidArgumentError("power() function requires an exponent argument")
         
         exponent = str(self.args[0])
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = f"POWER(CAST({input_state.sql_fragment} AS DECIMAL), {exponent})"
-        else:  # PostgreSQL
-            sql_fragment = f"POWER(CAST({input_state.sql_fragment} AS DECIMAL), {exponent})"
+        base_expr = f"CAST({input_state.sql_fragment} AS DECIMAL)"
+        sql_fragment = context.dialect.generate_power_operation(base_expr, exponent)
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -2923,19 +1682,8 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         all_operands = [input_state.sql_fragment]
         all_operands.extend(str(arg) for arg in self.args)
         
-        # Generate SQL using database-specific GREATEST function or nested CASE statements
-        if context.dialect.name.upper() == 'POSTGRESQL':
-            # PostgreSQL has GREATEST function that handles multiple arguments
-            operands_str = ', '.join(f"CAST({op} AS DECIMAL)" for op in all_operands)
-            sql_fragment = f"GREATEST({operands_str})"
-        else:
-            # For DuckDB, use nested CASE/WHEN or GREATEST if available
-            if len(all_operands) == 2:
-                sql_fragment = f"CASE WHEN CAST({all_operands[0]} AS DECIMAL) > CAST({all_operands[1]} AS DECIMAL) THEN CAST({all_operands[0]} AS DECIMAL) ELSE CAST({all_operands[1]} AS DECIMAL) END"
-            else:
-                # Use GREATEST function (DuckDB supports it too)
-                operands_str = ', '.join(f"CAST({op} AS DECIMAL)" for op in all_operands)
-                sql_fragment = f"GREATEST({operands_str})"
+        # Generate SQL using dialect-specific max operation
+        sql_fragment = context.dialect.generate_max_operation(all_operands)
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -2952,19 +1700,8 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         all_operands = [input_state.sql_fragment]
         all_operands.extend(str(arg) for arg in self.args)
         
-        # Generate SQL using database-specific LEAST function or nested CASE statements
-        if context.dialect.name.upper() == 'POSTGRESQL':
-            # PostgreSQL has LEAST function that handles multiple arguments
-            operands_str = ', '.join(f"CAST({op} AS DECIMAL)" for op in all_operands)
-            sql_fragment = f"LEAST({operands_str})"
-        else:
-            # For DuckDB, use nested CASE/WHEN or LEAST if available
-            if len(all_operands) == 2:
-                sql_fragment = f"CASE WHEN CAST({all_operands[0]} AS DECIMAL) < CAST({all_operands[1]} AS DECIMAL) THEN CAST({all_operands[0]} AS DECIMAL) ELSE CAST({all_operands[1]} AS DECIMAL) END"
-            else:
-                # Use LEAST function (DuckDB supports it too)
-                operands_str = ', '.join(f"CAST({op} AS DECIMAL)" for op in all_operands)
-                sql_fragment = f"LEAST({operands_str})"
+        # Generate SQL using dialect-specific min operation
+        sql_fragment = context.dialect.generate_min_operation(all_operands)
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -3022,17 +1759,6 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
             context_mode=ContextMode.SINGLE_VALUE
         )
     
-    def _handle_count(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle count() function."""
-        # Count the number of arguments plus input
-        total_count = 1 + len(self.args)
-        sql_fragment = str(total_count)
-        
-        return input_state.evolve(
-            sql_fragment=sql_fragment,
-            is_collection=False,
-            context_mode=ContextMode.SINGLE_VALUE
-        )
     
     def _handle_product(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle product() function."""
@@ -3067,14 +1793,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         all_operands.extend(str(arg) for arg in self.args)
         
         # Use database-specific median calculation
-        if context.dialect.name.upper() == 'POSTGRESQL':
-            # PostgreSQL: PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY expression)
-            operands_str = ', '.join(f"CAST({op} AS DOUBLE PRECISION)" for op in all_operands)
-            sql_fragment = f"PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {operands_str})"
-        else:  # duckdb
-            # DuckDB: MEDIAN(expression)
-            operands_str = ', '.join(f"CAST({op} AS DOUBLE)" for op in all_operands)
-            sql_fragment = f"MEDIAN({operands_str})"
+        sql_fragment = context.dialect.generate_median_operation(all_operands)
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -3120,12 +1839,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         all_operands.extend(str(arg) for arg in self.args)
         
         # Use database-specific population standard deviation function
-        if context.dialect.name.upper() == 'POSTGRESQL':
-            operands_str = ', '.join(f"CAST({op} AS DOUBLE PRECISION)" for op in all_operands)
-            sql_fragment = f"STDDEV_POP({operands_str})"
-        else:  # duckdb  
-            operands_str = ', '.join(f"CAST({op} AS DOUBLE)" for op in all_operands)
-            sql_fragment = f"STDDEV_POP({operands_str})"
+        sql_fragment = context.dialect.generate_population_stddev(all_operands)
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -3143,12 +1857,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         all_operands.extend(str(arg) for arg in self.args)
         
         # Use database-specific population variance function
-        if context.dialect.name.upper() == 'POSTGRESQL':
-            operands_str = ', '.join(f"CAST({op} AS DOUBLE PRECISION)" for op in all_operands)
-            sql_fragment = f"VAR_POP({operands_str})"
-        else:  # duckdb
-            operands_str = ', '.join(f"CAST({op} AS DOUBLE)" for op in all_operands) 
-            sql_fragment = f"VAR_POP({operands_str})"
+        sql_fragment = context.dialect.generate_population_variance(all_operands)
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -3196,10 +1905,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
     
     def _handle_now(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle now() function."""
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = "now()"
-        else:  # PostgreSQL
-            sql_fragment = "now()"
+        sql_fragment = context.dialect.generate_date_time_now()
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -3209,10 +1915,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
     
     def _handle_today(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle today() function."""
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = "current_date"
-        else:  # PostgreSQL
-            sql_fragment = "current_date"
+        sql_fragment = context.dialect.generate_date_time_today()
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -3276,11 +1979,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         second = self._evaluate_logical_argument(self.args[5], input_state, context) if len(self.args) > 5 else "0"
         
         # Generate SQL for DateTime construction
-        if context.dialect.name.upper() == 'POSTGRESQL':
-            sql_fragment = f"make_timestamp({year}, {month}, {day}, {hour}, {minute}, {second})"
-        else:
-            # DuckDB or other dialects
-            sql_fragment = f"make_timestamp({year}, {month}, {day}, {hour}, {minute}, {second})"
+        sql_fragment = context.dialect.generate_datetime_creation(year, month, day, hour, minute, second)
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -3302,10 +2001,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
             birthdate_expr = "json_extract_string(resource, '$.birthDate')"
         
         # Calculate age in years using SQL date functions
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = f"CAST(EXTRACT(year FROM AGE(CURRENT_DATE, CAST({birthdate_expr} AS DATE))) AS INTEGER)"
-        else:  # PostgreSQL
-            sql_fragment = f"EXTRACT(year FROM AGE(CURRENT_DATE, CAST({birthdate_expr} AS DATE)))::INTEGER"
+        sql_fragment = context.dialect.generate_age_in_years(birthdate_expr)
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -3330,10 +2026,7 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
             birthdate_expr = "json_extract_string(resource, '$.birthDate')"
         
         # Calculate age in years using SQL date functions
-        if context.dialect.name.upper() == 'DUCKDB':
-            sql_fragment = f"CAST(EXTRACT(year FROM AGE(CAST({as_of_date_expr} AS DATE), CAST({birthdate_expr} AS DATE))) AS INTEGER)"
-        else:  # PostgreSQL
-            sql_fragment = f"EXTRACT(year FROM AGE(CAST({as_of_date_expr} AS DATE), CAST({birthdate_expr} AS DATE)))::INTEGER"
+        sql_fragment = context.dialect.generate_age_in_years_at(birthdate_expr, as_of_date_expr)
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -3469,298 +2162,45 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
         )
     
     # =========================================
-    # COMPARISON OPERATORS (8+ operators)
+    # FHIR-SPECIFIC FUNCTIONS (2+ functions)
     # =========================================
     
-    def _execute_comparison_function(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Execute comparison operator with dialect optimization."""
+    def _execute_fhir_function(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Execute FHIR-specific functions."""
         
-        if self.func_name == '=':
-            return self._handle_equals(input_state, context)
-        elif self.func_name in ('!=', '<>'):
-            return self._handle_not_equals(input_state, context)
-        elif self.func_name == '<':
-            return self._handle_less_than(input_state, context)
-        elif self.func_name == '<=':
-            return self._handle_less_equals(input_state, context)
-        elif self.func_name == '>':
-            return self._handle_greater_than(input_state, context)
-        elif self.func_name == '>=':
-            return self._handle_greater_equals(input_state, context)
-        elif self.func_name == 'in':
-            return self._handle_in(input_state, context)
-        elif self.func_name == 'contains':
-            return self._handle_contains_comparison(input_state, context)
-        elif self.func_name == '~':
-            return self._handle_equivalent(input_state, context)
+        if self.func_name == 'getvalue':
+            return self._handle_getvalue(input_state, context)
+        elif self.func_name == 'resolve':
+            return self._handle_resolve(input_state, context)
         else:
-            raise ValueError(f"Unknown comparison operator: {self.func_name}")
+            raise ValueError(f"Unknown FHIR function: {self.func_name}")
     
-    def _handle_equals(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle equals (=) operator."""
-        if not self.args:
-            raise ValueError("Equals operator requires at least one argument")
+    def _handle_getvalue(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle getValue() function for extracting primitive values from FHIR elements."""
+        # Use dialect method for getValue primitive SQL
+        sql_fragment = context.dialect.get_value_primitive_sql(input_state.sql_fragment)
         
-        # Get the right operand from arguments
-        if hasattr(self.args[0], 'value'):
-            right_value = f"'{self.args[0].value}'"
-        else:
-            right_value = str(self.args[0])
-        
-        sql_fragment = f"{input_state.sql_fragment} = {right_value}"
-        
-        return SQLState(
-            base_table=input_state.base_table,
-            json_column=input_state.json_column,
-            sql_fragment=sql_fragment,
-            ctes=input_state.ctes.copy(),
-            lateral_joins=input_state.lateral_joins.copy(),
-            context_mode=input_state.context_mode,
-            resource_type=input_state.resource_type,
-            is_collection=False,  # Boolean result is not a collection
-            path_context=input_state.path_context,
-            variable_bindings=input_state.variable_bindings.copy()
+        return input_state.evolve(
+            sql_fragment=sql_fragment.strip(),
+            is_collection=False,
+            context_mode=ContextMode.SINGLE_VALUE
         )
     
-    def _handle_not_equals(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle not equals (!= or <>) operator."""
-        if not self.args:
-            raise ValueError("Not equals operator requires at least one argument")
+    def _handle_resolve(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+        """Handle resolve() function for FHIR reference resolution."""
+        # Use dialect method for resolve reference SQL
+        base_expr = input_state.sql_fragment
+        sql_fragment = context.dialect.resolve_reference_sql(base_expr)
         
-        # Get the right operand from arguments
-        if hasattr(self.args[0], 'value'):
-            right_value = f"'{self.args[0].value}'"
-        else:
-            right_value = str(self.args[0])
-        
-        sql_fragment = f"{input_state.sql_fragment} != {right_value}"
-        
-        return SQLState(
-            base_table=input_state.base_table,
-            json_column=input_state.json_column,
-            sql_fragment=sql_fragment,
-            ctes=input_state.ctes.copy(),
-            lateral_joins=input_state.lateral_joins.copy(),
-            context_mode=input_state.context_mode,
-            resource_type=input_state.resource_type,
-            is_collection=False,  # Boolean result is not a collection
-            path_context=input_state.path_context,
-            variable_bindings=input_state.variable_bindings.copy()
+        return input_state.evolve(
+            sql_fragment=sql_fragment.strip(),
+            is_collection=False,  # resolve() returns a single resource, not an array
+            context_mode=ContextMode.SINGLE_VALUE
         )
-    
-    def _handle_less_than(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle less than (<) operator."""
-        if not self.args:
-            raise ValueError("Less than operator requires at least one argument")
-        
-        # Get the right operand from arguments - properly evaluate function calls
-        if hasattr(self.args[0], 'value'):
-            right_value = str(self.args[0].value)
-        else:
-            # For complex objects like function calls, evaluate them properly
-            try:
-                right_value = self._evaluate_union_argument(self.args[0], input_state, context)
-            except Exception:
-                # Fallback to string representation
-                right_value = str(self.args[0])
-        
-        sql_fragment = f"{input_state.sql_fragment} < {right_value}"
-        
-        return SQLState(
-            base_table=input_state.base_table,
-            json_column=input_state.json_column,
-            sql_fragment=sql_fragment,
-            ctes=input_state.ctes.copy(),
-            lateral_joins=input_state.lateral_joins.copy(),
-            context_mode=input_state.context_mode,
-            resource_type=input_state.resource_type,
-            is_collection=False,  # Boolean result is not a collection
-            path_context=input_state.path_context,
-            variable_bindings=input_state.variable_bindings.copy()
-        )
-    
-    def _handle_less_equals(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle less than or equals (<=) operator."""
-        if not self.args:
-            raise ValueError("Less than or equals operator requires at least one argument")
-        
-        # Get the right operand from arguments - properly evaluate function calls
-        if hasattr(self.args[0], 'value'):
-            right_value = str(self.args[0].value)
-        else:
-            # For complex objects like function calls, evaluate them properly
-            try:
-                right_value = self._evaluate_union_argument(self.args[0], input_state, context)
-            except Exception:
-                # Fallback to string representation
-                right_value = str(self.args[0])
-        
-        sql_fragment = f"{input_state.sql_fragment} <= {right_value}"
-        
-        return SQLState(
-            base_table=input_state.base_table,
-            json_column=input_state.json_column,
-            sql_fragment=sql_fragment,
-            ctes=input_state.ctes.copy(),
-            lateral_joins=input_state.lateral_joins.copy(),
-            context_mode=input_state.context_mode,
-            resource_type=input_state.resource_type,
-            is_collection=False,  # Boolean result is not a collection
-            path_context=input_state.path_context,
-            variable_bindings=input_state.variable_bindings.copy()
-        )
-    
-    def _handle_greater_than(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle greater than (>) operator."""
-        if not self.args:
-            raise ValueError("Greater than operator requires at least one argument")
-        
-        # Get the right operand from arguments - properly evaluate function calls
-        if hasattr(self.args[0], 'value'):
-            right_value = str(self.args[0].value)
-        else:
-            # For complex objects like function calls, evaluate them properly
-            try:
-                right_value = self._evaluate_union_argument(self.args[0], input_state, context)
-            except Exception:
-                # Fallback to string representation
-                right_value = str(self.args[0])
-        
-        sql_fragment = f"{input_state.sql_fragment} > {right_value}"
-        
-        return SQLState(
-            base_table=input_state.base_table,
-            json_column=input_state.json_column,
-            sql_fragment=sql_fragment,
-            ctes=input_state.ctes.copy(),
-            lateral_joins=input_state.lateral_joins.copy(),
-            context_mode=input_state.context_mode,
-            resource_type=input_state.resource_type,
-            is_collection=False,  # Boolean result is not a collection
-            path_context=input_state.path_context,
-            variable_bindings=input_state.variable_bindings.copy()
-        )
-    
-    def _handle_greater_equals(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle greater than or equals (>=) operator."""
-        if not self.args:
-            raise ValueError("Greater than or equals operator requires at least one argument")
-        
-        # Get the right operand from arguments - properly evaluate function calls
-        if hasattr(self.args[0], 'value'):
-            right_value = str(self.args[0].value)
-        else:
-            # For complex objects like function calls, evaluate them properly
-            try:
-                right_value = self._evaluate_union_argument(self.args[0], input_state, context)
-            except Exception:
-                # Fallback to string representation
-                right_value = str(self.args[0])
-        
-        sql_fragment = f"{input_state.sql_fragment} >= {right_value}"
-        
-        return SQLState(
-            base_table=input_state.base_table,
-            json_column=input_state.json_column,
-            sql_fragment=sql_fragment,
-            ctes=input_state.ctes.copy(),
-            lateral_joins=input_state.lateral_joins.copy(),
-            context_mode=input_state.context_mode,
-            resource_type=input_state.resource_type,
-            is_collection=False,  # Boolean result is not a collection
-            path_context=input_state.path_context,
-            variable_bindings=input_state.variable_bindings.copy()
-        )
-    
-    def _handle_in(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle 'in' operator."""
-        if not self.args:
-            raise ValueError("In operator requires at least one argument")
-        
-        # Handle collection argument for IN clause
-        if isinstance(self.args[0], (list, tuple)):
-            values = [f"'{v}'" if isinstance(v, str) else str(v) for v in self.args[0]]
-            right_value = f"({', '.join(values)})"
-        else:
-            right_value = f"({self.args[0]})"
-        
-        sql_fragment = f"{input_state.sql_fragment} IN {right_value}"
-        
-        return SQLState(
-            base_table=input_state.base_table,
-            json_column=input_state.json_column,
-            sql_fragment=sql_fragment,
-            ctes=input_state.ctes.copy(),
-            lateral_joins=input_state.lateral_joins.copy(),
-            context_mode=input_state.context_mode,
-            resource_type=input_state.resource_type,
-            is_collection=False,  # Boolean result is not a collection
-            path_context=input_state.path_context,
-            variable_bindings=input_state.variable_bindings.copy()
-        )
-    
-    def _handle_contains_comparison(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle 'contains' comparison operator."""
-        if not self.args:
-            raise ValueError("Contains operator requires at least one argument")
-        
-        # Get the search value
-        if hasattr(self.args[0], 'value'):
-            search_value = f"'%{self.args[0].value}%'"
-        else:
-            search_value = f"'%{self.args[0]}%'"
-        
-        # Use LIKE for contains functionality
-        sql_fragment = f"{input_state.sql_fragment} LIKE {search_value}"
-        
-        return SQLState(
-            base_table=input_state.base_table,
-            json_column=input_state.json_column,
-            sql_fragment=sql_fragment,
-            ctes=input_state.ctes.copy(),
-            lateral_joins=input_state.lateral_joins.copy(),
-            context_mode=input_state.context_mode,
-            resource_type=input_state.resource_type,
-            is_collection=False,  # Boolean result is not a collection
-            path_context=input_state.path_context,
-            variable_bindings=input_state.variable_bindings.copy()
-        )
-    
-    def _handle_equivalent(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
-        """Handle equivalent (~) operator with type-aware comparison."""
-        if not self.args:
-            raise ValueError("Equivalent operator requires at least one argument")
-        
-        # Convert argument to SQL fragment - use logical argument evaluator like other operators
-        right_sql = self._evaluate_logical_argument(self.args[0], input_state, context)
-        
-        # The equivalent operator (~) performs type-aware comparison
-        # For numeric types, it compares values accounting for type coercion
-        # For example, 5 ~ 5.0 should return true even though types differ
-        # Simplified version for DuckDB - try numeric conversion first
-        sql_fragment = f"""(
-            CASE 
-                -- Try to compare as numbers first
-                WHEN TRY_CAST({input_state.sql_fragment} AS DECIMAL) IS NOT NULL 
-                     AND TRY_CAST({right_sql} AS DECIMAL) IS NOT NULL THEN
-                    CAST({input_state.sql_fragment} AS DECIMAL) = CAST({right_sql} AS DECIMAL)
-                -- Otherwise, compare as strings
-                ELSE {input_state.sql_fragment} = {right_sql}
-            END
-        )"""
-        
-        return SQLState(
-            base_table=input_state.base_table,
-            json_column=input_state.json_column,
-            sql_fragment=sql_fragment,
-            ctes=input_state.ctes.copy(),
-            lateral_joins=input_state.lateral_joins.copy(),
-            context_mode=input_state.context_mode,
-            resource_type=input_state.resource_type,
-            is_collection=False,  # Boolean result is not a collection
-            path_context=input_state.path_context,
-            variable_bindings=input_state.variable_bindings.copy()
-        )
+
+    # =========================================
+    # COMPARISON OPERATORS (8+ operators)
+    # =========================================
     
     def _execute_logical_function(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Execute logical operator with three-valued logic."""
@@ -4686,57 +3126,13 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
                         logger.debug(f"Inferred resource type from define name '{current_define_name}': {resource_type}")
                         break
         
-        # Method 7: THREAD-LOCAL HACK - Check for globally stored resource type hint
-        # This is a temporary workaround for the CQL to RetrieveNode conversion issue
-        else:
-            import threading
-            current_thread = threading.current_thread()
-            if hasattr(current_thread, 'fhir4ds_current_resource_type'):
-                resource_type = current_thread.fhir4ds_current_resource_type
-                logger.debug(f"Using thread-local resource type: {resource_type}")
+        # Method 7: REMOVED - Thread-local hack eliminated (proper pipeline context flows through ExecutionContext)
         
-        # Method 8: BRUTE FORCE - Use call stack analysis to find define name
-        if resource_type == "Patient":  # Still default, try harder
-            try:
-                import inspect
-                import re
-                # Look through the call stack for define names
-                for frame_info in inspect.stack():
-                    frame_locals = frame_info.frame.f_locals
-                    frame_globals = frame_info.frame.f_globals
-                    
-                    # Look for define names in locals and globals
-                    for var_name, var_value in list(frame_locals.items()) + list(frame_globals.items()):
-                        if isinstance(var_value, str):
-                            var_lower = var_value.lower()
-                            # Check if it matches known define patterns from the notebook
-                            if 'has asthma' in var_lower or 'asthma' in var_lower:
-                                resource_type = 'Condition'
-                                logger.debug(f"Stack analysis found Condition hint in {var_name}: {resource_type}")
-                                break
-                            elif 'has encounters' in var_lower or 'encounter' in var_lower:
-                                resource_type = 'Encounter'
-                                logger.debug(f"Stack analysis found Encounter hint in {var_name}: {resource_type}")
-                                break
-                            elif ('has controller medications' in var_lower or 
-                                  'has medications' in var_lower or 
-                                  'medication' in var_lower or
-                                  'medicationdispense' in var_lower):
-                                resource_type = 'MedicationDispense'
-                                logger.debug(f"Stack analysis found MedicationDispense hint in {var_name}: {resource_type}")
-                                break
-                    
-                    if resource_type != "Patient":
-                        break
-                        
-            except Exception:
-                pass  # Stack analysis failed, continue with Patient default
+        # Method 8: REMOVED - Call stack introspection eliminated (proper context flows through pipeline)
+        # If resource_type is still "Patient" here, that's fine - the pipeline provides proper context
         
         # Generate SQL for resource retrieval based on dialect
-        if context.dialect.name.upper() == 'DUCKDB':
-            resource_query = self._generate_duckdb_resource_query(input_state, resource_type)
-        else:  # PostgreSQL
-            resource_query = self._generate_postgresql_resource_query(input_state, resource_type)
+        resource_query = context.dialect.generate_resource_query(input_state, resource_type)
         
         logger.info(f"🔧 Generated resource query for {resource_type}: {resource_query[:100]}...")
         
@@ -4749,31 +3145,6 @@ class FunctionCallOperation(PipelineOperation[SQLState]):
             path_context="$"  # Reset to root context for retrieved resources
         )
     
-    def _generate_duckdb_resource_query(self, input_state: SQLState, resource_type: str) -> str:
-        """Generate DuckDB-specific SQL for resource retrieval."""
-        base_table = input_state.base_table or "fhir_resources"
-        json_column = input_state.json_column or "resource"
-        
-        return f"""
-        (
-            SELECT {json_column}
-            FROM {base_table}
-            WHERE json_extract_string({json_column}, '$.resourceType') = '{resource_type}'
-        )
-        """
-    
-    def _generate_postgresql_resource_query(self, input_state: SQLState, resource_type: str) -> str:
-        """Generate PostgreSQL-specific SQL for resource retrieval.""" 
-        base_table = input_state.base_table or "fhir_resources"
-        json_column = input_state.json_column or "resource"
-        
-        return f"""
-        (
-            SELECT {json_column}
-            FROM {base_table}
-            WHERE ({json_column} ->> 'resourceType') = '{resource_type}'
-        )
-        """
 
 
 class DefineReferenceOperation(PipelineOperation[SQLState]):
@@ -4860,11 +3231,8 @@ class DefineReferenceOperation(PipelineOperation[SQLState]):
         elif expression == 'Now()':
             # Create a NowOperation similar to TodayOperation
             from .literals import LiteralOperation
-            # For now, use current_timestamp
-            if hasattr(context, 'dialect') and getattr(context.dialect, 'name', '').upper() == 'DUCKDB':
-                sql_fragment = "current_timestamp"
-            else:
-                sql_fragment = "current_timestamp"
+            # For now, use current_timestamp (works for both DuckDB and PostgreSQL)
+            sql_fragment = "current_timestamp"
             return state.evolve(
                 sql_fragment=sql_fragment,
                 is_collection=False,
