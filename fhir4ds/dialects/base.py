@@ -14,6 +14,9 @@ if TYPE_CHECKING:
     from .context import ExtractionContext, ComparisonContext
 import re
 
+# Import FHIR type registry for configuration-driven type handling
+from ..fhir.type_registry import FHIRTypeRegistry
+
 
 class DatabaseDialect(ABC):
     """Abstract base class for database dialect implementations"""
@@ -48,6 +51,7 @@ class DatabaseDialect(ABC):
         self.name = self.__class__.__name__.replace('Dialect', '').upper()
         self.supports_jsonb = False
         self.supports_json_functions = True
+        self.fhir_types = FHIRTypeRegistry()
         self.json_type = "JSON"
         self.json_extract_function = "json_extract"
         self.json_extract_string_function = "json_extract_string"
@@ -153,6 +157,352 @@ class DatabaseDialect(ABC):
         """Extract string value from JSON path."""
         pass
     
+    def generate_fhir_type_display(self, input_sql: str, fhir_type: str, 
+                                   array_handling: str = "first") -> str:
+        """
+        Generate SQL for displaying FHIR complex types.
+        
+        Args:
+            input_sql: Base SQL expression 
+            fhir_type: FHIR type (HumanName, Address, etc.)
+            array_handling: How to handle arrays ("first", "concat", "all")
+        """
+        type_structure = self.fhir_types.get_type_structure(fhir_type)
+        if not type_structure:
+            return input_sql
+            
+        return self._generate_type_display_sql(input_sql, type_structure, array_handling)
+    
+    @abstractmethod
+    def _generate_type_display_sql(self, input_sql: str, type_structure: Dict[str, Any], 
+                                   array_handling: str) -> str:
+        """Dialect-specific implementation of type display generation."""
+        pass
+    
+    def _apply_display_template(self, template: str, field_extractions: Dict[str, str]) -> str:
+        """
+        Apply display template with field extractions.
+        
+        Args:
+            template: Display template string (e.g., "{family}, {given.join(' ')}")
+            field_extractions: Dictionary mapping field names to SQL expressions
+            
+        Returns:
+            SQL expression implementing the template
+        """
+        # Simple template implementation for now - can be enhanced later
+        # Replace {field} patterns with corresponding SQL expressions
+        result = template
+        for field, sql_expr in field_extractions.items():
+            simple_pattern = f"{{{field}}}"
+            if simple_pattern in result:
+                result = result.replace(simple_pattern, sql_expr)
+        
+        return result
+    
+    # Abstract methods for function-specific SQL generation
+    # These replace hardcoded dialect conditionals in functions.py
+    
+    @abstractmethod
+    def generate_array_contains(self, array_sql: str, element_sql: str) -> str:
+        """Generate SQL to check if array contains element."""
+        pass
+
+    @abstractmethod  
+    def generate_array_length(self, array_sql: str) -> str:
+        """Generate SQL to get array length."""
+        pass
+
+    @abstractmethod
+    def generate_substring_sql(self, string_sql: str, start_pos: str, length: Optional[str] = None) -> str:
+        """Generate SQL for substring operation.""" 
+        pass
+
+    @abstractmethod
+    def generate_string_split(self, string_sql: str, delimiter: str) -> str:
+        """Generate SQL to split string into array."""
+        pass
+
+    @abstractmethod
+    def generate_array_element_at(self, array_sql: str, index: int) -> str:
+        """Generate SQL to get array element at index."""
+        pass
+
+    @abstractmethod
+    def generate_case_insensitive_like(self, field_sql: str, pattern: str) -> str:
+        """Generate SQL for case-insensitive pattern matching."""
+        pass
+
+    @abstractmethod
+    def generate_regexp_match(self, field_sql: str, pattern: str) -> str:
+        """Generate SQL for regex pattern matching."""
+        pass
+
+    @abstractmethod
+    def generate_date_arithmetic(self, date_sql: str, interval: str, unit: str) -> str:
+        """Generate SQL for date arithmetic operations."""
+        pass
+
+    @abstractmethod
+    def generate_cast_to_numeric(self, value_sql: str) -> str:
+        """Generate SQL to cast value to numeric type."""
+        pass
+
+    @abstractmethod
+    def generate_null_coalesce(self, *expressions: str) -> str:
+        """Generate SQL for null coalescing."""
+        pass
+    
+    @abstractmethod
+    def generate_json_typeof(self, json_expr: str) -> str:
+        """Generate SQL to get JSON value type."""
+        pass
+    
+    @abstractmethod
+    def generate_string_concat(self, *expressions: str) -> str:
+        """Generate SQL for string concatenation."""
+        pass
+    
+    @abstractmethod
+    def generate_json_array_length(self, json_expr: str) -> str:
+        """Generate SQL to get JSON array length."""
+        pass
+    
+    @abstractmethod
+    def generate_json_extract(self, json_expr: str, path: str) -> str:
+        """Generate SQL to extract JSON path."""
+        pass
+    
+    @abstractmethod
+    def generate_json_extract_last(self, json_expr: str) -> str:
+        """Generate SQL to extract last element from JSON array."""
+        pass
+    
+    @abstractmethod
+    def generate_collection_contains_element(self, collection_expr: str, element_expr: str) -> str:
+        """Generate SQL to check if collection contains specific element."""
+        pass
+    
+    @abstractmethod 
+    def generate_element_in_collection(self, element_expr: str, collection_expr: str) -> str:
+        """Generate SQL to check if element exists in collection."""
+        pass
+    
+    @abstractmethod
+    def generate_logical_combine(self, left_condition: str, operator: str, right_condition: str) -> str:
+        """Generate SQL to combine two logical conditions with AND/OR operator."""
+        pass
+    
+    @abstractmethod
+    def generate_collection_combine(self, first_collection: str, second_collection: str) -> str:
+        """Generate SQL to combine two collections."""
+        pass
+    
+    @abstractmethod
+    def generate_where_clause_filter(self, collection_expr: str, condition_sql: str) -> str:
+        """Generate SQL to filter collection elements based on condition."""
+        pass
+    
+    @abstractmethod
+    def generate_select_transformation(self, collection_expr: str, transform_path: str) -> str:
+        """Generate SQL to transform collection elements by extracting a path."""
+        pass
+    
+    @abstractmethod
+    def generate_json_path_query_array(self, json_expr: str, path_condition: str) -> str:
+        """Generate SQL for JSON path query with filtering."""
+        pass
+    
+    @abstractmethod
+    def generate_json_group_array_with_condition(self, collection_expr: str, condition: str, value_expr: str = "value") -> str:
+        """Generate SQL to create JSON array from filtered elements."""
+        pass
+    
+    @abstractmethod
+    def generate_single_element_check(self, collection_expr: str) -> str:
+        """Generate SQL to check if collection has exactly one element and return it."""
+        pass
+    
+    @abstractmethod
+    def generate_array_slice_operation(self, array_expr: str, start_index: int, count: int = None) -> str:
+        """Generate SQL to slice array (skip/take operations)."""
+        pass
+    
+    @abstractmethod
+    def generate_array_tail_operation(self, array_expr: str) -> str:
+        """Generate SQL to get all elements except first (tail operation)."""
+        pass
+    
+    @abstractmethod
+    def generate_array_distinct_operation(self, array_expr: str) -> str:
+        """Generate SQL to get distinct elements from array."""
+        pass
+    
+    @abstractmethod
+    def generate_descendants_operation(self, base_expr: str) -> str:
+        """Generate SQL to get all descendant elements recursively."""
+        pass
+    
+    @abstractmethod
+    def generate_union_operation(self, first_collection: str, second_collection: str) -> str:
+        """Generate SQL to union two collections."""
+        pass
+    
+    @abstractmethod
+    def generate_mathematical_function(self, func_name: str, operand: str) -> str:
+        """Generate SQL for mathematical functions (sqrt, ln, exp, etc.)."""
+        pass
+    
+    @abstractmethod
+    def generate_date_time_now(self) -> str:
+        """Generate SQL for current timestamp."""
+        pass
+    
+    @abstractmethod
+    def generate_date_time_today(self) -> str:
+        """Generate SQL for current date."""
+        pass
+    
+    @abstractmethod 
+    def generate_conditional_expression(self, condition: str, true_expr: str, false_expr: str) -> str:
+        """Generate SQL for conditional (iif) expression."""
+        pass
+    
+    @abstractmethod
+    def generate_power_operation(self, base_expr: str, exponent_expr: str) -> str:
+        """Generate SQL for power operation with two operands."""
+        pass
+    
+    @abstractmethod
+    def generate_conversion_functions(self, conversion_type: str, operand: str) -> str:
+        """Generate SQL for type conversion functions."""
+        pass
+    
+    @abstractmethod
+    def generate_recursive_descendants_with_cte(self, base_expr: str, max_levels: int = 5) -> str:
+        """Generate SQL for recursive descendants using CTE."""
+        pass
+    
+    @abstractmethod
+    def generate_type_filtering_operation(self, collection_expr: str, type_criteria: str) -> str:
+        """Generate SQL for filtering collection by type criteria."""
+        pass
+    
+    @abstractmethod
+    def generate_set_intersection_operation(self, first_set: str, second_set: str) -> str:
+        """Generate SQL for set intersection operation."""
+        pass
+    
+    @abstractmethod
+    def generate_aggregate_with_condition(self, collection_expr: str, aggregate_type: str, condition: str) -> str:
+        """Generate SQL for aggregation with filtering condition."""
+        pass
+    
+    @abstractmethod
+    def generate_all_elements_match_criteria(self, collection_expr: str, criteria: str) -> str:
+        """Generate SQL to check if all elements match criteria."""
+        pass
+    
+    @abstractmethod
+    def generate_path_condition_comparison(self, left_expr: str, operator: str, right_expr: str, context_item: str = '$ITEM') -> str:
+        """Generate SQL for path-based condition comparison."""
+        pass
+    
+    @abstractmethod
+    def generate_field_equality_condition(self, field_path: str, value: str, context_item: str = '$ITEM') -> str:
+        """Generate SQL for field equality condition (e.g., use = 'official')."""
+        pass
+    
+    @abstractmethod
+    def generate_field_extraction(self, item_placeholder: str, field_name: str) -> str:
+        """Generate SQL for field extraction from JSON."""
+        pass
+    
+    @abstractmethod
+    def generate_field_exists_check(self, item_placeholder: str, field_name: str) -> str:
+        """Generate SQL to check if field exists (is not null)."""
+        pass
+    
+    @abstractmethod
+    def generate_field_count_operation(self, item_placeholder: str, field_name: str) -> str:
+        """Generate SQL to count elements in a field array."""
+        pass
+    
+    @abstractmethod
+    def generate_field_length_operation(self, item_placeholder: str, field_name: str) -> str:
+        """Generate SQL to get length of a field string."""
+        pass
+    
+    @abstractmethod
+    def generate_path_expression_extraction(self, item_placeholder: str, path_expr: str) -> str:
+        """Generate SQL for complex path expression extraction (e.g., name.family.value)."""
+        pass
+    
+    @abstractmethod
+    def generate_exclude_operation(self, first_collection: str, second_collection: str) -> str:
+        """Generate SQL for exclude operation - elements in first but not in second collection."""
+        pass
+    
+    @abstractmethod
+    def generate_boolean_all_true(self, collection_expr: str) -> str:
+        """Generate SQL to check if all elements in collection are true."""
+        pass
+    
+    @abstractmethod
+    def generate_boolean_all_false(self, collection_expr: str) -> str:
+        """Generate SQL to check if all elements in collection are false."""
+        pass
+    
+    @abstractmethod
+    def generate_boolean_any_true(self, collection_expr: str) -> str:
+        """Generate SQL to check if any element in collection is true."""
+        pass
+    
+    @abstractmethod
+    def generate_boolean_any_false(self, collection_expr: str) -> str:
+        """Generate SQL to check if any element in collection is false."""
+        pass
+    
+    @abstractmethod
+    def generate_children_extraction(self, collection_expr: str) -> str:
+        """Generate SQL to extract all immediate children from JSON object/array."""
+        pass
+    
+    @abstractmethod
+    def generate_tail_operation(self, array_expr: str) -> str:
+        """Generate SQL to get all elements except the first (tail operation)."""
+        pass
+    
+    @abstractmethod
+    def generate_collection_contains_element(self, collection_expr: str, search_element: str) -> str:
+        """Generate SQL to check if collection contains specific element."""
+        pass
+    
+    @abstractmethod
+    def generate_subset_check(self, first_collection: str, second_collection: str) -> str:
+        """Generate SQL to check if first collection is subset of second collection."""
+        pass
+    
+    @abstractmethod
+    def generate_superset_check(self, first_collection: str, second_collection: str) -> str:
+        """Generate SQL to check if first collection is superset of second collection."""
+        pass
+    
+    @abstractmethod
+    def generate_repeat_operation(self, input_expr: str, expression: str, max_iterations: int = 10) -> str:
+        """Generate SQL for repeat operation with recursive CTE."""
+        pass
+    
+    @abstractmethod
+    def generate_aggregate_operation(self, collection_expr: str, aggregator_expr: str, init_value: str = "NULL") -> str:
+        """Generate SQL for aggregate/fold operation."""
+        pass
+    
+    @abstractmethod
+    def generate_iif_expression(self, condition: str, true_result: str, false_result: str) -> str:
+        """Generate SQL for inline if expression."""
+        pass
+    
     def array_agg(self, expression: str, distinct: bool = False) -> str:
         """Generate array aggregation SQL for the dialect"""
         if distinct:
@@ -176,6 +526,38 @@ class DatabaseDialect(ABC):
     def quote_identifier(self, identifier: str) -> str:
         """Quote an identifier for the dialect"""
         return f"{self.quote_char}{identifier}{self.quote_char}"
+    
+    # Pipeline-specific dialect methods for refactoring hardcoded logic
+    
+    def string_split_reference(self, input_sql: str) -> str:
+        """Split reference string like 'ResourceType/id' to extract id part"""
+        # Default implementation - to be overridden by specific dialects
+        raise NotImplementedError(f"string_split_reference not implemented for {self.name}")
+    
+    def starts_with_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate starts_with condition for field matching"""
+        # Default implementation - to be overridden by specific dialects  
+        raise NotImplementedError(f"starts_with_condition not implemented for {self.name}")
+    
+    def ends_with_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate ends_with condition for field matching"""
+        # Default implementation - to be overridden by specific dialects
+        raise NotImplementedError(f"ends_with_condition not implemented for {self.name}")
+    
+    def contains_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate contains condition for field matching"""
+        # Default implementation - to be overridden by specific dialects
+        raise NotImplementedError(f"contains_condition not implemented for {self.name}")
+    
+    def get_value_primitive_sql(self, input_sql: str) -> str:
+        """Generate SQL for getValue() function handling primitive and complex types"""
+        # Default implementation - to be overridden by specific dialects
+        raise NotImplementedError(f"get_value_primitive_sql not implemented for {self.name}")
+    
+    def resolve_reference_sql(self, input_sql: str) -> str:
+        """Generate SQL for resolve() function to resolve FHIR references"""
+        # Default implementation - to be overridden by specific dialects
+        raise NotImplementedError(f"resolve_reference_sql not implemented for {self.name}")
     
     def translate_sql(self, sql: str) -> str:
         """
@@ -518,6 +900,96 @@ class DatabaseDialect(ABC):
         # Default implementation - get array length and use index
         return f"json_extract({array_expr}, '$[' || ({self.get_json_array_length(array_expr)} - 1) || ']')"
     
+    @abstractmethod
+    def generate_flatten_operation(self, collection_expr: str) -> str:
+        """Generate SQL to flatten nested collections."""
+        pass
+
+    @abstractmethod
+    def generate_all_criteria_check(self, collection_expr: str, criteria: str) -> str:
+        """Generate SQL to check if all elements in collection satisfy criteria."""
+        pass
+
+    @abstractmethod
+    def generate_converts_to_check(self, input_expr: str, target_type: str) -> str:
+        """Generate SQL to check if value can be converted to target type."""
+        pass
+
+    @abstractmethod
+    def generate_type_cast(self, input_expr: str, target_type: str) -> str:
+        """Generate SQL to cast value to target type."""
+        pass
+
+    @abstractmethod
+    def generate_of_type_filter(self, collection_expr: str, target_type: str) -> str:
+        """Generate SQL to filter collection by type."""
+        pass
+
+    @abstractmethod
+    def generate_equivalent_check(self, left_expr: str, right_expr: str) -> str:
+        """Generate SQL for equivalent (~) operator with type-aware comparison."""
+        pass
+
+    @abstractmethod
+    def generate_age_in_years(self, birthdate_expr: str) -> str:
+        """Generate SQL to calculate age in years from birth date."""
+        pass
+
+    @abstractmethod
+    def generate_age_in_years_at(self, birthdate_expr: str, as_of_date_expr: str) -> str:
+        """Generate SQL to calculate age in years at specific date."""
+        pass
+
+    @abstractmethod
+    def generate_resource_query(self, input_state: 'SQLState', resource_type: str) -> str:
+        """Generate SQL for resource retrieval."""
+        pass
+
+    @abstractmethod
+    def generate_max_operation(self, operands: list) -> str:
+        """Generate SQL for max() function with multiple operands."""
+        pass
+
+    @abstractmethod
+    def generate_min_operation(self, operands: list) -> str:
+        """Generate SQL for min() function with multiple operands."""
+        pass
+
+    @abstractmethod
+    def generate_median_operation(self, operands: list) -> str:
+        """Generate SQL for median() function."""
+        pass
+
+    @abstractmethod
+    def generate_population_stddev(self, operands: list) -> str:
+        """Generate SQL for population standard deviation."""
+        pass
+
+    @abstractmethod
+    def generate_population_variance(self, operands: list) -> str:
+        """Generate SQL for population variance."""
+        pass
+
+    @abstractmethod
+    def generate_datetime_creation(self, year: str, month: str, day: str, hour: str, minute: str, second: str) -> str:
+        """Generate SQL for datetime creation."""
+        pass
+
+    @abstractmethod
+    def generate_union_operation(self, first_collection: str, second_collection: str) -> str:
+        """Generate SQL for union of two collections."""
+        pass
+
+    @abstractmethod
+    def generate_exists_check(self, fragment: str, is_collection: bool) -> str:
+        """Generate SQL for exists/empty checks."""
+        pass
+
+    @abstractmethod
+    def generate_join_operation(self, collection_expr: str, separator: str) -> str:
+        """Generate SQL for join operation (concatenate array elements)."""
+        pass
+
     def optimize_pipeline(self, pipeline: 'FHIRPathPipeline') -> 'FHIRPathPipeline':
         """
         Apply dialect-specific optimizations to a pipeline.
