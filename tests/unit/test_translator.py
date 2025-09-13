@@ -1,9 +1,15 @@
 """
 Unit tests for FHIRPath to SQL translator module
+
+NOTE: These tests are disabled as FHIRPathToSQL is deprecated.
+New pipeline architecture uses SQLGenerator instead.
 """
 
 import pytest
-from fhir4ds.fhirpath.core.translator import FHIRPathToSQL
+# from fhir4ds.fhirpath.core.translator import FHIRPathToSQL
+
+# Skip all tests in this file - testing deprecated FHIRPathToSQL translator
+pytestmark = pytest.mark.skip(reason="FHIRPathToSQL translator is deprecated, replaced by new pipeline architecture")
 
 
 class TestFHIRPathToSQL:

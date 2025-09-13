@@ -64,7 +64,7 @@ class ViewRunner:
     """
     
     def __init__(self, datastore, enable_enhanced_sql_generation: bool = True, 
-                 enable_pipeline: bool = False, pipeline_mode: str = 'gradual'):
+                 enable_pipeline: bool = True, pipeline_mode: str = 'pipeline_only'):
         """
         Initialize SQL on FHIR View Runner.
         
@@ -545,13 +545,18 @@ class ViewRunner:
             raise ValueError("ViewDefinition validation failed: Invalid forEach paths")
         
         # Try pipeline processing first if enabled
+        self.logger.info(f"Pipeline enabled: {self.enable_pipeline}, Pipeline bridge: {self.pipeline_bridge is not None}")
         if self.enable_pipeline and self.pipeline_bridge:
             try:
+                self.logger.info("Attempting to use pipeline for SQL generation")
                 sql = self._generate_pipeline_sql(view_def)
+                self.logger.debug(f"Pipeline SQL generation successful: {sql[:100]}...")
                 self.execution_stats['pipeline_executions'] += 1
                 return sql
             except Exception as e:
-                self.logger.debug(f"Pipeline SQL generation failed: {e}, falling back to legacy")
+                self.logger.error(f"Pipeline SQL generation failed: {e}, falling back to legacy")
+                import traceback
+                self.logger.error(f"Full traceback: {traceback.format_exc()}")
                 self.execution_stats['pipeline_fallbacks'] += 1
                 # Fall through to legacy generation
         
@@ -627,21 +632,44 @@ class ViewRunner:
         select_parts = []
         
         for select_item in view_def.get('select', []):
-            if 'path' in select_item:
-                # Use pipeline to process FHIRPath expression
-                try:
-                    pipeline_sql = self.fhirpath_pipeline.to_sql(
-                        select_item['path'], 
-                        view_def.get('resource', 'Patient'),
-                        self.table_name
-                    )
-                    
-                    column_name = select_item.get('name', select_item['path'].replace('.', '_'))
-                    select_parts.append(f"{pipeline_sql} AS {column_name}")
-                    
-                except Exception as e:
-                    self.logger.debug(f"Pipeline processing failed for path '{select_item['path']}': {e}")
-                    raise  # Re-raise to trigger fallback
+            if 'column' in select_item:
+                for column_def in select_item['column']:
+                    if 'path' in column_def:
+                        # Use pipeline bridge to process FHIRPath expression
+                        try:
+                            # Parse the FHIRPath expression to AST
+                            from fhir4ds.fhirpath.parser import FHIRPathParser, FHIRPathLexer
+                            lexer = FHIRPathLexer(column_def['path'])
+                            tokens = lexer.tokenize()
+                            parser = FHIRPathParser(tokens)
+                            ast_node = parser.parse()
+                            
+                            # Use pipeline bridge to convert to SQL
+                            from fhir4ds.pipeline.core.base import ExecutionContext
+                            context = ExecutionContext(
+                                dialect=self.dialect,
+                                debug_mode=False
+                            )
+                            pipeline_sql = self.pipeline_bridge.process_fhirpath_expression(ast_node, context)
+                            
+                            column_name = column_def.get('name', column_def['path'].replace('.', '_'))
+                            
+                            # Handle type casting if specified
+                            if 'type' in column_def:
+                                type_mapping = {
+                                    'decimal': 'DECIMAL', 
+                                    'integer': 'INTEGER', 
+                                    'string': 'TEXT',
+                                    'boolean': 'BOOLEAN'
+                                }
+                                sql_type = type_mapping.get(column_def['type'], 'TEXT')
+                                pipeline_sql = f"CAST({pipeline_sql} AS {sql_type})"
+                            
+                            select_parts.append(f"{pipeline_sql} AS \"{column_name}\"")
+                            
+                        except Exception as e:
+                            self.logger.debug(f"Pipeline processing failed for path '{column_def['path']}': {e}")
+                            raise  # Re-raise to trigger fallback
         
         if not select_parts:
             raise ValueError("No valid select items processed through pipeline")
@@ -2283,31 +2311,8 @@ class ViewRunner:
                 array_value_col, array_key_col = self.dialect.get_array_iteration_columns()
                 nested_value_col, nested_key_col = self.dialect.get_array_iteration_columns()
                 
-                # Build appropriate extraction based on dialect
-                if self.dialect.name == "POSTGRESQL":
-                    # For PostgreSQL, need to extract the JSONB value from the record  
-                    nested_extract = self.dialect.extract_json_field(f'({nested_field}_item).{nested_value_col}', '$')
-                    array_iterate = self.dialect.iterate_json_array(self.json_col, f'$.{array_field}')
-                    # For the nested iteration, we need to extract from the first column of the array_item record
-                    nested_iterate = self.dialect.iterate_json_array(f'({array_field}_item).{array_value_col}', f'$.{nested_field}')
-                    
-                    sql = f"""(
-                        SELECT COALESCE({self.dialect.string_agg_function}({nested_extract}, '{separator}' ORDER BY ({array_field}_item).{array_key_col}, ({nested_field}_item).{nested_key_col}), '')
-                        FROM {array_iterate} AS {array_field}_item({array_value_col}, {array_key_col}),
-                             {nested_iterate} AS {nested_field}_item({nested_value_col}, {nested_key_col})
-                    )"""
-                else:
-                    # For DuckDB, use the original .value column approach
-                    nested_extract = self.dialect.extract_json_field(f'{nested_field}_item.{nested_value_col}', '$')
-                    array_iterate = self.dialect.iterate_json_array(self.json_col, f'$.{array_field}')
-                    nested_iterate = self.dialect.iterate_json_array(f'{array_field}_item.{array_value_col}', f'$.{nested_field}')
-                    
-                    # Fix table alias reference for DuckDB - remove ORDER BY to avoid table reference issues
-                    sql = f"""(
-                        SELECT COALESCE({self.dialect.string_agg_function}({nested_extract}, '{separator}'), '')
-                        FROM {array_iterate} AS {array_field}_item,
-                             {nested_iterate} AS {nested_field}_item
-                    )"""
+                # Use dialect method for nested array aggregation
+                sql = self.dialect.generate_nested_array_aggregation(self.json_col, array_field, nested_field, separator)
                 
                 return Expr(sql)
             
@@ -3635,5 +3640,7 @@ class ViewRunner:
         except Exception as e:
             # Fallback to simple path extraction if translation fails
             self.logger.warning(f"Pipeline translation failed for '{path}': {e}")
-            return f'{self.dialect.extract_json_field("resource", f"$.{path}")}'
+            # Escape any single quotes in the path to prevent SQL injection
+            escaped_path = path.replace("'", "''")
+            return f'{self.dialect.extract_json_field("resource", f"$.{escaped_path}")}'
 

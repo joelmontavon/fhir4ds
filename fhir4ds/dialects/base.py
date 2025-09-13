@@ -990,6 +990,83 @@ class DatabaseDialect(ABC):
         """Generate SQL for join operation (concatenate array elements)."""
         pass
 
+    @abstractmethod
+    def generate_percentile_calculation(self, expression: str, percentile: float) -> str:
+        """Generate SQL for percentile calculation."""
+        pass
+
+    @abstractmethod 
+    def generate_date_difference_years(self, start_date: str, end_date: str = "CURRENT_DATE") -> str:
+        """Generate SQL for date difference in years."""
+        pass
+
+    @abstractmethod
+    def generate_nested_array_aggregation(self, json_col: str, array_field: str, nested_field: str, separator: str) -> str:
+        """Generate SQL for nested array aggregation (e.g., name.given where name is array and given is array within each name)."""
+        pass
+
+    @abstractmethod
+    def generate_date_difference_with_unit(self, start_date: str, end_date: str, unit: str) -> str:
+        """Generate SQL for date difference with specific unit (years, months, days)."""
+        pass
+
+    @abstractmethod
+    def generate_age_calculation(self, birth_date: str, reference_date: str = "CURRENT_DATE") -> str:
+        """Generate SQL for age calculation (returns integer years)."""
+        pass
+
+    @abstractmethod
+    def generate_intersect_operation(self, first_collection: str, second_collection: str) -> str:
+        """Generate SQL for collection intersection (elements in both collections)."""
+        pass
+
+    @abstractmethod
+    def generate_collection_distinct_check(self, collection_expr: str) -> str:
+        """Generate SQL to check if all elements in collection are distinct."""
+        pass
+
+    # Profile validation function methods
+    def generate_profile_element_definition(self, input_expr: str) -> str:
+        """Generate SQL for elementDefinition() profile function."""
+        # Basic implementation that returns element definition metadata
+        return f"""CASE 
+            WHEN {input_expr} IS NOT NULL THEN 
+                json_object(
+                    'definition', 'Basic element definition placeholder',
+                    'type', 'string',
+                    'path', 'element.path'
+                )
+            ELSE NULL 
+        END"""
+    
+    def generate_profile_slice(self, input_expr: str, slice_name: str, discriminator: str) -> str:
+        """Generate SQL for slice() profile function."""
+        # Basic implementation that adds slice metadata
+        # In a full implementation, this would filter based on discriminator values
+        return f"""CASE 
+            WHEN {input_expr} IS NOT NULL THEN 
+                json_object(
+                    'sliceName', '{slice_name}',
+                    'discriminator', '{discriminator}',
+                    'data', {input_expr},
+                    'elements', json_array()
+                )
+            ELSE NULL 
+        END"""
+    
+    def generate_check_modifiers(self, input_expr: str, known_modifiers: str) -> str:
+        """Generate SQL for checkModifiers() profile function."""
+        # Basic implementation that checks for modifier extensions
+        # In a full implementation, this would validate against actual modifier extensions
+        return f"""CASE 
+            WHEN {input_expr} IS NOT NULL THEN 
+                CASE 
+                    WHEN json_extract({input_expr}, '$.modifierExtension') IS NULL THEN TRUE
+                    ELSE json_array_length(json_extract({input_expr}, '$.modifierExtension')) = 0
+                END
+            ELSE TRUE 
+        END"""
+
     def optimize_pipeline(self, pipeline: 'FHIRPathPipeline') -> 'FHIRPathPipeline':
         """
         Apply dialect-specific optimizations to a pipeline.

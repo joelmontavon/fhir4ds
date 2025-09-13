@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 
+import pytest
 import os
 import sys
 import json
+from pathlib import Path
 
 # Add project root to path
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-sys.path.insert(0, project_root)
+project_root = Path(__file__).parent.parent.parent.parent
+sys.path.insert(0, str(project_root))
 
 from fhir4ds import FHIRDataStore, ViewRunner
 

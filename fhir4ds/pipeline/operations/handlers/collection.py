@@ -17,6 +17,32 @@ from ...core.base import SQLState, ExecutionContext, ContextMode
 logger = logging.getLogger(__name__)
 
 
+def _extract_literal_value(arg) -> str:
+    """
+    Extract the actual value from an AST node argument.
+    
+    This handles LiteralNode and other AST node types to extract their values
+    instead of returning the string representation of the node object.
+    
+    Args:
+        arg: AST node argument (typically LiteralNode)
+        
+    Returns:
+        The actual value as a string
+    """
+    from ...fhirpath.parser.ast_nodes import LiteralNode
+    
+    if isinstance(arg, LiteralNode):
+        return str(arg.value)
+    elif hasattr(arg, 'value'):
+        return str(arg.value)
+    elif hasattr(arg, 'literal_value'):
+        return str(arg.literal_value)
+    else:
+        # Fallback to string representation
+        return str(arg)
+
+
 class FHIRPathExecutionError(Exception):
     """Base exception for FHIRPath execution errors."""
     pass
@@ -41,9 +67,8 @@ class CollectionFunctionHandler(FunctionHandler):
     descendants, isdistinct, iif, repeat, aggregate, flatten, in, all, boolean_collection
     """
     
-    def __init__(self, function_name: str, args: List[Any] = None):
+    def __init__(self, args: List[Any] = None):
         """Initialize the collection function handler."""
-        self.func_name = function_name.lower()
         self.args = args or []
     
     def get_supported_functions(self) -> List[str]:
@@ -267,12 +292,15 @@ class CollectionFunctionHandler(FunctionHandler):
         if not self.args:
             raise ValueError("combine() function requires another collection argument")
         
-        # For now, assume the argument is the same collection (common case: x.combine(x))
-        # In a full implementation, we'd need to evaluate the argument expression
         first_collection = input_state.sql_fragment
-        second_collection = input_state.sql_fragment  # Simplified for x.combine(x) case
+        second_collection = self._evaluate_union_argument(self.args[0], input_state, context)
         
-        sql_fragment = context.dialect.generate_collection_combine(first_collection, second_collection)
+        # Optimization: if both collections are identical, use a simpler SQL pattern
+        if first_collection == second_collection:
+            # For x.combine(x), we can generate more efficient SQL
+            sql_fragment = context.dialect.generate_self_combine_operation(first_collection)
+        else:
+            sql_fragment = context.dialect.generate_collection_combine(first_collection, second_collection)
         
         return input_state.evolve(
             sql_fragment=sql_fragment.strip(),
@@ -378,7 +406,7 @@ class CollectionFunctionHandler(FunctionHandler):
     
     def _handle_exclude(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle exclude() function - returns elements in base collection that are not in other collection."""
-        if not self.args:
+        if len(self.args) != 1:
             raise InvalidArgumentError("exclude() function requires exactly one argument")
         
         first_collection = input_state.sql_fragment
@@ -404,7 +432,7 @@ class CollectionFunctionHandler(FunctionHandler):
         return input_state.evolve(
             sql_fragment=sql_fragment.strip(),
             is_collection=False,
-            context_mode=ContextMode.SINGLE
+            context_mode=ContextMode.SINGLE_VALUE
         )
     
     def _handle_contains_collection(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
@@ -413,11 +441,11 @@ class CollectionFunctionHandler(FunctionHandler):
         Returns true if the collection contains the specified element.
         This is different from the string contains() which checks substring matching.
         """
-        if not self.args:
-            raise InvalidArgumentError("contains() function requires an element to search for")
+        if len(self.args) != 1:
+            raise InvalidArgumentError("contains() function requires exactly 1 argument")
         
-        # Get the element to search for
-        search_element = str(self.args[0])
+        # Get the element to search for - evaluate properly if it's a path expression
+        search_element = self._evaluate_union_argument(self.args[0], input_state, context)
         
         sql_fragment = context.dialect.generate_collection_contains_element(input_state.sql_fragment, search_element)
         
@@ -476,7 +504,7 @@ class CollectionFunctionHandler(FunctionHandler):
         return input_state.evolve(
             sql_fragment=sql_fragment.strip(),
             is_collection=False,
-            context_mode=ContextMode.SINGLE
+            context_mode=ContextMode.SINGLE_VALUE
         )
     
     def _handle_iif(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
@@ -641,6 +669,16 @@ class CollectionFunctionHandler(FunctionHandler):
         """Evaluate union function argument to SQL fragment."""
         if not hasattr(arg, '__class__'):
             return str(arg)  # Simple literal
+        
+        # Check if this is a sub-pipeline (FHIRPathPipeline)
+        if hasattr(arg, 'compile') and hasattr(arg, 'operations'):
+            # This is a FHIRPathPipeline - execute it from a fresh base state
+            base_state = self._create_base_copy(input_state)
+            current_state = base_state
+            # Execute each operation in the sub-pipeline
+            for operation in arg.operations:
+                current_state = operation.execute(current_state, context)
+            return current_state.sql_fragment
         
         # Check if this is a pipeline operation (like FunctionCallOperation)
         if hasattr(arg, 'execute') and callable(getattr(arg, 'execute')):
@@ -823,10 +861,14 @@ class CollectionFunctionHandler(FunctionHandler):
     
     def _compile_operand(self, operand, context: ExecutionContext, item_placeholder: str) -> str:
         """Compile an operand (left or right side of binary operation) to SQL."""
-        from ...fhirpath.parser.ast_nodes import IdentifierNode, LiteralNode, PathNode, FunctionCallNode
+        from ...fhirpath.parser.ast_nodes import IdentifierNode, LiteralNode, PathNode, FunctionCallNode, ThisNode
+        
+        # Handle $this (current context item)
+        if isinstance(operand, ThisNode):
+            return item_placeholder
         
         # Handle simple identifiers (field names)
-        if isinstance(operand, IdentifierNode):
+        elif isinstance(operand, IdentifierNode):
             field_name = operand.name
             return context.dialect.generate_field_extraction(item_placeholder, field_name)
         
@@ -842,7 +884,7 @@ class CollectionFunctionHandler(FunctionHandler):
             else:
                 return f"'{value}'"
         
-        # Handle path expressions (e.g., patient.name.given)
+        # Handle path expressions (e.g., patient.name.given, code.coding.code)
         elif isinstance(operand, PathNode):
             if len(operand.segments) == 1 and isinstance(operand.segments[0], IdentifierNode):
                 # Simple single-segment path
@@ -865,11 +907,105 @@ class CollectionFunctionHandler(FunctionHandler):
                 else:
                     raise InvalidArgumentError(f"Unsupported function in where condition: {function_call.name}")
             else:
-                raise InvalidArgumentError(f"Complex path expressions not yet supported: {operand}")
+                # Handle complex multi-segment paths (e.g., code.coding.code)
+                return self._compile_complex_path_expression(operand, item_placeholder, context)
         
         # Handle other operand types
         else:
             raise InvalidArgumentError(f"Unsupported operand type: {type(operand).__name__}")
+    
+    def _compile_complex_path_expression(self, path_node: 'PathNode', item_placeholder: str, context: ExecutionContext) -> str:
+        """
+        Compile complex multi-segment path expressions to SQL.
+        
+        Handles paths like code.coding.code by properly flattening arrays according to FHIRPath semantics.
+        In FHIRPath, array navigation automatically flattens arrays and returns all matching values.
+        
+        Args:
+            path_node: PathNode with multiple segments
+            item_placeholder: SQL placeholder for the item being evaluated
+            context: Execution context with dialect information
+            
+        Returns:
+            SQL expression for extracting the path value(s)
+        """
+        from ...fhirpath.parser.ast_nodes import IdentifierNode
+        
+        # Known FHIR array fields that need special handling
+        known_array_fields = {'coding', 'identifier', 'telecom', 'address', 'name', 'given', 'contact'}
+        
+        # Build path segments and detect array navigation
+        segments = []
+        has_array_navigation = False
+        
+        for segment in path_node.segments:
+            if isinstance(segment, IdentifierNode):
+                segments.append(segment.name)
+                if segment.name in known_array_fields:
+                    has_array_navigation = True
+            else:
+                segments.append(str(segment))
+        
+        # If we have array navigation, we need to use array flattening
+        if has_array_navigation:
+            return self._generate_array_flattening_sql(segments, item_placeholder, context)
+        else:
+            # Simple path without array navigation
+            json_path = '$.{}'.format('.'.join(segments))
+            if hasattr(context.dialect, 'generate_json_extract_string'):
+                return context.dialect.generate_json_extract_string(item_placeholder, json_path)
+            else:
+                return f"json_extract_string({item_placeholder}, '{json_path}')"
+    
+    def _generate_array_flattening_sql(self, segments: List[str], item_placeholder: str, context: ExecutionContext) -> str:
+        """
+        Generate SQL that properly flattens arrays for FHIRPath semantics.
+        
+        For example, code.coding.code should return all code values from all coding elements.
+        """
+        known_array_fields = {'coding', 'identifier', 'telecom', 'address', 'name', 'given', 'contact'}
+        
+        # Find which segment is the array field
+        array_segment_idx = None
+        for i, segment in enumerate(segments):
+            if segment in known_array_fields:
+                array_segment_idx = i
+                break
+        
+        if array_segment_idx is None:
+            # No array field found, use simple path
+            json_path = '$.{}'.format('.'.join(segments))
+            if hasattr(context.dialect, 'generate_json_extract_string'):
+                return context.dialect.generate_json_extract_string(item_placeholder, json_path)
+            else:
+                return f"json_extract_string({item_placeholder}, '{json_path}')"
+        
+        # Split path into: prefix + array_field + suffix
+        prefix_segments = segments[:array_segment_idx]
+        array_field = segments[array_segment_idx]
+        suffix_segments = segments[array_segment_idx + 1:]
+        
+        # Build the base path to the array
+        if prefix_segments:
+            base_path = '$.{}.{}'.format('.'.join(prefix_segments), array_field)
+        else:
+            base_path = '$.{}'.format(array_field)
+        
+        # Build the path within each array element
+        if suffix_segments:
+            element_path = '$.{}'.format('.'.join(suffix_segments))
+        else:
+            element_path = '$'
+        
+        # Generate SQL to extract from all array elements
+        # This returns the first non-null value found in the array
+        # (which is often what we want for WHERE clause comparisons)
+        return f"""(
+            SELECT json_extract_string(array_item.value, '{element_path}')
+            FROM json_each(json_extract({item_placeholder}, '{base_path}')) AS array_item
+            WHERE json_extract_string(array_item.value, '{element_path}') IS NOT NULL
+            LIMIT 1
+        )"""
     
     def _compile_path_condition(self, path_node, context: ExecutionContext) -> str:
         """Compile PathNode conditions to SQL."""
@@ -885,19 +1021,19 @@ class CollectionFunctionHandler(FunctionHandler):
                 if function_call.name in ['startswith', 'startsWith']:
                     # Handle field.startsWith(value)
                     if len(function_call.args) == 1:
-                        search_value = str(function_call.args[0])
+                        search_value = _extract_literal_value(function_call.args[0])
                         return context.dialect.generate_field_startswith_condition('$ITEM', field_name, search_value)
                 
                 elif function_call.name in ['endswith', 'endsWith']:
                     # Handle field.endsWith(value)
                     if len(function_call.args) == 1:
-                        search_value = str(function_call.args[0])
+                        search_value = _extract_literal_value(function_call.args[0])
                         return context.dialect.generate_field_endswith_condition('$ITEM', field_name, search_value)
                 
                 elif function_call.name == 'contains':
                     # Handle field.contains(value)
                     if len(function_call.args) == 1:
-                        search_value = str(function_call.args[0])
+                        search_value = _extract_literal_value(function_call.args[0])
                         return context.dialect.generate_field_contains_condition('$ITEM', field_name, search_value)
                 
                 # Handle exists() function

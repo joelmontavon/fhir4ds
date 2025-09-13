@@ -293,6 +293,18 @@ class PostgreSQLDialect(DatabaseDialect):
         """Generate contains condition for field matching using PostgreSQL syntax"""
         return f"(@.{field_name} like_regex \".*{value}.*\")"
     
+    def generate_field_startswith_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate field startsWith condition - delegates to starts_with_condition"""
+        return self.starts_with_condition(item_expr, field_name, value)
+    
+    def generate_field_endswith_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate field endsWith condition - delegates to ends_with_condition"""
+        return self.ends_with_condition(item_expr, field_name, value)
+    
+    def generate_field_contains_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate field contains condition - delegates to contains_condition"""
+        return self.contains_condition(item_expr, field_name, value)
+    
     def get_value_primitive_sql(self, input_sql: str) -> str:
         """Generate SQL for getValue() function handling primitive and complex types using PostgreSQL JSONB functions"""
         return f"""CASE 
@@ -1132,6 +1144,23 @@ class PostgreSQLDialect(DatabaseDialect):
                 ELSE jsonb_build_array({first_collection}, {second_collection})
             END
         )"""
+
+    def generate_self_combine_operation(self, collection: str) -> str:
+        """PostgreSQL self-combination optimization (x.combine(x))."""
+        return f"""(
+            CASE 
+                WHEN {collection} IS NULL THEN NULL
+                WHEN jsonb_typeof({collection}) = 'array' THEN (
+                    SELECT jsonb_agg(elem)
+                    FROM (
+                        SELECT elem FROM jsonb_array_elements({collection}) AS elem
+                        UNION ALL
+                        SELECT elem FROM jsonb_array_elements({collection}) AS elem
+                    ) AS combined
+                )
+                ELSE jsonb_build_array({collection}, {collection})
+            END
+        )"""
     
     def generate_where_clause_filter(self, collection_expr: str, condition_sql: str) -> str:
         """PostgreSQL WHERE clause filtering using jsonb_path_query_array."""
@@ -1417,6 +1446,11 @@ class PostgreSQLDialect(DatabaseDialect):
                 WHEN jsonb_typeof({jsonb_expr}) = 'array' THEN
                     CASE 
                         WHEN jsonb_array_length({jsonb_expr}) = 0 THEN NULL
+                        -- If any value is null, return null
+                        WHEN EXISTS (
+                            SELECT 1 FROM jsonb_array_elements({jsonb_expr}) AS value
+                            WHERE value::text NOT IN ('true', 'false')
+                        ) THEN NULL
                         ELSE (
                             SELECT COUNT(*) = COUNT(CASE WHEN 
                                 value::text = 'true' THEN 1 END)
@@ -1442,6 +1476,11 @@ class PostgreSQLDialect(DatabaseDialect):
                 WHEN jsonb_typeof({jsonb_expr}) = 'array' THEN
                     CASE 
                         WHEN jsonb_array_length({jsonb_expr}) = 0 THEN NULL
+                        -- If any value is null, return null
+                        WHEN EXISTS (
+                            SELECT 1 FROM jsonb_array_elements({jsonb_expr}) AS value
+                            WHERE value::text NOT IN ('true', 'false')
+                        ) THEN NULL
                         ELSE (
                             SELECT COUNT(*) = COUNT(CASE WHEN 
                                 value::text = 'false' THEN 1 END)
@@ -1821,5 +1860,70 @@ class PostgreSQLDialect(DatabaseDialect):
                     FROM jsonb_array_elements({collection_expr})
                 )
                 ELSE COALESCE({collection_expr} #>> '{{}}', '')
+            END
+        )"""
+
+    def generate_percentile_calculation(self, expression: str, percentile: float) -> str:
+        """Generate SQL for percentile calculation using PostgreSQL syntax."""
+        return f"PERCENTILE_CONT({percentile}) WITHIN GROUP (ORDER BY {expression}) OVER ()"
+
+    def generate_date_difference_years(self, start_date: str, end_date: str = "CURRENT_DATE") -> str:
+        """Generate SQL for date difference in years using PostgreSQL syntax."""
+        return f"EXTRACT(DAYS FROM {end_date} - DATE({start_date})) / 365.25"
+
+    def generate_nested_array_aggregation(self, json_col: str, array_field: str, nested_field: str, separator: str) -> str:
+        """Generate SQL for nested array aggregation using PostgreSQL syntax."""
+        # Get dialect-specific column names for array iteration
+        array_value_col, array_key_col = self.get_array_iteration_columns()
+        nested_value_col, nested_key_col = self.get_array_iteration_columns()
+        
+        # Build PostgreSQL-specific nested array SQL
+        nested_extract = self.extract_json_field(f'({nested_field}_item).{nested_value_col}', '$')
+        array_iterate = self.iterate_json_array(json_col, f'$.{array_field}')
+        nested_iterate = self.iterate_json_array(f'({array_field}_item).{array_value_col}', f'$.{nested_field}')
+        
+        return f"""(
+            SELECT COALESCE({self.string_agg_function}({nested_extract}, '{separator}' ORDER BY ({array_field}_item).{array_key_col}, ({nested_field}_item).{nested_key_col}), '')
+            FROM {array_iterate} AS {array_field}_item({array_value_col}, {array_key_col}),
+                 {nested_iterate} AS {nested_field}_item({nested_value_col}, {nested_key_col})
+        )"""
+
+    def generate_date_difference_with_unit(self, start_date: str, end_date: str, unit: str) -> str:
+        """Generate SQL for date difference with specific unit using PostgreSQL syntax."""
+        unit_lower = unit.lower()
+        if unit_lower == 'months':
+            return f"EXTRACT(YEAR FROM AGE({end_date}, {start_date})) * 12 + EXTRACT(MONTH FROM AGE({end_date}, {start_date}))"
+        elif unit_lower == 'years':
+            return f"EXTRACT(YEAR FROM AGE({end_date}, {start_date}))"
+        elif unit_lower == 'days':
+            return f"EXTRACT(DAYS FROM {end_date} - {start_date})"
+        else:
+            # Default to days for unknown units
+            return f"EXTRACT(DAYS FROM {end_date} - {start_date})"
+
+    def generate_age_calculation(self, birth_date: str, reference_date: str = "CURRENT_DATE") -> str:
+        """Generate SQL for age calculation using PostgreSQL syntax (returns integer years)."""
+        return f"EXTRACT(YEAR FROM AGE({reference_date}, {birth_date}))"
+
+    def generate_intersect_operation(self, first_collection: str, second_collection: str) -> str:
+        """Generate SQL for collection intersection using PostgreSQL syntax."""
+        return f"""(
+            SELECT jsonb_agg(DISTINCT value)
+            FROM (
+                SELECT value FROM jsonb_array_elements({first_collection})
+                WHERE value IN (SELECT value FROM jsonb_array_elements({second_collection}))
+            ) AS intersection_values(value)
+        )"""
+
+    def generate_collection_distinct_check(self, collection_expr: str) -> str:
+        """Generate SQL to check if all elements in collection are distinct using PostgreSQL."""
+        return f"""(
+            CASE 
+                WHEN jsonb_array_length({collection_expr}) = 0 THEN TRUE
+                WHEN jsonb_array_length({collection_expr}) = 1 THEN TRUE
+                ELSE (
+                    SELECT COUNT(*) = COUNT(DISTINCT value)
+                    FROM jsonb_array_elements({collection_expr}) AS t(value)
+                )
             END
         )"""

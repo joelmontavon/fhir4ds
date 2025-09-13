@@ -253,6 +253,18 @@ class DuckDBDialect(DatabaseDialect):
         """Generate contains condition for field matching using DuckDB syntax"""
         return f"contains(json_extract_string({item_expr}, '$.{field_name}'), '{value}')"
     
+    def generate_field_startswith_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate field startsWith condition - delegates to starts_with_condition"""
+        return self.starts_with_condition(item_expr, field_name, value)
+    
+    def generate_field_endswith_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate field endsWith condition - delegates to ends_with_condition"""
+        return self.ends_with_condition(item_expr, field_name, value)
+    
+    def generate_field_contains_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate field contains condition - delegates to contains_condition"""
+        return self.contains_condition(item_expr, field_name, value)
+    
     def get_value_primitive_sql(self, input_sql: str) -> str:
         """Generate SQL for getValue() function handling primitive and complex types using DuckDB functions"""
         return f"""CASE 
@@ -941,6 +953,23 @@ class DuckDBDialect(DatabaseDialect):
                 ELSE json_array({first_collection}, {second_collection})
             END
         )"""
+
+    def generate_self_combine_operation(self, collection: str) -> str:
+        """DuckDB self-combination optimization (x.combine(x))."""
+        return f"""(
+            CASE 
+                WHEN {collection} IS NULL THEN NULL
+                WHEN json_type({collection}) = 'ARRAY' THEN (
+                    SELECT json_group_array(value)
+                    FROM (
+                        SELECT value FROM json_each({collection})
+                        UNION ALL
+                        SELECT value FROM json_each({collection})
+                    )
+                )
+                ELSE json_array({collection}, {collection})
+            END
+        )"""
     
     def generate_where_clause_filter(self, collection_expr: str, condition_sql: str) -> str:
         """DuckDB WHERE clause filtering for collections."""
@@ -1223,6 +1252,12 @@ class DuckDBDialect(DatabaseDialect):
                 WHEN json_type({collection_expr}) = 'ARRAY' THEN
                     CASE 
                         WHEN json_array_length({collection_expr}) = 0 THEN NULL
+                        -- If any value is null, return null
+                        WHEN EXISTS (
+                            SELECT 1 FROM json_each({collection_expr})
+                            WHERE json_extract_string(value, '$') IS NULL OR 
+                                  json_extract_string(value, '$') NOT IN ('true', 'false')
+                        ) THEN NULL
                         ELSE (
                             SELECT COUNT(*) = COUNT(CASE WHEN 
                                 json_extract_string(value, '$') = 'true' THEN 1 END)
@@ -1247,6 +1282,12 @@ class DuckDBDialect(DatabaseDialect):
                 WHEN json_type({collection_expr}) = 'ARRAY' THEN
                     CASE 
                         WHEN json_array_length({collection_expr}) = 0 THEN NULL
+                        -- If any value is null, return null
+                        WHEN EXISTS (
+                            SELECT 1 FROM json_each({collection_expr})
+                            WHERE json_extract_string(value, '$') IS NULL OR 
+                                  json_extract_string(value, '$') NOT IN ('true', 'false')
+                        ) THEN NULL
                         ELSE (
                             SELECT COUNT(*) = COUNT(CASE WHEN 
                                 json_extract_string(value, '$') = 'false' THEN 1 END)
@@ -1606,5 +1647,70 @@ class DuckDBDialect(DatabaseDialect):
                     WHERE item.value IS NOT NULL
                 )
                 ELSE COALESCE(json_extract_string({collection_expr}, '$'), '')
+            END
+        )"""
+
+    def generate_percentile_calculation(self, expression: str, percentile: float) -> str:
+        """Generate SQL for percentile calculation using DuckDB syntax."""
+        return f"PERCENTILE_CONT({percentile}) WITHIN GROUP (ORDER BY {expression}) OVER ()"
+
+    def generate_date_difference_years(self, start_date: str, end_date: str = "CURRENT_DATE") -> str:
+        """Generate SQL for date difference in years using DuckDB syntax."""
+        return f"CAST(({end_date} - DATE({start_date})) / 365.25 AS DOUBLE)"
+
+    def generate_nested_array_aggregation(self, json_col: str, array_field: str, nested_field: str, separator: str) -> str:
+        """Generate SQL for nested array aggregation using DuckDB syntax."""
+        # Get dialect-specific column names for array iteration
+        array_value_col, array_key_col = self.get_array_iteration_columns()
+        nested_value_col, nested_key_col = self.get_array_iteration_columns()
+        
+        # Build DuckDB-specific nested array SQL
+        nested_extract = self.extract_json_field(f'{nested_field}_item.{nested_value_col}', '$')
+        array_iterate = self.iterate_json_array(json_col, f'$.{array_field}')
+        nested_iterate = self.iterate_json_array(f'{array_field}_item.{array_value_col}', f'$.{nested_field}')
+        
+        return f"""(
+            SELECT COALESCE({self.string_agg_function}({nested_extract}, '{separator}'), '')
+            FROM {array_iterate} AS {array_field}_item,
+                 {nested_iterate} AS {nested_field}_item
+        )"""
+
+    def generate_date_difference_with_unit(self, start_date: str, end_date: str, unit: str) -> str:
+        """Generate SQL for date difference with specific unit using DuckDB syntax."""
+        unit_lower = unit.lower()
+        if unit_lower == 'months':
+            return f"DATEDIFF('month', {start_date}, {end_date})"
+        elif unit_lower == 'years':
+            return f"DATEDIFF('year', {start_date}, {end_date})"
+        elif unit_lower == 'days':
+            return f"DATEDIFF('day', {start_date}, {end_date})"
+        else:
+            # Default to days for unknown units
+            return f"DATEDIFF('day', {start_date}, {end_date})"
+
+    def generate_age_calculation(self, birth_date: str, reference_date: str = "CURRENT_DATE") -> str:
+        """Generate SQL for age calculation using DuckDB syntax (returns integer years)."""
+        return f"CAST(EXTRACT(YEAR FROM {reference_date}) - EXTRACT(YEAR FROM {birth_date}) AS INTEGER)"
+
+    def generate_intersect_operation(self, first_collection: str, second_collection: str) -> str:
+        """Generate SQL for collection intersection using DuckDB syntax."""
+        return f"""(
+            SELECT json_group_array(DISTINCT value)
+            FROM (
+                SELECT value FROM json_each({first_collection}) 
+                WHERE value IN (SELECT value FROM json_each({second_collection}))
+            )
+        )"""
+
+    def generate_collection_distinct_check(self, collection_expr: str) -> str:
+        """Generate SQL to check if all elements in collection are distinct using DuckDB."""
+        return f"""(
+            CASE 
+                WHEN json_array_length({collection_expr}) = 0 THEN TRUE
+                WHEN json_array_length({collection_expr}) = 1 THEN TRUE
+                ELSE (
+                    SELECT COUNT(*) = COUNT(DISTINCT value)
+                    FROM json_each({collection_expr})
+                )
             END
         )"""

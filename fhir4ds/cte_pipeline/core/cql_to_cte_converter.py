@@ -423,6 +423,7 @@ class CQLToCTEConverter:
         """
         self.dialect = dialect.upper()
         self.terminology_client = terminology_client
+        self.valueset_mappings = {}  # Maps valueset names to OIDs
         self.resource_type_detector = ResourceTypeDetector()
         self.pattern_analyzer = CQLPatternAnalyzer(dialect)
         
@@ -655,22 +656,26 @@ class CQLToCTEConverter:
             
             for value_set_ref in value_set_refs:
                 # Expand value set using existing terminology client
-                expanded_codes = self.terminology_client.expand_value_set(value_set_ref)
+                valueset_expansion = self.terminology_client.expand_valueset(value_set_ref)
                 
-                if expanded_codes:
-                    # Generate IN clause with expanded codes
-                    code_list = "', '".join(expanded_codes)
+                if valueset_expansion:
+                    # Extract codes from FHIR ValueSet expansion
+                    expanded_codes = self._extract_codes_from_expansion(valueset_expansion)
                     
-                    if self.dialect == 'DUCKDB':
-                        conditions.extend([
-                            f"json_extract_string(resource, '$.code.coding[0].code') IN ('{code_list}')",
-                            f"EXISTS (SELECT 1 FROM json_each(json_extract(resource, '$.code.coding')) AS coding WHERE json_extract_string(coding.value, '$.code') IN ('{code_list}'))"
-                        ])
-                    else:  # PostgreSQL
-                        conditions.extend([
-                            f"jsonb_extract_path_text(resource, 'code', 'coding', '0', 'code') IN ('{code_list}')",
-                            f"EXISTS (SELECT 1 FROM jsonb_array_elements(jsonb_extract_path(resource, 'code', 'coding')) AS coding WHERE coding ->> 'code' IN ('{code_list}'))"
-                        ])
+                    if expanded_codes:
+                        # Generate IN clause with expanded codes
+                        code_list = "', '".join(expanded_codes)
+                        
+                        if self.dialect == 'DUCKDB':
+                            conditions.extend([
+                                f"json_extract_string(resource, '$.code.coding[0].code') IN ('{code_list}')",
+                                f"EXISTS (SELECT 1 FROM json_each(json_extract(resource, '$.code.coding')) AS coding WHERE json_extract_string(coding.value, '$.code') IN ('{code_list}'))"
+                            ])
+                        else:  # PostgreSQL
+                            conditions.extend([
+                                f"jsonb_extract_path_text(resource, 'code', 'coding', '0', 'code') IN ('{code_list}')",
+                                f"EXISTS (SELECT 1 FROM jsonb_array_elements(jsonb_extract_path(resource, 'code', 'coding')) AS coding WHERE coding ->> 'code' IN ('{code_list}'))"
+                            ])
                 
                 else:
                     logger.warning(f"No codes found for value set: {value_set_ref}")
@@ -682,7 +687,7 @@ class CQLToCTEConverter:
         return conditions
     
     def _extract_value_set_references(self, cql_expr: str) -> List[str]:
-        """Extract value set references from CQL expression."""
+        """Extract value set references from CQL expression and resolve names to OIDs."""
         value_set_refs = []
         
         # Pattern for value set in brackets: [Condition: "ValueSetName"]
@@ -690,16 +695,72 @@ class CQLToCTEConverter:
         matches = re.finditer(bracket_pattern, cql_expr, re.IGNORECASE)
         
         for match in matches:
-            value_set_refs.append(match.group(1))
+            valueset_name = match.group(1)
+            # Return the name for terminology client expansion
+            value_set_refs.append(valueset_name)
+            logger.debug(f"Extracted valueset name: '{valueset_name}'")
         
         # Pattern for explicit value set references: in "ValueSetOID"
         in_pattern = r'in\s+["\']([^"\']+)["\']'
         matches = re.finditer(in_pattern, cql_expr, re.IGNORECASE)
         
         for match in matches:
-            value_set_refs.append(match.group(1))
+            value_set_ref = match.group(1)
+            # Return the reference for terminology client expansion (can be name or OID)
+            value_set_refs.append(value_set_ref)
+            logger.debug(f"Extracted valueset reference: '{value_set_ref}'")
         
         return value_set_refs
+    
+    def _extract_codes_from_expansion(self, valueset_expansion: Dict[str, Any]) -> List[str]:
+        """
+        Extract codes from FHIR ValueSet expansion.
+        
+        Args:
+            valueset_expansion: FHIR ValueSet resource with expansion
+            
+        Returns:
+            List of codes from the expansion
+        """
+        codes = []
+        
+        try:
+            expansion = valueset_expansion.get('expansion', {})
+            contains = expansion.get('contains', [])
+            
+            for entry in contains:
+                code = entry.get('code')
+                if code:
+                    codes.append(code)
+                    
+            logger.debug(f"Extracted {len(codes)} codes from ValueSet expansion")
+            
+        except Exception as e:
+            logger.warning(f"Failed to extract codes from ValueSet expansion: {e}")
+            
+        return codes
+    
+    def set_valueset_mappings(self, library_content: str):
+        """
+        Parse valueset definitions from CQL library and build name-to-OID mappings.
+        
+        Args:
+            library_content: Complete CQL library text
+        """
+        self.valueset_mappings = {}
+        
+        # Extract valueset definitions: valueset "Name": 'OID'
+        import re
+        valueset_pattern = r'valueset\s+"([^"]+)"\s*:\s*[\'"]([^\'"]+)[\'"]'
+        matches = re.finditer(valueset_pattern, library_content, re.IGNORECASE | re.MULTILINE)
+        
+        for match in matches:
+            name = match.group(1)
+            oid = match.group(2)
+            self.valueset_mappings[name] = oid
+            logger.debug(f"Found valueset mapping: '{name}' -> '{oid}'")
+        
+        logger.info(f"Loaded {len(self.valueset_mappings)} valueset mappings")
     
     def _generate_text_matching_conditions(self, cql_expr: str, resource_type: str) -> List[str]:
         """

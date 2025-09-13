@@ -34,7 +34,7 @@ class TypeConversionFunctionHandler(FunctionHandler):
         """Return list of type conversion function names this handler supports."""
         return [
             'toboolean', 'tostring', 'tointeger', 'todecimal', 'todate', 'todatetime', 'totime',
-            'toquantity', 'convertstoboolean', 'convertstodecimal', 'convertstointeger',
+            'toquantity', 'convertsto', 'convertstoboolean', 'convertstodecimal', 'convertstointeger',
             'convertstodate', 'convertstodatetime', 'convertstotime', 'as', 'is', 'oftype',
             'quantity', 'valueset', 'code', 'toconcept', 'tuple'
         ]
@@ -66,8 +66,8 @@ class TypeConversionFunctionHandler(FunctionHandler):
         }
         
         # Handle convertsTo* functions
-        if function_name.startswith('convertsto'):
-            return self._handle_converts_functions(input_state, context)
+        if function_name.startswith('convertsto') or function_name == 'convertsto':
+            return self._handle_converts_functions(function_name, input_state, context)
         
         handler_func = handler_map.get(function_name.lower())
         if not handler_func:
@@ -81,6 +81,10 @@ class TypeConversionFunctionHandler(FunctionHandler):
     
     def _handle_toboolean(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle toBoolean() function."""
+        # Validate that no arguments are provided
+        if self.args:
+            raise ValueError(f"toBoolean() function takes no arguments, but {len(self.args)} were provided")
+        
         sql_fragment = f"""
         CASE 
             WHEN LOWER({input_state.sql_fragment}) IN ('true', '1', 't', 'yes', 'y') THEN TRUE
@@ -97,7 +101,11 @@ class TypeConversionFunctionHandler(FunctionHandler):
     
     def _handle_tostring(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle toString() function."""
-        sql_fragment = f"CAST({input_state.sql_fragment} AS TEXT)"
+        # Validate that no arguments are provided
+        if self.args:
+            raise ValueError(f"toString() function takes no arguments, but {len(self.args)} were provided")
+        
+        sql_fragment = context.dialect.generate_type_cast(input_state.sql_fragment, 'string')
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -107,7 +115,11 @@ class TypeConversionFunctionHandler(FunctionHandler):
     
     def _handle_tointeger(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle toInteger() function."""
-        sql_fragment = f"CAST({input_state.sql_fragment} AS INTEGER)"
+        # Validate that no arguments are provided
+        if self.args:
+            raise ValueError(f"toInteger() function takes no arguments, but {len(self.args)} were provided")
+        
+        sql_fragment = context.dialect.generate_type_cast(input_state.sql_fragment, 'integer')
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -117,7 +129,11 @@ class TypeConversionFunctionHandler(FunctionHandler):
     
     def _handle_todecimal(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle toDecimal() function."""
-        sql_fragment = f"CAST({input_state.sql_fragment} AS DECIMAL)"
+        # Validate that no arguments are provided
+        if self.args:
+            raise ValueError(f"toDecimal() function takes no arguments, but {len(self.args)} were provided")
+        
+        sql_fragment = context.dialect.generate_type_cast(input_state.sql_fragment, 'decimal')
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -130,6 +146,10 @@ class TypeConversionFunctionHandler(FunctionHandler):
         
         Converts a string to a date value, or returns empty if conversion fails.
         """
+        # Validate that no arguments are provided
+        if self.args:
+            raise ValueError(f"toDate() function takes no arguments, but {len(self.args)} were provided")
+        
         sql_fragment = context.dialect.try_cast(input_state.sql_fragment, 'date')
         return self._create_scalar_result(input_state, sql_fragment)
     
@@ -138,6 +158,10 @@ class TypeConversionFunctionHandler(FunctionHandler):
         
         Converts a string to a datetime/timestamp value, or returns empty if conversion fails.
         """
+        # Validate that no arguments are provided
+        if self.args:
+            raise ValueError(f"toDateTime() function takes no arguments, but {len(self.args)} were provided")
+        
         sql_fragment = context.dialect.try_cast(input_state.sql_fragment, 'timestamp')
         return self._create_scalar_result(input_state, sql_fragment)
     
@@ -146,17 +170,71 @@ class TypeConversionFunctionHandler(FunctionHandler):
         
         Converts a string to a time value, or returns empty if conversion fails.
         """
+        # Validate that no arguments are provided
+        if self.args:
+            raise ValueError(f"toTime() function takes no arguments, but {len(self.args)} were provided")
+        
         sql_fragment = context.dialect.try_cast(input_state.sql_fragment, 'time')
         return self._create_scalar_result(input_state, sql_fragment)
     
     def _handle_toquantity(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle toQuantity() function.
         
-        Converts a string or number to a FHIR Quantity. For SQL purposes, we'll try to
-        parse numeric values and return them as decimals.
+        Converts a string or number to a FHIR Quantity structure.
+        This creates a proper FHIR Quantity JSON object with value, unit, system, and code properties.
         """
-        sql_fragment = context.dialect.try_cast(input_state.sql_fragment, 'decimal')
+        # Validate that no arguments are provided
+        if self.args:
+            raise ValueError(f"toQuantity() function takes no arguments, but {len(self.args)} were provided")
+        
+        # Generate FHIR Quantity structure
+        sql_fragment = self._generate_quantity_structure(input_state.sql_fragment, context)
         return self._create_scalar_result(input_state, sql_fragment)
+    
+    def _generate_quantity_structure(self, input_expr: str, context: 'ExecutionContext') -> str:
+        """Generate a FHIR Quantity JSON structure from an input value."""
+        if context.dialect.name.upper() == 'DUCKDB':
+            return f"""
+            CASE 
+                WHEN {input_expr} IS NOT NULL AND 
+                     REGEXP_MATCHES(TRIM(CAST({input_expr} AS STRING)), '^[+-]?[0-9]*\\.?[0-9]+([eE][+-]?[0-9]+)?\\s*([a-zA-Z].*)?$')
+                THEN json_object(
+                    'value', TRY_CAST(REGEXP_EXTRACT(TRIM(CAST({input_expr} AS STRING)), '^[+-]?[0-9]*\\.?[0-9]+([eE][+-]?[0-9]+)?', 0) AS DECIMAL),
+                    'unit', COALESCE(REGEXP_EXTRACT(TRIM(CAST({input_expr} AS STRING)), '^[+-]?[0-9]*\\.?[0-9]+([eE][+-]?[0-9]+)?\\s*(.*)$', 2), '1'),
+                    'system', 'http://unitsofmeasure.org',
+                    'code', COALESCE(REGEXP_EXTRACT(TRIM(CAST({input_expr} AS STRING)), '^[+-]?[0-9]*\\.?[0-9]+([eE][+-]?[0-9]+)?\\s*(.*)$', 2), '1')
+                )
+                WHEN TRY_CAST({input_expr} AS DECIMAL) IS NOT NULL
+                THEN json_object(
+                    'value', TRY_CAST({input_expr} AS DECIMAL),
+                    'unit', '1',
+                    'system', 'http://unitsofmeasure.org',
+                    'code', '1'
+                )
+                ELSE NULL
+            END
+            """.strip()
+        else:  # PostgreSQL
+            return f"""
+            CASE 
+                WHEN {input_expr} IS NOT NULL AND 
+                     {input_expr}::text ~ '^[+-]?[0-9]*\\.?[0-9]+([eE][+-]?[0-9]+)?\\s*([a-zA-Z].*)?$'
+                THEN jsonb_build_object(
+                    'value', (regexp_match({input_expr}::text, '^[+-]?[0-9]*\\.?[0-9]+([eE][+-]?[0-9]+)?'))[1]::decimal,
+                    'unit', COALESCE((regexp_match({input_expr}::text, '^[+-]?[0-9]*\\.?[0-9]+([eE][+-]?[0-9]+)?\\s*(.*)$'))[2], '1'),
+                    'system', 'http://unitsofmeasure.org',
+                    'code', COALESCE((regexp_match({input_expr}::text, '^[+-]?[0-9]*\\.?[0-9]+([eE][+-]?[0-9]+)?\\s*(.*)$'))[2], '1')
+                )
+                WHEN {input_expr}::decimal IS NOT NULL
+                THEN jsonb_build_object(
+                    'value', {input_expr}::decimal,
+                    'unit', '1',
+                    'system', 'http://unitsofmeasure.org',
+                    'code', '1'
+                )
+                ELSE NULL
+            END
+            """.strip()
     
     def _handle_quantity(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle Quantity() constructor function.
@@ -362,14 +440,32 @@ class TypeConversionFunctionHandler(FunctionHandler):
             context_mode=ContextMode.SINGLE_VALUE
         )
     
-    def _handle_converts_functions(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
+    def _handle_converts_functions(self, function_name: str, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle convertsTo* functions.
         
         These functions test whether a value can be converted to a specific type.
         They return true/false without performing the actual conversion.
         """
-        # Extract the target type from function name (e.g., 'convertstoboolean' -> 'boolean')
-        target_type = self.func_name.replace('convertsto', '').lower()
+        if function_name == 'convertsto':
+            # Handle convertsto('Type') format with argument
+            if not self.args:
+                raise InvalidArgumentError("convertsTo() function requires one argument: the target type")
+            if len(self.args) > 1:
+                raise InvalidArgumentError("convertsTo() function requires exactly one argument")
+            
+            # Extract value from LiteralOperation if needed
+            arg = self.args[0]
+            if hasattr(arg, 'value'):
+                # This is a LiteralOperation - extract the actual value
+                target_type = str(arg.value).lower().strip("'\"")
+            else:
+                # Fallback to string conversion
+                target_type = str(arg).lower().strip("'\"")
+        else:
+            # Handle convertstoboolean, convertstointeger, etc. format
+            if self.args:
+                raise InvalidArgumentError(f"{function_name}() function takes no arguments, but {len(self.args)} were provided")
+            target_type = function_name.replace('convertsto', '').lower()
         
         sql_fragment = context.dialect.generate_converts_to_check(input_state.sql_fragment, target_type)
         

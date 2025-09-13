@@ -77,6 +77,9 @@ class DateTimeFunctionHandler(FunctionHandler):
     
     def _handle_now(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle now() function."""
+        if self.args:
+            raise InvalidArgumentError(f"now() function requires exactly 0 arguments, got {len(self.args)}")
+        
         sql_fragment = context.dialect.generate_date_time_now()
         
         return input_state.evolve(
@@ -87,6 +90,9 @@ class DateTimeFunctionHandler(FunctionHandler):
     
     def _handle_today(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle today() function."""
+        if self.args:
+            raise InvalidArgumentError(f"today() function requires exactly 0 arguments, got {len(self.args)}")
+        
         sql_fragment = context.dialect.generate_date_time_today()
         
         return input_state.evolve(
@@ -100,6 +106,9 @@ class DateTimeFunctionHandler(FunctionHandler):
         
         Returns the time-of-day part of a datetime value.
         """
+        if self.args:
+            raise InvalidArgumentError(f"timeOfDay() function requires exactly 0 arguments, got {len(self.args)}")
+        
         sql_fragment = context.dialect.cast_to_time(input_state.sql_fragment)
         return self._create_scalar_result(input_state, sql_fragment)
     

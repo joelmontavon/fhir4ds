@@ -12,7 +12,8 @@ from ..core.base import PipelineOperation, SQLState, ExecutionContext
 from ..core.builder import FHIRPathPipeline
 from ..operations.path import PathNavigationOperation, IndexerOperation
 from ..operations.literals import LiteralOperation, CollectionLiteralOperation
-from ..operations.functions import FunctionCallOperation
+from ..operations.functions import FunctionCallOperation, InvalidArgumentError, FHIRPathExecutionError
+from ..core.base import PipelineValidationError
 from ...fhirpath.parser.ast_nodes import (
     ASTNode, ThisNode, VariableNode, LiteralNode, IdentifierNode,
     FunctionCallNode, BinaryOpNode, UnaryOpNode, PathNode, IndexerNode,
@@ -190,16 +191,35 @@ class ASTToPipelineConverter:
     
     def _convert_function_call_node(self, node: FunctionCallNode) -> List[PipelineOperation[SQLState]]:
         """Convert FunctionCallNode to pipeline operations."""
-        # Convert function arguments
-        arg_operations = []
-        for arg in node.args:
-            arg_ops = self._convert_node(arg)
-            arg_operations.extend(arg_ops)
+        # Convert function arguments - each argument should be treated as a complete entity
+        arg_objects = []
+        all_supporting_operations = []
         
-        # Create function call operation
-        operation = FunctionCallOperation(node.name, arg_operations)
+        for arg in node.args:
+            if isinstance(arg, PathNode):
+                # Path arguments should be converted to sub-pipelines
+                sub_pipeline = self._convert_path_argument_to_pipeline(arg)
+                arg_objects.append(sub_pipeline)
+            else:
+                # Other arguments (literals, etc.) - convert normally
+                arg_ops = self._convert_node(arg)
+                if len(arg_ops) == 1:
+                    # Single operation becomes the argument
+                    arg_objects.append(arg_ops[0])
+                else:
+                    # Multiple operations - treat the last one as the result
+                    all_supporting_operations.extend(arg_ops[:-1])
+                    arg_objects.append(arg_ops[-1])
+        
+        # Create function call operation with properly structured arguments
+        operation = FunctionCallOperation(node.name, arg_objects)
         self.conversion_stats['operations_created'] += 1
-        return arg_operations + [operation]
+        return all_supporting_operations + [operation]
+    
+    def _convert_path_argument_to_pipeline(self, path_node: PathNode) -> 'FHIRPathPipeline':
+        """Convert a PathNode argument into a sub-pipeline for function argument evaluation."""
+        path_operations = self._convert_path_node(path_node)
+        return FHIRPathPipeline(path_operations)
     
     def _convert_binary_op_node(self, node: BinaryOpNode) -> List[PipelineOperation[SQLState]]:
         """Convert BinaryOpNode to pipeline operations."""
@@ -240,14 +260,25 @@ class ASTToPipelineConverter:
                     # Pass raw AST arguments for functions that need to analyze conditions or literals
                     function_op = FunctionCallOperation(segment.name, segment.args)
                 else:
-                    # Convert arguments but DON'T add them to the main pipeline - they're not operations
-                    arg_operations = []
+                    # Convert function arguments - each argument should be treated as a complete entity
+                    arg_objects = []
                     for arg in segment.args:
-                        arg_ops = self._convert_node(arg)
-                        arg_operations.extend(arg_ops)
+                        if isinstance(arg, PathNode):
+                            # Path arguments should be converted to sub-pipelines
+                            sub_pipeline = self._convert_path_argument_to_pipeline(arg)
+                            arg_objects.append(sub_pipeline)
+                        else:
+                            # Other arguments (literals, etc.) - convert normally
+                            arg_ops = self._convert_node(arg)
+                            if len(arg_ops) == 1:
+                                # Single operation becomes the argument
+                                arg_objects.append(arg_ops[0])
+                            else:
+                                # Multiple operations - use the last one as the result
+                                arg_objects.append(arg_ops[-1])
                     
-                    # Create function call operation with the converted arguments
-                    function_op = FunctionCallOperation(segment.name, arg_operations)
+                    # Create function call operation with properly structured arguments
+                    function_op = FunctionCallOperation(segment.name, arg_objects)
                 operations.append(function_op)
                 self.conversion_stats['operations_created'] += 1
             else:
@@ -430,6 +461,9 @@ class PipelineASTBridge:
             compiled = pipeline.compile(context)
             return compiled.get_full_sql()
             
+        except (ValueError, InvalidArgumentError, FHIRPathExecutionError, PipelineValidationError) as e:
+            # Re-raise validation exceptions (like function argument validation) directly
+            raise e
         except Exception as e:
             if self.fallback_to_ast and self.migration_mode == "gradual":
                 logger.warning(f"Pipeline conversion failed, falling back to AST: {e}")

@@ -55,9 +55,15 @@ class BaseMeasureReportGenerator(ABC):
                         if patient_id:
                             patient_ids.add(patient_id)
         
-        # Final fallback: if still no patient IDs found, use generic placeholders
-        # This ensures MeasureReport generation can proceed even with library-level results  
+        # Final fallback: if still no patient IDs found, check if we have any results at all
         if not patient_ids:
+            # If define_results is empty, return empty list (no reports should be generated)
+            if not define_results:
+                logger.info("No define results found - returning empty patient list for empty bundle")
+                return []
+            
+            # If we have results but no patient IDs, use generic placeholder
+            # This ensures MeasureReport generation can proceed even with library-level results  
             logger.warning("No patient IDs could be extracted from execution results.")
             logger.info("This may indicate library-level evaluation rather than patient-level evaluation.")
             logger.info("Consider implementing patient-level CQL evaluation for accurate MeasureReports.")

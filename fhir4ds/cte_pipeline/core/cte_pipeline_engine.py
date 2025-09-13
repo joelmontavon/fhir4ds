@@ -129,6 +129,10 @@ class CTEPipelineEngine:
             'performance_improvement_ratio': 0.0
         }
         
+        # Store last generated SQL for debugging and analysis
+        self.last_generated_sql = None
+        self.last_compiled_query = None
+        
         logger.info(f"Initialized CTE Pipeline Engine for {self.dialect} dialect")
     
     def execute_cql_library(self, 
@@ -161,6 +165,9 @@ class CTEPipelineEngine:
             define_statements = self._extract_define_statements(library_content)
             logger.debug(f"Extracted {len(define_statements)} define statements from library")
             
+            # Phase 1.5: Parse valueset definitions for terminology resolution
+            self.cql_converter.set_valueset_mappings(library_content)
+            
             # Phase 2: Convert CQL defines to CTE fragments
             cte_fragments = self._convert_defines_to_ctes(define_statements, context)
             logger.debug(f"Converted {len(cte_fragments)} CQL defines to CTE fragments")
@@ -168,6 +175,10 @@ class CTEPipelineEngine:
             # Phase 3: Build monolithic query
             compiled_query = self._build_monolithic_query(define_statements, cte_fragments)
             logger.info(f"Built monolithic query with {len(compiled_query.fragments)} CTEs")
+            
+            # Store the compiled query and SQL for later retrieval
+            self.last_compiled_query = compiled_query
+            self.last_generated_sql = compiled_query.main_sql
             
             # Phase 4: Execute single comprehensive query
             execution_results = self._execute_monolithic_query(compiled_query, context)
@@ -496,6 +507,24 @@ class CTEPipelineEngine:
             'performance_improvement_ratio': 0.0
         }
         logger.info("Reset CTE Pipeline Engine statistics")
+    
+    def get_last_generated_sql(self) -> Optional[str]:
+        """
+        Get the last generated SQL query.
+        
+        Returns:
+            The complete SQL query from the last library execution, or None if no execution occurred
+        """
+        return self.last_generated_sql
+    
+    def get_last_compiled_query(self) -> Optional['CompiledCTEQuery']:
+        """
+        Get the last compiled CTE query object.
+        
+        Returns:
+            The complete compiled query object from the last execution, or None if no execution occurred
+        """
+        return self.last_compiled_query
 
 
 def create_cte_pipeline_engine(dialect: str, 
