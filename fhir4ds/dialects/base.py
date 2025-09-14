@@ -93,6 +93,11 @@ class DatabaseDialect(ABC):
     def create_fhir_table(self, table_name: str, json_col: str) -> None:
         """Create the FHIR resources table"""
         pass
+
+    @abstractmethod
+    def create_terminology_system_mappings_table(self) -> None:
+        """Create the terminology system mappings table for crosswalking OID/URI/URN"""
+        pass
     
     @abstractmethod
     def bulk_load_json(self, file_path: str, table_name: str, json_col: str) -> int:
@@ -1064,8 +1069,38 @@ class DatabaseDialect(ABC):
                     WHEN json_extract({input_expr}, '$.modifierExtension') IS NULL THEN TRUE
                     ELSE json_array_length(json_extract({input_expr}, '$.modifierExtension')) = 0
                 END
-            ELSE TRUE 
+            ELSE TRUE
         END"""
+
+    @abstractmethod
+    def normalize_terminology_system(self, system_expr: str) -> str:
+        """
+        Generate SQL to normalize terminology system identifiers for comparison.
+
+        This handles canonical system URI crosswalking at execution time,
+        converting between OIDs and URIs as needed for terminology matching.
+        Uses the terminology_system_mappings table for efficient lookups.
+
+        Args:
+            system_expr: SQL expression that evaluates to a system identifier
+
+        Returns:
+            SQL expression that returns the canonical system URI
+        """
+        pass
+
+    @abstractmethod
+    def generate_valueset_match_condition(self, valueset_id: str) -> str:
+        """
+        Generate SQL condition to match resource codes against ValueSet expansion.
+
+        Args:
+            valueset_id: ID of the ValueSet FHIR resource
+
+        Returns:
+            SQL EXISTS condition that matches both code and system
+        """
+        pass
 
     def optimize_pipeline(self, pipeline: 'FHIRPathPipeline') -> 'FHIRPathPipeline':
         """

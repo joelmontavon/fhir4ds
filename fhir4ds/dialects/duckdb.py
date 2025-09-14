@@ -113,7 +113,55 @@ class DuckDBDialect(DatabaseDialect):
             )
         """)
         logger.info(f"Created FHIR table: {table_name}")
-    
+
+    def create_terminology_system_mappings_table(self) -> None:
+        """Create the terminology system mappings table for crosswalking OID/URI/URN"""
+        try:
+            from ..terminology.system_mappings import get_all_system_identifiers
+
+            # Check if table already exists
+            try:
+                result = self.connection.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'terminology_system_mappings'").fetchone()
+                table_exists = result[0] > 0 if result else False
+            except:
+                table_exists = False
+
+            if table_exists:
+                logger.info("Terminology system mappings table already exists, skipping creation")
+                return
+
+            # Create terminology mappings table
+            create_sql = """
+                CREATE TABLE terminology_system_mappings (
+                    original_system VARCHAR PRIMARY KEY,
+                    canonical_system VARCHAR NOT NULL,
+                    system_type VARCHAR NOT NULL,
+                    name VARCHAR NOT NULL
+                )
+            """
+            self.connection.execute(create_sql)
+
+            # Insert all mappings
+            mappings = get_all_system_identifiers()
+            insert_sql = """
+                INSERT INTO terminology_system_mappings
+                (original_system, canonical_system, system_type, name)
+                VALUES (?, ?, ?, ?)
+            """
+
+            for mapping in mappings:
+                self.connection.execute(insert_sql, [
+                    mapping['original_system'],
+                    mapping['canonical_system'],
+                    mapping['system_type'],
+                    mapping['name']
+                ])
+
+            logger.info(f"Created terminology mappings table with {len(mappings)} mappings")
+
+        except Exception as e:
+            self._handle_operation_error("terminology mappings table creation", e)
+
     def bulk_load_json(self, file_path: str, table_name: str, json_col: str) -> int:
         """Bulk load JSON file using DuckDB's read_json functionality"""
         # Detect file type by sampling
@@ -1705,7 +1753,7 @@ class DuckDBDialect(DatabaseDialect):
     def generate_collection_distinct_check(self, collection_expr: str) -> str:
         """Generate SQL to check if all elements in collection are distinct using DuckDB."""
         return f"""(
-            CASE 
+            CASE
                 WHEN json_array_length({collection_expr}) = 0 THEN TRUE
                 WHEN json_array_length({collection_expr}) = 1 THEN TRUE
                 ELSE (
@@ -1713,4 +1761,37 @@ class DuckDBDialect(DatabaseDialect):
                     FROM json_each({collection_expr})
                 )
             END
+        )"""
+
+    def normalize_terminology_system(self, system_expr: str) -> str:
+        """
+        Generate DuckDB SQL to normalize terminology system identifiers for comparison.
+
+        This handles canonical system URI crosswalking at execution time,
+        using the terminology_system_mappings table for efficient lookups.
+        """
+        return f"""COALESCE(
+            (SELECT canonical_system
+             FROM terminology_system_mappings
+             WHERE original_system = {system_expr}),
+            {system_expr}
+        )"""
+
+    def generate_valueset_match_condition(self, valueset_id: str) -> str:
+        """Generate DuckDB SQL condition to match resource codes against ValueSet expansion.
+
+        Uses execution-time system normalization to handle OID/URI crosswalking
+        without modifying stored data.
+        """
+        return f"""EXISTS (
+            SELECT 1 FROM fhir_resources vs
+            WHERE json_extract_string(vs.resource, '$.resourceType') = 'ValueSet'
+            AND json_extract_string(vs.resource, '$.id') = '{valueset_id}'
+            AND EXISTS (
+                SELECT 1 FROM json_each(json_extract(vs.resource, '$.expansion.contains')) AS vs_code,
+                             json_each(json_extract(resource, '$.code.coding')) AS resource_coding
+                WHERE json_extract_string(vs_code.value, '$.code') = json_extract_string(resource_coding.value, '$.code')
+                AND {self.normalize_terminology_system("json_extract_string(vs_code.value, '$.system')")} =
+                    {self.normalize_terminology_system("json_extract_string(resource_coding.value, '$.system')")}
+            )
         )"""

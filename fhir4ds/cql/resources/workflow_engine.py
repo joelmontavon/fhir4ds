@@ -77,7 +77,8 @@ class CQLWorkflowEngine:
             dialect=dialect,
             database_connection=database_connection,
             workflow_config=workflow_config,
-            terminology_client=terminology_client
+            terminology_client=terminology_client,
+            datastore=self.datastore
         )
         
         logger.info(f"CTE-Only Workflow Engine initialized with {dialect} dialect")

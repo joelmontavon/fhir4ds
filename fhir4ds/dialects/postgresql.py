@@ -109,7 +109,49 @@ class PostgreSQLDialect(DatabaseDialect):
         
         # No need to commit with autocommit=True
         logger.info(f"Created FHIR table: {table_name} with JSONB optimization and enhanced indexing")
-    
+
+    def create_terminology_system_mappings_table(self) -> None:
+        """Create the terminology system mappings table for crosswalking OID/URI/URN"""
+        try:
+            from ..terminology.system_mappings import get_all_system_identifiers
+
+            cursor = self.connection.cursor()
+
+            # Drop and create terminology mappings table
+            cursor.execute("DROP TABLE IF EXISTS terminology_system_mappings")
+            cursor.execute("""
+                CREATE TABLE terminology_system_mappings (
+                    original_system TEXT PRIMARY KEY,
+                    canonical_system TEXT NOT NULL,
+                    system_type TEXT NOT NULL,
+                    name TEXT NOT NULL
+                )
+            """)
+
+            # Create index for fast lookups
+            cursor.execute("CREATE INDEX idx_terminology_mappings_original ON terminology_system_mappings(original_system)")
+
+            # Insert all mappings
+            mappings = get_all_system_identifiers()
+            insert_sql = """
+                INSERT INTO terminology_system_mappings
+                (original_system, canonical_system, system_type, name)
+                VALUES (%s, %s, %s, %s)
+            """
+
+            for mapping in mappings:
+                cursor.execute(insert_sql, (
+                    mapping['original_system'],
+                    mapping['canonical_system'],
+                    mapping['system_type'],
+                    mapping['name']
+                ))
+
+            logger.info(f"Created terminology mappings table with {len(mappings)} mappings")
+
+        except Exception as e:
+            self._handle_operation_error("terminology mappings table creation", e)
+
     def bulk_load_json(self, file_path: str, table_name: str, json_col: str) -> int:
         """Enhanced bulk load JSON using PostgreSQL COPY for better performance"""
         try:
@@ -1918,7 +1960,7 @@ class PostgreSQLDialect(DatabaseDialect):
     def generate_collection_distinct_check(self, collection_expr: str) -> str:
         """Generate SQL to check if all elements in collection are distinct using PostgreSQL."""
         return f"""(
-            CASE 
+            CASE
                 WHEN jsonb_array_length({collection_expr}) = 0 THEN TRUE
                 WHEN jsonb_array_length({collection_expr}) = 1 THEN TRUE
                 ELSE (
@@ -1926,4 +1968,37 @@ class PostgreSQLDialect(DatabaseDialect):
                     FROM jsonb_array_elements({collection_expr}) AS t(value)
                 )
             END
+        )"""
+
+    def normalize_terminology_system(self, system_expr: str) -> str:
+        """
+        Generate PostgreSQL SQL to normalize terminology system identifiers for comparison.
+
+        This handles canonical system URI crosswalking at execution time,
+        using the terminology_system_mappings table for efficient lookups.
+        """
+        return f"""COALESCE(
+            (SELECT canonical_system
+             FROM terminology_system_mappings
+             WHERE original_system = {system_expr}),
+            {system_expr}
+        )"""
+
+    def generate_valueset_match_condition(self, valueset_id: str) -> str:
+        """Generate PostgreSQL SQL condition to match resource codes against ValueSet expansion.
+
+        Uses execution-time system normalization to handle OID/URI crosswalking
+        without modifying stored data.
+        """
+        return f"""EXISTS (
+            SELECT 1 FROM fhir_resources vs
+            WHERE jsonb_extract_path_text(vs.resource, 'resourceType') = 'ValueSet'
+            AND jsonb_extract_path_text(vs.resource, 'id') = '{valueset_id}'
+            AND EXISTS (
+                SELECT 1 FROM jsonb_array_elements(jsonb_extract_path(vs.resource, 'expansion', 'contains')) AS vs_code,
+                             jsonb_array_elements(jsonb_extract_path(resource, 'code', 'coding')) AS resource_coding
+                WHERE vs_code ->> 'code' = resource_coding ->> 'code'
+                AND {self.normalize_terminology_system("vs_code ->> 'system'")} =
+                    {self.normalize_terminology_system("resource_coding ->> 'system'")}
+            )
         )"""

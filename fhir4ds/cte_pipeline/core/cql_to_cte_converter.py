@@ -81,38 +81,46 @@ class ResourceTypeDetector:
     it for CTE-specific requirements.
     """
     
-    # Resource type patterns from existing detection logic
+    # Resource type patterns with improved detection
     RESOURCE_TYPE_PATTERNS = {
         'Patient': {
-            'indicators': ['[Patient]', 'patient', 'AgeInYears()', 'birthDate', 'gender'],
+            'resource_syntax': ['[Patient]', '[Patient:'],
+            'indicators': ['patient', 'AgeInYears()', 'birthDate', 'gender'],
             'priority': 10
         },
         'Condition': {
-            'indicators': ['[Condition', 'asthma', 'diabetes', 'hypertension', 'diagnosis', 'condition'],
+            'resource_syntax': ['[Condition]', '[Condition:'],
+            'indicators': ['asthma', 'diabetes', 'hypertension', 'diagnosis'],
             'priority': 8
         },
         'MedicationDispense': {
-            'indicators': ['[MedicationDispense]', 'medication', 'dispense', 'medicationCodeableConcept'],
+            'resource_syntax': ['[MedicationDispense]', '[MedicationDispense:'],
+            'indicators': ['medication', 'dispense', 'medicationCodeableConcept'],
             'priority': 7
         },
         'Encounter': {
-            'indicators': ['[Encounter]', 'encounter', 'visit', 'hospitalization', 'admission'],
+            'resource_syntax': ['[Encounter]', '[Encounter:'],
+            'indicators': ['visit', 'hospitalization', 'admission'],
             'priority': 6
         },
         'Observation': {
-            'indicators': ['[Observation', 'observation', 'vital', 'lab', 'measurement'],
+            'resource_syntax': ['[Observation]', '[Observation:'],
+            'indicators': ['observation', 'vital', 'lab', 'measurement'],
             'priority': 5
         },
         'Procedure': {
-            'indicators': ['[Procedure]', 'procedure', 'surgery', 'operation'],
+            'resource_syntax': ['[Procedure]', '[Procedure:'],
+            'indicators': ['procedure', 'surgery', 'operation'],
             'priority': 4
         },
         'DiagnosticReport': {
-            'indicators': ['[DiagnosticReport]', 'diagnostic', 'report', 'result'],
+            'resource_syntax': ['[DiagnosticReport]', '[DiagnosticReport:'],
+            'indicators': ['diagnostic', 'report', 'result'],
             'priority': 3
         },
         'Immunization': {
-            'indicators': ['[Immunization]', 'immunization', 'vaccine', 'vaccination'],
+            'resource_syntax': ['[Immunization]', '[Immunization:'],
+            'indicators': ['immunization', 'vaccine', 'vaccination'],
             'priority': 2
         }
     }
@@ -120,54 +128,63 @@ class ResourceTypeDetector:
     def detect_from_cql(self, cql_expr: str, define_name: str = "") -> str:
         """
         Detect FHIR resource type from CQL expression.
-        
-        Leverages existing patterns from functions.py with enhanced analysis
-        including define name context and stack analysis integration.
-        
+
+        Uses improved detection logic that prioritizes explicit FHIR resource syntax
+        over contextual indicators.
+
         Args:
             cql_expr: CQL expression to analyze
             define_name: Define name for additional context
-            
+
         Returns:
             Detected FHIR resource type
         """
         cql_lower = cql_expr.lower()
         define_lower = define_name.lower()
-        
-        # Score each resource type based on pattern matches
+
+        # First pass: Check for explicit FHIR resource syntax (highest priority)
+        resource_syntax_matches = {}
+        for resource_type, config in self.RESOURCE_TYPE_PATTERNS.items():
+            for syntax in config['resource_syntax']:
+                if syntax.lower() in cql_lower:
+                    # Give highest priority to explicit resource syntax
+                    resource_syntax_matches[resource_type] = resource_syntax_matches.get(resource_type, 0) + 50
+
+        if resource_syntax_matches:
+            # If we found explicit resource syntax, prefer it
+            detected_type = max(resource_syntax_matches.items(), key=lambda x: x[1])[0]
+            logger.debug(f"Detected resource type '{detected_type}' from explicit syntax in CQL: '{cql_expr[:50]}...'")
+            return detected_type
+
+        # Second pass: Score based on contextual indicators
         scores = {}
-        
         for resource_type, config in self.RESOURCE_TYPE_PATTERNS.items():
             score = 0
-            
-            # Check CQL expression patterns
+
+            # Check CQL expression indicators
             for indicator in config['indicators']:
                 if indicator.lower() in cql_lower:
-                    # Exact bracket match gets higher score
-                    if indicator.startswith('[') and indicator.endswith(']'):
-                        score += 20
-                    else:
-                        score += config['priority']
-            
-            # Check define name patterns  
+                    score += config['priority']
+
+            # Check define name indicators
             for indicator in config['indicators']:
                 if indicator.lower() in define_lower:
                     score += config['priority'] // 2
-            
+
             if score > 0:
                 scores[resource_type] = score
-        
+
         if scores:
             # Return resource type with highest score
             detected_type = max(scores.items(), key=lambda x: x[1])[0]
-            logger.debug(f"Detected resource type '{detected_type}' for CQL: '{cql_expr[:50]}...' (scores: {scores})")
+            logger.debug(f"Detected resource type '{detected_type}' from indicators in CQL: '{cql_expr[:50]}...' (scores: {scores})")
             return detected_type
-        
+
         # Enhanced stack analysis fallback (from existing functions.py)
         detected_from_stack = self._detect_from_call_stack(define_name)
         if detected_from_stack != 'Patient':
             return detected_from_stack
-        
+
         # Default fallback
         logger.debug(f"Using default Patient resource type for CQL: '{cql_expr[:50]}...'")
         return 'Patient'
@@ -413,16 +430,18 @@ class CQLToCTEConverter:
     with terminology services, resource type detection, and dialect patterns.
     """
     
-    def __init__(self, dialect: str, terminology_client=None):
+    def __init__(self, dialect: str, terminology_client=None, datastore=None):
         """
         Initialize CQL to CTE converter.
-        
+
         Args:
             dialect: Database dialect ('duckdb' or 'postgresql')
             terminology_client: Optional terminology client for value set resolution
+            datastore: Optional datastore for ValueSet caching
         """
         self.dialect = dialect.upper()
         self.terminology_client = terminology_client
+        self.datastore = datastore
         self.valueset_mappings = {}  # Maps valueset names to OIDs
         self.resource_type_detector = ResourceTypeDetector()
         self.pattern_analyzer = CQLPatternAnalyzer(dialect)
@@ -430,6 +449,10 @@ class CQLToCTEConverter:
         # Task 3.2 Enhancement: Enhanced dependency detection
         self.dependency_detector = EnhancedDependencyDetector()
         
+        # ValueSet CTE tracking
+        self.required_valuesets = {}  # Maps ValueSet names to expansion data
+        self.valueset_cte_names = {}  # Maps ValueSet names to CTE names
+
         # Conversion statistics for monitoring
         self.conversion_stats = {
             'expressions_converted': 0,
@@ -478,8 +501,19 @@ class CQLToCTEConverter:
             terminology_conditions = self._resolve_terminology_conditions(cql_expr, resource_type)
             self.conversion_stats['terminology_resolutions'] += len(terminology_conditions)
         
-        # Combine all conditions
-        all_conditions = where_conditions + terminology_conditions
+        # Combine conditions - if terminology resolution succeeded, prefer it over text matching
+        if terminology_conditions:
+            # Filter out text matching conditions from pattern analyzer
+            filtered_pattern_conditions = []
+            for condition in where_conditions:
+                # Keep resource type and structural conditions, remove text matching
+                if (not 'LIKE' in condition or
+                    'resourceType' in condition):
+                    filtered_pattern_conditions.append(condition)
+            all_conditions = filtered_pattern_conditions + terminology_conditions
+        else:
+            # No terminology resolution, use pattern conditions as fallback
+            all_conditions = where_conditions
         
         # Build select fields for the CTE
         select_fields = self._build_select_fields(resource_type, cql_expr)
@@ -655,30 +689,54 @@ class CQLToCTEConverter:
             value_set_refs = self._extract_value_set_references(cql_expr)
             
             for value_set_ref in value_set_refs:
-                # Expand value set using existing terminology client
-                valueset_expansion = self.terminology_client.expand_valueset(value_set_ref)
+                # First, check datastore cache for ValueSet
+                cached_valueset = None
+                if self.datastore:
+                    cached_valueset = self.datastore.get_cached_valueset(value_set_ref)
+                    if cached_valueset:
+                        logger.debug(f"Using cached ValueSet: '{value_set_ref}'")
+
+                if cached_valueset:
+                    # Use cached ValueSet expansion
+                    valueset_expansion = cached_valueset
+                else:
+                    # Fall back to VSAC call
+                    valueset_oid = self.valueset_mappings.get(value_set_ref)
+                    if not valueset_oid:
+                        logger.warning(f"No OID mapping found for ValueSet: '{value_set_ref}', falling back to text matching")
+                        conditions.extend(self._generate_text_matching_conditions(cql_expr, resource_type))
+                        continue
+
+                    logger.debug(f"Converting ValueSet '{value_set_ref}' to OID '{valueset_oid}' for VSAC call")
+
+                    # Expand value set using OID (not name)
+                    valueset_expansion = self.terminology_client.expand_valueset(valueset_oid)
+
+                    # Cache the VSAC response for future use
+                    if valueset_expansion and self.datastore:
+                        try:
+                            self.datastore.cache_valueset(value_set_ref, valueset_expansion)
+                            logger.debug(f"Cached VSAC response for ValueSet: '{value_set_ref}'")
+                        except Exception as e:
+                            logger.warning(f"Failed to cache ValueSet '{value_set_ref}': {e}")
                 
                 if valueset_expansion:
-                    # Extract codes from FHIR ValueSet expansion
-                    expanded_codes = self._extract_codes_from_expansion(valueset_expansion)
-                    
-                    if expanded_codes:
-                        # Generate IN clause with expanded codes
-                        code_list = "', '".join(expanded_codes)
-                        
-                        if self.dialect == 'DUCKDB':
-                            conditions.extend([
-                                f"json_extract_string(resource, '$.code.coding[0].code') IN ('{code_list}')",
-                                f"EXISTS (SELECT 1 FROM json_each(json_extract(resource, '$.code.coding')) AS coding WHERE json_extract_string(coding.value, '$.code') IN ('{code_list}'))"
-                            ])
-                        else:  # PostgreSQL
-                            conditions.extend([
-                                f"jsonb_extract_path_text(resource, 'code', 'coding', '0', 'code') IN ('{code_list}')",
-                                f"EXISTS (SELECT 1 FROM jsonb_array_elements(jsonb_extract_path(resource, 'code', 'coding')) AS coding WHERE coding ->> 'code' IN ('{code_list}'))"
-                            ])
+                    # Store ValueSet as regular FHIR resource in datastore
+                    try:
+                        self._store_valueset_as_fhir_resource(value_set_ref, valueset_expansion)
+                        logger.debug(f"Stored ValueSet '{value_set_ref}' as FHIR resource")
+
+                        # Generate FHIRPath-based query conditions that reference the ValueSet resource
+                        valueset_id = self._generate_valueset_resource_id(value_set_ref)
+                        conditions.extend(self._generate_valueset_fhir_conditions(valueset_id, resource_type))
+
+                    except Exception as e:
+                        logger.warning(f"Failed to store ValueSet '{value_set_ref}' as FHIR resource: {e}")
+                        # Fall back to text matching if resource storage fails
+                        conditions.extend(self._generate_text_matching_conditions(cql_expr, resource_type))
                 
                 else:
-                    logger.warning(f"No codes found for value set: {value_set_ref}")
+                    logger.warning(f"VSAC expansion returned empty for ValueSet OID: {valueset_oid} (name: {value_set_ref})")
         
         except Exception as e:
             logger.warning(f"Terminology resolution failed: {e}")
@@ -837,6 +895,124 @@ class CQLToCTEConverter:
             result_type="fallback"
         )
     
+    # ValueSet CTE Helper Methods
+
+    def _generate_valueset_cte_name(self, valueset_name: str) -> str:
+        """
+        Generate valid SQL identifier for ValueSet CTE name.
+
+        Args:
+            valueset_name: Original ValueSet name
+
+        Returns:
+            Sanitized CTE name safe for SQL
+        """
+        import re
+        # Convert to lowercase and replace non-alphanumeric with underscores
+        sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', valueset_name.lower())
+
+        # Ensure it starts with a letter
+        if not sanitized[0].isalpha():
+            sanitized = f"vs_{sanitized}"
+
+        # Add suffix to indicate it's a ValueSet CTE
+        return f"{sanitized}_vs"
+
+    def _track_required_valueset(self, valueset_name: str, valueset_expansion: Dict[str, Any], cte_name: str):
+        """
+        Track ValueSet for CTE generation.
+
+        Args:
+            valueset_name: Name of the ValueSet
+            valueset_expansion: FHIR ValueSet resource with expansion
+            cte_name: Generated CTE name
+        """
+        self.required_valuesets[valueset_name] = valueset_expansion
+        self.valueset_cte_names[valueset_name] = cte_name
+        logger.debug(f"Tracked ValueSet '{valueset_name}' for CTE generation as '{cte_name}'")
+
+    def get_required_valuesets(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get all ValueSets required for CTE generation.
+
+        Returns:
+            Dictionary mapping ValueSet names to their expansion data
+        """
+        return dict(self.required_valuesets)
+
+    def get_valueset_cte_names(self) -> Dict[str, str]:
+        """
+        Get mapping of ValueSet names to their CTE names.
+
+        Returns:
+            Dictionary mapping ValueSet names to CTE names
+        """
+        return dict(self.valueset_cte_names)
+
+    def clear_valueset_tracking(self):
+        """Clear ValueSet tracking for fresh processing."""
+        self.required_valuesets.clear()
+        self.valueset_cte_names.clear()
+
+    def _store_valueset_as_fhir_resource(self, valueset_name: str, valueset_expansion: Dict[str, Any]):
+        """
+        Store ValueSet expansion as a FHIR resource in the datastore.
+
+        Args:
+            valueset_name: Name of the ValueSet
+            valueset_expansion: FHIR ValueSet resource with expansion
+        """
+        if not self.datastore:
+            raise ValueError("No datastore available for ValueSet storage")
+
+        # Generate a consistent resource ID for the ValueSet
+        resource_id = self._generate_valueset_resource_id(valueset_name)
+
+        # Ensure the ValueSet has a proper ID
+        valueset_resource = dict(valueset_expansion)
+        valueset_resource['id'] = resource_id
+
+        # Store as FHIR resource in datastore
+        self.datastore.load_resource(valueset_resource)
+        logger.debug(f"Stored ValueSet '{valueset_name}' as FHIR resource with ID '{resource_id}'")
+
+    def _generate_valueset_resource_id(self, valueset_name: str) -> str:
+        """
+        Generate a consistent FHIR resource ID for a ValueSet.
+
+        Args:
+            valueset_name: Name of the ValueSet
+
+        Returns:
+            FHIR resource ID
+        """
+        # Create a safe resource ID from the valueset name
+        # Replace spaces and special characters with underscores
+        import re
+        safe_id = re.sub(r'[^a-zA-Z0-9]', '_', valueset_name.lower())
+        return f"valueset-{safe_id}"
+
+    def _generate_valueset_fhir_conditions(self, valueset_id: str, resource_type: str) -> List[str]:
+        """
+        Generate SQL conditions that query ValueSet codes from FHIR resources.
+        Matches both code and system from the ValueSet expansion using dialect-specific SQL.
+
+        Args:
+            valueset_id: ID of the ValueSet FHIR resource
+            resource_type: FHIR resource type being filtered
+
+        Returns:
+            List of SQL conditions
+        """
+        # Get the dialect-specific SQL from the appropriate dialect implementation
+        if hasattr(self.datastore, 'dialect') and self.datastore.dialect:
+            dialect_condition = self.datastore.dialect.generate_valueset_match_condition(valueset_id)
+            return [dialect_condition]
+        else:
+            # Fallback - should not happen in normal operation
+            logger.warning(f"No dialect available for ValueSet matching, falling back to basic implementation")
+            return [f"/* ValueSet matching not available - no dialect */"]
+
     def get_conversion_statistics(self) -> Dict[str, Any]:
         """Get statistics about CQL conversions performed."""
         return dict(self.conversion_stats)

@@ -169,26 +169,29 @@ class WorkflowCTEIntegration:
     WITH: Monolithic CTE-based execution
     """
     
-    def __init__(self, 
+    def __init__(self,
                  dialect: str,
                  database_connection: Any,
                  workflow_config: Optional[WorkflowConfig] = None,
                  terminology_client: Optional[Any] = None,
-                 legacy_executor: Optional[Callable] = None):
+                 legacy_executor: Optional[Callable] = None,
+                 datastore: Optional[Any] = None):
         """
         Initialize workflow integration.
-        
+
         Args:
             dialect: Database dialect ('duckdb' or 'postgresql')
             database_connection: Database connection object
-            workflow_config: Configuration for workflow behavior
+            workflow_config: Optional workflow configuration
             terminology_client: Optional terminology service client
-            legacy_executor: Optional fallback executor for legacy compatibility
+            legacy_executor: Optional legacy executor for fallback
+            datastore: Optional datastore for ValueSet caching
         """
         self.dialect = dialect
         self.database_connection = database_connection
         self.terminology_client = terminology_client
         self.legacy_executor = legacy_executor
+        self.datastore = datastore
         
         self.config = workflow_config or WorkflowConfig()
         
@@ -197,7 +200,8 @@ class WorkflowCTEIntegration:
             self.cte_engine = create_cte_pipeline_engine(
                 dialect=dialect,
                 database_connection=database_connection,
-                terminology_client=terminology_client
+                terminology_client=terminology_client,
+                datastore=datastore
             )
         else:
             self.cte_engine = None

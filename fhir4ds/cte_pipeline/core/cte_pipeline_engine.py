@@ -99,24 +99,27 @@ class CTEPipelineEngine:
     - Drop-in replacement for existing execution interfaces
     """
     
-    def __init__(self, 
+    def __init__(self,
                  dialect: str,
                  database_connection: Any,
-                 terminology_client: Optional[Any] = None):
+                 terminology_client: Optional[Any] = None,
+                 datastore: Optional[Any] = None):
         """
         Initialize CTE Pipeline Engine.
-        
+
         Args:
             dialect: Database dialect ('duckdb' or 'postgresql')
             database_connection: Database connection object
             terminology_client: Optional terminology service client
+            datastore: Optional datastore for ValueSet caching
         """
         self.dialect = dialect.upper()
         self.database_connection = database_connection
         self.terminology_client = terminology_client
-        
-        # Initialize core components
-        self.cql_converter = CQLToCTEConverter(dialect, terminology_client)
+        self.datastore = datastore
+
+        # Initialize core components with datastore for ValueSet caching
+        self.cql_converter = CQLToCTEConverter(dialect, terminology_client, datastore)
         self.query_builder = CTEQueryBuilder(dialect)
         
         # Execution statistics for replacement validation
@@ -316,7 +319,11 @@ class CTEPipelineEngine:
         # Add all fragments to query builder
         for fragment in cte_fragments:
             self.query_builder.add_fragment(fragment)
-        
+
+        # Add ValueSet CTEs from converter if available
+        if hasattr(self.cql_converter, 'get_required_valuesets'):
+            self.query_builder.add_valuesets_from_converter(self.cql_converter)
+
         # Build comprehensive monolithic query
         compiled_query = self.query_builder.build_monolithic_query(define_statements)
         
@@ -527,22 +534,25 @@ class CTEPipelineEngine:
         return self.last_compiled_query
 
 
-def create_cte_pipeline_engine(dialect: str, 
+def create_cte_pipeline_engine(dialect: str,
                               database_connection: Any,
-                              terminology_client: Optional[Any] = None) -> CTEPipelineEngine:
+                              terminology_client: Optional[Any] = None,
+                              datastore: Optional[Any] = None) -> CTEPipelineEngine:
     """
     Factory function to create CTE Pipeline Engine.
-    
+
     Args:
         dialect: Database dialect ('duckdb' or 'postgresql')
         database_connection: Database connection object
         terminology_client: Optional terminology service client
-        
+        datastore: Optional datastore for ValueSet caching
+
     Returns:
         Configured CTE Pipeline Engine ready for use
     """
     return CTEPipelineEngine(
         dialect=dialect,
         database_connection=database_connection,
-        terminology_client=terminology_client
+        terminology_client=terminology_client,
+        datastore=datastore
     )
