@@ -96,7 +96,7 @@ class CQLEngine:
         self.nullological_functions = CQLNullologicalFunctionHandler(self.dialect_name)
         self.datetime_functions = CQLDateTimeFunctionHandler(self.dialect_name)
         self.interval_functions = CQLIntervalFunctionHandler(self.dialect_name)
-        self.collection_functions = CQLCollectionFunctionHandler(self.dialect)
+        self.collection_functions = CQLCollectionFunctionHandler(self.dialect_name)
         
         # Make all function handlers available to translator
         self.translator.terminology = self.terminology
