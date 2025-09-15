@@ -26,9 +26,22 @@ class CQLDateTimeFunctionHandler:
     - Temporal arithmetic and comparisons
     """
     
-    def __init__(self, dialect: str = "duckdb"):
+    def __init__(self, dialect: str = "duckdb", dialect_handler=None):
         """Initialize CQL date/time function handler with dialect support."""
         self.dialect = dialect
+
+        # Inject dialect handler for database-specific operations
+        if dialect_handler is None:
+            from ...dialects import DuckDBDialect, PostgreSQLDialect
+            from ...config import get_database_url
+            if dialect.lower() == "postgresql":
+                # Use centralized configuration
+                conn_str = get_database_url('postgresql')
+                self.dialect_handler = PostgreSQLDialect(conn_str)
+            else:  # default to DuckDB
+                self.dialect_handler = DuckDBDialect()
+        else:
+            self.dialect_handler = dialect_handler
         
         # Register all date/time functions
         self.function_map = {
@@ -223,10 +236,10 @@ class CQLDateTimeFunctionHandler:
         start_val = extract_value(start_expr)
         end_val = extract_value(end_expr)
         
-        if self.dialect == "postgresql":
-            sql = f"EXTRACT(YEAR FROM AGE(CAST({end_val} AS TIMESTAMP), CAST({start_val} AS TIMESTAMP)))"
-        else:  # DuckDB
-            sql = f"DATE_DIFF('year', CAST({start_val} AS TIMESTAMP), CAST({end_val} AS TIMESTAMP))"
+        # Use dialect abstraction for date difference calculation
+        start_cast = f"CAST({start_val} AS TIMESTAMP)"
+        end_cast = f"CAST({end_val} AS TIMESTAMP)"
+        sql = self.dialect_handler.generate_date_diff('year', start_cast, end_cast)
             
         return LiteralNode(value=sql, type='sql')
     
@@ -279,13 +292,9 @@ class CQLDateTimeFunctionHandler:
             as_of_val = "CURRENT_DATE"
             logger.debug("Using CURRENT_DATE for as_of_date")
         
-        # Calculate age from birthdate to as-of date
-        if self.dialect == "postgresql":
-            # PostgreSQL: Use AGE function to get interval, then extract years
-            sql = f"EXTRACT(YEAR FROM AGE({as_of_val}, CAST({birthdate_val} AS DATE)))"
-        else:  # DuckDB
-            # DuckDB: Use DATEDIFF to calculate years between birthdate and as-of date
-            sql = f"DATE_DIFF('year', CAST({birthdate_val} AS DATE), {as_of_val})"
+        # Calculate age from birthdate to as-of date using dialect abstraction
+        birthdate_cast = f"CAST({birthdate_val} AS DATE)"
+        sql = self.dialect_handler.generate_date_diff('year', birthdate_cast, as_of_val)
             
         return LiteralNode(value=sql, type='sql')
     
@@ -330,12 +339,10 @@ class CQLDateTimeFunctionHandler:
             logger.debug("Using patient resource birth date extraction")
         
         # Calculate age from birthdate to as-of date
-        if self.dialect == "postgresql":
-            # PostgreSQL: Use AGE function to get interval, then extract years
-            sql = f"EXTRACT(YEAR FROM AGE(CAST({as_of_val} AS DATE), CAST({birthdate_val} AS DATE)))"
-        else:  # DuckDB
-            # DuckDB: Use DATEDIFF to calculate years between birthdate and as-of date
-            sql = f"DATE_DIFF('year', CAST({birthdate_val} AS DATE), CAST({as_of_val} AS DATE))"
+        # Calculate age using dialect abstraction
+        birthdate_cast = f"CAST({birthdate_val} AS DATE)"
+        as_of_cast = f"CAST({as_of_val} AS DATE)"
+        sql = self.dialect_handler.generate_date_diff('year', birthdate_cast, as_of_cast)
             
         return LiteralNode(value=sql, type='sql')
     
@@ -357,10 +364,10 @@ class CQLDateTimeFunctionHandler:
         start_val = extract_value(start_expr)
         end_val = extract_value(end_expr)
         
-        if self.dialect == "postgresql":
-            sql = f"(EXTRACT(YEAR FROM AGE(CAST({end_val} AS TIMESTAMP), CAST({start_val} AS TIMESTAMP))) * 12 + EXTRACT(MONTH FROM AGE(CAST({end_val} AS TIMESTAMP), CAST({start_val} AS TIMESTAMP))))"
-        else:  # DuckDB
-            sql = f"DATE_DIFF('month', CAST({start_val} AS TIMESTAMP), CAST({end_val} AS TIMESTAMP))"
+        # Use dialect abstraction for month difference calculation
+        start_cast = f"CAST({start_val} AS TIMESTAMP)"
+        end_cast = f"CAST({end_val} AS TIMESTAMP)"
+        sql = self.dialect_handler.generate_date_diff('month', start_cast, end_cast)
             
         return LiteralNode(value=sql, type='sql')
     
@@ -382,10 +389,10 @@ class CQLDateTimeFunctionHandler:
         start_val = extract_value(start_expr)
         end_val = extract_value(end_expr)
         
-        if self.dialect == "postgresql":
-            sql = f"EXTRACT(DAY FROM (CAST({end_val} AS TIMESTAMP) - CAST({start_val} AS TIMESTAMP)))"
-        else:  # DuckDB
-            sql = f"DATE_DIFF('day', CAST({start_val} AS TIMESTAMP), CAST({end_val} AS TIMESTAMP))"
+        # Use dialect abstraction for day difference calculation
+        start_cast = f"CAST({start_val} AS TIMESTAMP)"
+        end_cast = f"CAST({end_val} AS TIMESTAMP)"
+        sql = self.dialect_handler.generate_date_diff('day', start_cast, end_cast)
             
         return LiteralNode(value=sql, type='sql')
     
@@ -397,14 +404,10 @@ class CQLDateTimeFunctionHandler:
         """
         logger.debug("Generating CQL hours between operation")
         
-        if self.dialect == "postgresql":
-            return f"""
-            EXTRACT(EPOCH FROM (CAST({end_expr} AS TIMESTAMP) - CAST({start_expr} AS TIMESTAMP))) / 3600
-            """.strip()
-        else:  # DuckDB
-            return f"""
-            DATE_DIFF('hour', CAST({start_expr} AS TIMESTAMP), CAST({end_expr} AS TIMESTAMP))
-            """.strip()
+        # Use dialect abstraction for hour difference calculation
+        start_cast = f"CAST({start_expr} AS TIMESTAMP)"
+        end_cast = f"CAST({end_expr} AS TIMESTAMP)"
+        return self.dialect_handler.generate_date_diff('hour', start_cast, end_cast)
     
     def minutes_between(self, start_expr: Any, end_expr: Any) -> str:
         """
@@ -412,14 +415,10 @@ class CQLDateTimeFunctionHandler:
         """
         logger.debug("Generating CQL minutes between operation")
         
-        if self.dialect == "postgresql":
-            return f"""
-            EXTRACT(EPOCH FROM (CAST({end_expr} AS TIMESTAMP) - CAST({start_expr} AS TIMESTAMP))) / 60
-            """.strip()
-        else:  # DuckDB
-            return f"""
-            DATE_DIFF('minute', CAST({start_expr} AS TIMESTAMP), CAST({end_expr} AS TIMESTAMP))
-            """.strip()
+        # Use dialect abstraction for minute difference calculation
+        start_cast = f"CAST({start_expr} AS TIMESTAMP)"
+        end_cast = f"CAST({end_expr} AS TIMESTAMP)"
+        return self.dialect_handler.generate_date_diff('minute', start_cast, end_cast)
     
     def seconds_between(self, start_expr: Any, end_expr: Any) -> str:
         """
@@ -427,14 +426,10 @@ class CQLDateTimeFunctionHandler:
         """
         logger.debug("Generating CQL seconds between operation")
         
-        if self.dialect == "postgresql":
-            return f"""
-            EXTRACT(EPOCH FROM (CAST({end_expr} AS TIMESTAMP) - CAST({start_expr} AS TIMESTAMP)))
-            """.strip()
-        else:  # DuckDB
-            return f"""
-            DATE_DIFF('second', CAST({start_expr} AS TIMESTAMP), CAST({end_expr} AS TIMESTAMP))
-            """.strip()
+        # Use dialect abstraction for second difference calculation
+        start_cast = f"CAST({start_expr} AS TIMESTAMP)"
+        end_cast = f"CAST({end_expr} AS TIMESTAMP)"
+        return self.dialect_handler.generate_date_diff('second', start_cast, end_cast)
     
     # Difference Calculation Functions (Boundary Crossings)
     
@@ -700,10 +695,10 @@ class CQLDateTimeFunctionHandler:
         years_val = extract_value(years)
         datetime_val = extract_value(datetime_expr)
         
-        if self.dialect == "postgresql":
-            sql = f"(CAST({datetime_val} AS TIMESTAMP) + INTERVAL '{years_val} years')"
-        else:  # DuckDB
-            sql = f"(CAST({datetime_val} AS TIMESTAMP) + INTERVAL ({years_val}) YEAR)"
+        # Use dialect abstraction for date arithmetic
+        datetime_cast = f"CAST({datetime_val} AS TIMESTAMP)"
+        interval_expr = f"{years_val} YEAR"
+        sql = self.dialect_handler.generate_interval_arithmetic(datetime_cast, interval_expr, 'add')
             
         return LiteralNode(value=sql, type='sql')
     
@@ -727,10 +722,10 @@ class CQLDateTimeFunctionHandler:
         months_val = extract_value(months)
         datetime_val = extract_value(datetime_expr)
         
-        if self.dialect == "postgresql":
-            sql = f"(CAST({datetime_val} AS TIMESTAMP) + INTERVAL '{months_val} months')"
-        else:  # DuckDB
-            sql = f"(CAST({datetime_val} AS TIMESTAMP) + INTERVAL ({months_val}) MONTH)"
+        # Use dialect abstraction for date arithmetic
+        datetime_cast = f"CAST({datetime_val} AS TIMESTAMP)"
+        interval_expr = f"{months_val} MONTH"
+        sql = self.dialect_handler.generate_interval_arithmetic(datetime_cast, interval_expr, 'add')
             
         return LiteralNode(value=sql, type='sql')
     
@@ -754,10 +749,10 @@ class CQLDateTimeFunctionHandler:
         days_val = extract_value(days)
         datetime_val = extract_value(datetime_expr)
         
-        if self.dialect == "postgresql":
-            sql = f"(CAST({datetime_val} AS TIMESTAMP) + INTERVAL '{days_val} days')"
-        else:  # DuckDB
-            sql = f"(CAST({datetime_val} AS TIMESTAMP) + INTERVAL ({days_val}) DAY)"
+        # Use dialect abstraction for date arithmetic
+        datetime_cast = f"CAST({datetime_val} AS TIMESTAMP)"
+        interval_expr = f"{days_val} DAY"
+        sql = self.dialect_handler.generate_interval_arithmetic(datetime_cast, interval_expr, 'add')
             
         return LiteralNode(value=sql, type='sql')
     
@@ -765,28 +760,28 @@ class CQLDateTimeFunctionHandler:
         """Add hours to a datetime."""
         logger.debug("Generating CQL add hours operation")
         
-        if self.dialect == "postgresql":
-            return f"(CAST({datetime_expr} AS TIMESTAMP) + INTERVAL '{hours} hours')"
-        else:  # DuckDB
-            return f"(CAST({datetime_expr} AS TIMESTAMP) + INTERVAL ({hours}) HOUR)"
+        # Use dialect abstraction for date arithmetic
+        datetime_cast = f"CAST({datetime_expr} AS TIMESTAMP)"
+        interval_expr = f"{hours} HOUR"
+        return self.dialect_handler.generate_interval_arithmetic(datetime_cast, interval_expr, 'add')
     
     def add_minutes(self, datetime_expr: Any, minutes: Any) -> str:
         """Add minutes to a datetime."""
         logger.debug("Generating CQL add minutes operation")
         
-        if self.dialect == "postgresql":
-            return f"(CAST({datetime_expr} AS TIMESTAMP) + INTERVAL '{minutes} minutes')"
-        else:  # DuckDB
-            return f"(CAST({datetime_expr} AS TIMESTAMP) + INTERVAL ({minutes}) MINUTE)"
+        # Use dialect abstraction for date arithmetic
+        datetime_cast = f"CAST({datetime_expr} AS TIMESTAMP)"
+        interval_expr = f"{minutes} MINUTE"
+        return self.dialect_handler.generate_interval_arithmetic(datetime_cast, interval_expr, 'add')
     
     def add_seconds(self, datetime_expr: Any, seconds: Any) -> str:
         """Add seconds to a datetime."""
         logger.debug("Generating CQL add seconds operation")
         
-        if self.dialect == "postgresql":
-            return f"(CAST({datetime_expr} AS TIMESTAMP) + INTERVAL '{seconds} seconds')"
-        else:  # DuckDB
-            return f"(CAST({datetime_expr} AS TIMESTAMP) + INTERVAL ({seconds}) SECOND)"
+        # Use dialect abstraction for date arithmetic
+        datetime_cast = f"CAST({datetime_expr} AS TIMESTAMP)"
+        interval_expr = f"{seconds} SECOND"
+        return self.dialect_handler.generate_interval_arithmetic(datetime_cast, interval_expr, 'add')
     
     # Temporal Boundary Functions
     
@@ -820,16 +815,12 @@ class CQLDateTimeFunctionHandler:
         """Get end of month for given date/datetime."""
         logger.debug("Generating CQL end of month operation")
         
-        if self.dialect == "postgresql":
-            return f"""
-            (DATE_TRUNC('month', CAST({datetime_expr} AS TIMESTAMP)) + 
-             INTERVAL '1 month' - INTERVAL '1 second')
-            """.strip()
-        else:  # DuckDB
-            return f"""
-            (DATE_TRUNC('month', CAST({datetime_expr} AS TIMESTAMP)) + 
-             INTERVAL 1 MONTH - INTERVAL 1 SECOND)
-            """.strip()
+        # Use dialect abstraction for complex date arithmetic
+        datetime_cast = f"CAST({datetime_expr} AS TIMESTAMP)"
+        base_expr = f"DATE_TRUNC('month', {datetime_cast})"
+        # Add 1 month then subtract 1 second to get end of month
+        plus_month = self.dialect_handler.generate_interval_arithmetic(base_expr, '1 MONTH', 'add')
+        return f"{self.dialect_handler.generate_interval_arithmetic(plus_month, '1 SECOND', 'subtract')}".strip()
     
     def start_of_day(self, datetime_expr: Any) -> str:
         """Get start of day (midnight) for given date/datetime."""
@@ -841,16 +832,12 @@ class CQLDateTimeFunctionHandler:
         """Get end of day (23:59:59) for given date/datetime."""
         logger.debug("Generating CQL end of day operation")
         
-        if self.dialect == "postgresql":
-            return f"""
-            (DATE_TRUNC('day', CAST({datetime_expr} AS TIMESTAMP)) + 
-             INTERVAL '1 day' - INTERVAL '1 second')
-            """.strip()
-        else:  # DuckDB
-            return f"""
-            (DATE_TRUNC('day', CAST({datetime_expr} AS TIMESTAMP)) + 
-             INTERVAL 1 DAY - INTERVAL 1 SECOND)
-            """.strip()
+        # Use dialect abstraction for complex date arithmetic
+        datetime_cast = f"CAST({datetime_expr} AS TIMESTAMP)"
+        base_expr = f"DATE_TRUNC('day', {datetime_cast})"
+        # Add 1 day then subtract 1 second to get end of day
+        plus_day = self.dialect_handler.generate_interval_arithmetic(base_expr, '1 DAY', 'add')
+        return f"{self.dialect_handler.generate_interval_arithmetic(plus_day, '1 SECOND', 'subtract')}".strip()
     
     # Utility Functions
     

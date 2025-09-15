@@ -113,7 +113,55 @@ class DuckDBDialect(DatabaseDialect):
             )
         """)
         logger.info(f"Created FHIR table: {table_name}")
-    
+
+    def create_terminology_system_mappings_table(self) -> None:
+        """Create the terminology system mappings table for crosswalking OID/URI/URN"""
+        try:
+            from ..terminology.system_mappings import get_all_system_identifiers
+
+            # Check if table already exists
+            try:
+                result = self.connection.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'terminology_system_mappings'").fetchone()
+                table_exists = result[0] > 0 if result else False
+            except:
+                table_exists = False
+
+            if table_exists:
+                logger.info("Terminology system mappings table already exists, skipping creation")
+                return
+
+            # Create terminology mappings table
+            create_sql = """
+                CREATE TABLE terminology_system_mappings (
+                    original_system VARCHAR PRIMARY KEY,
+                    canonical_system VARCHAR NOT NULL,
+                    system_type VARCHAR NOT NULL,
+                    name VARCHAR NOT NULL
+                )
+            """
+            self.connection.execute(create_sql)
+
+            # Insert all mappings
+            mappings = get_all_system_identifiers()
+            insert_sql = """
+                INSERT INTO terminology_system_mappings
+                (original_system, canonical_system, system_type, name)
+                VALUES (?, ?, ?, ?)
+            """
+
+            for mapping in mappings:
+                self.connection.execute(insert_sql, [
+                    mapping['original_system'],
+                    mapping['canonical_system'],
+                    mapping['system_type'],
+                    mapping['name']
+                ])
+
+            logger.info(f"Created terminology mappings table with {len(mappings)} mappings")
+
+        except Exception as e:
+            self._handle_operation_error("terminology mappings table creation", e)
+
     def bulk_load_json(self, file_path: str, table_name: str, json_col: str) -> int:
         """Bulk load JSON file using DuckDB's read_json functionality"""
         # Detect file type by sampling
@@ -234,6 +282,99 @@ class DuckDBDialect(DatabaseDialect):
     def get_object_iteration_columns(self) -> tuple:
         """Get column names for object iteration - DuckDB uses 'key' and 'value'"""
         return ('key', 'value')
+    
+    # Pipeline-specific dialect method implementations
+    
+    def string_split_reference(self, input_sql: str) -> str:
+        """Split reference string like 'ResourceType/id' to extract id part using DuckDB functions"""
+        return f"list_extract(string_split({input_sql}, '/'), -1)"
+    
+    def starts_with_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate starts_with condition for field matching using DuckDB syntax"""
+        return f"starts_with(json_extract_string({item_expr}, '$.{field_name}'), '{value}')"
+    
+    def ends_with_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate ends_with condition for field matching using DuckDB syntax"""
+        return f"ends_with(json_extract_string({item_expr}, '$.{field_name}'), '{value}')"
+    
+    def contains_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate contains condition for field matching using DuckDB syntax"""
+        return f"contains(json_extract_string({item_expr}, '$.{field_name}'), '{value}')"
+    
+    def generate_field_startswith_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate field startsWith condition - delegates to starts_with_condition"""
+        return self.starts_with_condition(item_expr, field_name, value)
+    
+    def generate_field_endswith_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate field endsWith condition - delegates to ends_with_condition"""
+        return self.ends_with_condition(item_expr, field_name, value)
+    
+    def generate_field_contains_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate field contains condition - delegates to contains_condition"""
+        return self.contains_condition(item_expr, field_name, value)
+    
+    def get_value_primitive_sql(self, input_sql: str) -> str:
+        """Generate SQL for getValue() function handling primitive and complex types using DuckDB functions"""
+        return f"""CASE 
+            WHEN {input_sql} IS NULL THEN NULL
+            WHEN json_type({input_sql}) = 'STRING' THEN 
+                json_extract_string({input_sql}, '$')
+            WHEN json_type({input_sql}) = 'NUMBER' THEN 
+                json_extract({input_sql}, '$')::varchar
+            WHEN json_type({input_sql}) = 'BOOLEAN' THEN 
+                CASE WHEN json_extract({input_sql}, '$')::boolean THEN 'true' ELSE 'false' END
+            WHEN json_type({input_sql}) = 'OBJECT' AND json_extract_string({input_sql}, '$.value') IS NOT NULL THEN
+                json_extract_string({input_sql}, '$.value')
+            WHEN json_type({input_sql}) = 'OBJECT' AND json_extract_string({input_sql}, '$.family') IS NOT NULL THEN
+                COALESCE(
+                    json_extract_string({input_sql}, '$.family') || 
+                    CASE 
+                        WHEN json_extract({input_sql}, '$.given') IS NOT NULL 
+                        THEN ', ' || array_to_string(
+                            json_extract({input_sql}, '$.given')::varchar[], ', '
+                        )
+                        ELSE '' 
+                    END,
+                    json_extract_string({input_sql}, '$.family')
+                )
+            WHEN json_type({input_sql}) = 'ARRAY' AND json_array_length({input_sql}) > 0 THEN
+                COALESCE(
+                    json_extract_string(json_extract({input_sql}, '$[0]'), '$.family') || 
+                    CASE 
+                        WHEN json_extract(json_extract({input_sql}, '$[0]'), '$.given') IS NOT NULL 
+                        THEN ', ' || array_to_string(
+                            json_extract(json_extract({input_sql}, '$[0]'), '$.given')::varchar[], ', '
+                        )
+                        ELSE '' 
+                    END,
+                    json_extract_string(json_extract({input_sql}, '$[0]'), '$.family'),
+                    json_extract_string(json_extract({input_sql}, '$[0]'), '$.value'),
+                    json_extract(json_extract({input_sql}, '$[0]'), '$')::varchar
+                )
+            ELSE 
+                {input_sql}::varchar
+        END"""
+    
+    def resolve_reference_sql(self, input_sql: str) -> str:
+        """Generate SQL for resolve() function to resolve FHIR references using DuckDB syntax"""
+        return f"""CASE 
+            WHEN {input_sql} IS NULL THEN NULL
+            WHEN json_extract_string({input_sql}, '$.reference') IS NOT NULL THEN
+                (
+                    SELECT fhir_data.data 
+                    FROM fhir_data 
+                    WHERE json_extract_string(fhir_data.data, '$.resourceType') || '/' || json_extract_string(fhir_data.data, '$.id') = json_extract_string({input_sql}, '$.reference')
+                    LIMIT 1
+                )
+            WHEN json_type({input_sql}) = 'STRING' THEN
+                (
+                    SELECT fhir_data.data 
+                    FROM fhir_data 
+                    WHERE json_extract_string(fhir_data.data, '$.resourceType') || '/' || json_extract_string(fhir_data.data, '$.id') = {input_sql}
+                    LIMIT 1
+                )
+            ELSE NULL
+        END"""
     
     # DuckDB-specific optimization methods
     def bulk_insert_resources(self, resources: List[Dict[str, Any]], 
@@ -715,3 +856,1107 @@ class DuckDBDialect(DatabaseDialect):
     def cast_to_time(self, expression: str) -> str:
         """DuckDB time casting"""
         return f"CAST({expression} AS TIME)"
+    
+    def _generate_type_display_sql(self, input_sql: str, type_structure: Dict[str, Any], 
+                                   array_handling: str) -> str:
+        """DuckDB-specific FHIR type display generation."""
+        fields = type_structure["fields"]
+        arrays = type_structure.get("arrays", [])
+        template = type_structure.get("display_template", "{text || value}")
+        
+        # Generate field extraction logic
+        field_extractions = {}
+        for field in fields:
+            if field in arrays:
+                if array_handling == "first":
+                    # Get first element of array
+                    field_extractions[field] = f"json_extract_string(json_extract({input_sql}, '$.{field}[0]'), '$')"
+                elif array_handling == "concat":
+                    # Join array elements with comma
+                    field_extractions[field] = f"array_to_string(CAST(json_extract({input_sql}, '$.{field}') AS VARCHAR[]), ', ')"
+                elif array_handling == "all":
+                    # Return full array as JSON
+                    field_extractions[field] = f"json_extract({input_sql}, '$.{field}')"
+            else:
+                # Simple field extraction
+                field_extractions[field] = f"json_extract_string({input_sql}, '$.{field}')"
+        
+        # Apply template logic
+        return self._apply_display_template(template, field_extractions)
+    
+    # Function-specific SQL generation methods
+    # These replace hardcoded dialect conditionals in functions.py
+    
+    def generate_array_contains(self, array_sql: str, element_sql: str) -> str:
+        """DuckDB array contains check."""
+        return f"list_contains({array_sql}, {element_sql})"
+
+    def generate_array_length(self, array_sql: str) -> str:
+        """DuckDB array length."""
+        return f"array_length({array_sql})"
+
+    def generate_substring_sql(self, string_sql: str, start_pos: str, length: Optional[str] = None) -> str:
+        """DuckDB substring operation."""
+        if length:
+            return f"substr({string_sql}, {start_pos}, {length})"
+        return f"substr({string_sql}, {start_pos})"
+
+    def generate_string_split(self, string_sql: str, delimiter: str) -> str:
+        """DuckDB string split."""
+        return f"string_split({string_sql}, {delimiter})"
+
+    def generate_array_element_at(self, array_sql: str, index: int) -> str:
+        """DuckDB array element access (1-based indexing)."""
+        return f"{array_sql}[{index + 1}]"
+
+    def generate_case_insensitive_like(self, field_sql: str, pattern: str) -> str:
+        """DuckDB case-insensitive pattern matching."""
+        return f"lower({field_sql}) LIKE lower({pattern})"
+
+    def generate_regexp_match(self, field_sql: str, pattern: str) -> str:
+        """DuckDB regex matching."""
+        return f"regexp_matches({field_sql}, {pattern})"
+
+    def generate_date_arithmetic(self, date_sql: str, interval: str, unit: str) -> str:
+        """DuckDB date arithmetic."""
+        return f"{date_sql} + INTERVAL {interval} {unit}"
+
+    def generate_cast_to_numeric(self, value_sql: str) -> str:
+        """DuckDB numeric casting."""
+        return f"CAST({value_sql} AS DECIMAL)"
+
+    def generate_null_coalesce(self, *expressions: str) -> str:
+        """DuckDB null coalescing."""
+        return f"coalesce({', '.join(expressions)})"
+    
+    def generate_json_typeof(self, json_expr: str) -> str:
+        """DuckDB JSON type detection."""
+        return f"json_type({json_expr})"
+    
+    def generate_string_concat(self, *expressions: str) -> str:
+        """DuckDB string concatenation."""
+        return f"({' || '.join(expressions)})"
+    
+    def generate_json_array_length(self, json_expr: str) -> str:
+        """DuckDB JSON array length."""
+        return f"json_array_length({json_expr})"
+    
+    def generate_json_extract(self, json_expr: str, path: str) -> str:
+        """DuckDB JSON path extraction."""
+        return f"json_extract({json_expr}, '{path}')"
+    
+    def generate_json_extract_last(self, json_expr: str) -> str:
+        """DuckDB extract last element from JSON array."""
+        return f"json_extract({json_expr}, '$[' || (json_array_length({json_expr}) - 1) || ']')"
+    
+    def generate_collection_contains_element(self, collection_expr: str, element_expr: str) -> str:
+        """DuckDB check if collection contains specific element."""
+        return f"""(
+            CASE 
+                WHEN {collection_expr} IS NULL THEN false
+                WHEN json_type({collection_expr}) = 'ARRAY' THEN (
+                    EXISTS (
+                        SELECT 1 FROM json_each({collection_expr})
+                        WHERE value = {element_expr}
+                    )
+                )
+                ELSE {collection_expr} = {element_expr}
+            END
+        )"""
+    
+    def generate_element_in_collection(self, element_expr: str, collection_expr: str) -> str:
+        """DuckDB check if element exists in collection."""
+        return f"""(
+            CASE 
+                WHEN {collection_expr} IS NULL THEN false
+                WHEN json_type({collection_expr}) = 'ARRAY' THEN (
+                    EXISTS (
+                        SELECT 1 FROM json_each({collection_expr}) AS elem
+                        WHERE elem.value = {element_expr}
+                    )
+                )
+                ELSE {collection_expr} = {element_expr}
+            END
+        )"""
+    
+    def generate_logical_combine(self, left_condition: str, operator: str, right_condition: str) -> str:
+        """DuckDB logical condition combination."""
+        return f"({left_condition}) {operator.upper()} ({right_condition})"
+    
+    def generate_collection_combine(self, first_collection: str, second_collection: str) -> str:
+        """DuckDB collection combination."""
+        return f"""(
+            CASE 
+                WHEN {first_collection} IS NULL AND {second_collection} IS NULL THEN NULL
+                WHEN {first_collection} IS NULL THEN {second_collection}
+                WHEN {second_collection} IS NULL THEN {first_collection}
+                WHEN json_type({first_collection}) = 'ARRAY' AND json_type({second_collection}) = 'ARRAY' THEN (
+                    SELECT json_group_array(value)
+                    FROM (
+                        SELECT value FROM json_each({first_collection})
+                        UNION ALL
+                        SELECT value FROM json_each({second_collection})
+                    )
+                )
+                ELSE json_array({first_collection}, {second_collection})
+            END
+        )"""
+
+    def generate_self_combine_operation(self, collection: str) -> str:
+        """DuckDB self-combination optimization (x.combine(x))."""
+        return f"""(
+            CASE 
+                WHEN {collection} IS NULL THEN NULL
+                WHEN json_type({collection}) = 'ARRAY' THEN (
+                    SELECT json_group_array(value)
+                    FROM (
+                        SELECT value FROM json_each({collection})
+                        UNION ALL
+                        SELECT value FROM json_each({collection})
+                    )
+                )
+                ELSE json_array({collection}, {collection})
+            END
+        )"""
+    
+    def generate_where_clause_filter(self, collection_expr: str, condition_sql: str) -> str:
+        """DuckDB WHERE clause filtering for collections."""
+        return f"""(
+            SELECT json_group_array(item.value)
+            FROM json_each({collection_expr}) AS item
+            WHERE {condition_sql.replace('$ITEM', 'item.value')}
+        )"""
+    
+    def generate_select_transformation(self, collection_expr: str, transform_path: str) -> str:
+        """DuckDB SELECT transformation for collections."""
+        return f"""json_array(
+            SELECT json_extract(value, '$.{transform_path}')
+            FROM json_each({collection_expr})
+        )"""
+    
+    def generate_json_path_query_array(self, json_expr: str, path_condition: str) -> str:
+        """DuckDB JSON path query with filtering (fallback to WHERE clause filter)."""
+        return self.generate_where_clause_filter(json_expr, path_condition)
+    
+    def generate_json_group_array_with_condition(self, collection_expr: str, condition: str, value_expr: str = "value") -> str:
+        """DuckDB JSON array creation from filtered elements."""
+        return f"""(
+            SELECT json_group_array({value_expr})
+            FROM json_each({collection_expr})
+            WHERE {condition}
+        )"""
+    
+    def generate_single_element_check(self, collection_expr: str) -> str:
+        """DuckDB single element check."""
+        return f"""(
+            CASE 
+                WHEN {collection_expr} IS NULL THEN NULL
+                WHEN json_type({collection_expr}) = 'ARRAY' THEN
+                    CASE 
+                        WHEN json_array_length({collection_expr}) = 1 THEN 
+                            json_extract({collection_expr}, '$[0]')
+                        ELSE NULL  -- Error: not exactly one element
+                    END
+                ELSE {collection_expr}  -- Single value already
+            END
+        )"""
+    
+    def generate_array_slice_operation(self, array_expr: str, start_index: int, count: int = None) -> str:
+        """DuckDB array slice operation."""
+        if count is not None:
+            return f"""(
+                SELECT json_group_array(value)
+                FROM (
+                    SELECT value, row_number() OVER () as rn
+                    FROM json_each({array_expr})
+                ) 
+                WHERE rn > {start_index} AND rn <= {start_index + count}
+            )"""
+        else:
+            return f"""(
+                SELECT json_group_array(value)
+                FROM (
+                    SELECT value, row_number() OVER () as rn
+                    FROM json_each({array_expr})
+                ) 
+                WHERE rn > {start_index}
+            )"""
+    
+    def generate_array_tail_operation(self, array_expr: str) -> str:
+        """DuckDB array tail operation (all except first)."""
+        return self.generate_array_slice_operation(array_expr, 1)
+    
+    def generate_array_distinct_operation(self, array_expr: str) -> str:
+        """DuckDB array distinct operation."""
+        return f"""(
+            SELECT json_group_array(value)
+            FROM (
+                SELECT DISTINCT value
+                FROM json_each({array_expr})
+            )
+        )"""
+    
+    def generate_descendants_operation(self, base_expr: str) -> str:
+        """DuckDB descendants operation (recursive JSON traversal)."""
+        # This is a complex operation that would need recursive CTE
+        # For now, return a simplified version that gets immediate children
+        return f"""(
+            SELECT json_group_array(value)
+            FROM json_each({base_expr})
+        )"""
+    
+    def generate_union_operation(self, first_collection: str, second_collection: str) -> str:
+        """DuckDB union operation (delegates to collection combine)."""
+        return self.generate_collection_combine(first_collection, second_collection)
+    
+    def generate_mathematical_function(self, func_name: str, operand: str) -> str:
+        """DuckDB mathematical functions."""
+        func_map = {
+            'sqrt': 'sqrt',
+            'ln': 'ln', 
+            'log': 'log10',
+            'exp': 'exp',
+            'power': 'pow',
+            'truncate': 'trunc'
+        }
+        sql_func = func_map.get(func_name.lower(), func_name.lower())
+        return f"{sql_func}({operand})"
+    
+    def generate_date_time_now(self) -> str:
+        """DuckDB current timestamp."""
+        return "now()"
+    
+    def generate_date_time_today(self) -> str:
+        """DuckDB current date."""
+        return "current_date"
+    
+    def generate_conditional_expression(self, condition: str, true_expr: str, false_expr: str) -> str:
+        """DuckDB conditional expression."""
+        return f"CASE WHEN {condition} THEN {true_expr} ELSE {false_expr} END"
+    
+    def generate_power_operation(self, base_expr: str, exponent_expr: str) -> str:
+        """DuckDB power operation."""
+        return f"pow({base_expr}, {exponent_expr})"
+    
+    def generate_conversion_functions(self, conversion_type: str, operand: str) -> str:
+        """DuckDB type conversion functions."""
+        conversion_map = {
+            'boolean': f"CAST({operand} AS BOOLEAN)",
+            'integer': f"CAST({operand} AS INTEGER)", 
+            'decimal': f"CAST({operand} AS DECIMAL)",
+            'string': f"CAST({operand} AS VARCHAR)",
+            'date': f"CAST({operand} AS DATE)",
+            'datetime': f"CAST({operand} AS TIMESTAMP)"
+        }
+        return conversion_map.get(conversion_type.lower(), f"CAST({operand} AS {conversion_type.upper()})")
+    
+    def generate_iif_expression(self, condition: str, true_result: str, false_result: str = "NULL") -> str:
+        """DuckDB iif conditional expression with null handling."""
+        return f"""(
+            CASE 
+                WHEN {condition} IS NULL THEN NULL
+                WHEN {condition} THEN {true_result}
+                ELSE {false_result}
+            END
+        )"""
+    
+    def generate_recursive_descendants_with_cte(self, base_expr: str, max_levels: int = 5) -> str:
+        """DuckDB recursive descendants using CTE."""
+        return f"""(
+            WITH RECURSIVE descendants AS (
+                -- Base case: direct children  
+                SELECT value, json_type(value) as type, 0 as level
+                FROM json_each({base_expr})
+                WHERE json_type({base_expr}) IN ('OBJECT', 'ARRAY')
+                
+                UNION ALL
+                
+                -- Recursive case: children of children
+                SELECT child.value, json_type(child.value) as type, descendants.level + 1
+                FROM descendants, json_each(descendants.value) AS child
+                WHERE descendants.level < {max_levels}
+                  AND json_type(descendants.value) IN ('OBJECT', 'ARRAY')
+            )
+            SELECT json_group_array(value) FROM descendants
+        )"""
+    
+    def generate_type_filtering_operation(self, collection_expr: str, type_criteria: str) -> str:
+        """DuckDB type filtering operation."""
+        return f"""(
+            SELECT json_group_array(value)
+            FROM json_each({collection_expr})
+            WHERE json_type(value) = '{type_criteria}'
+        )"""
+    
+    def generate_set_intersection_operation(self, first_set: str, second_set: str) -> str:
+        """DuckDB set intersection operation."""
+        return f"""(
+            SELECT json_group_array(DISTINCT a.value)
+            FROM json_each({first_set}) AS a
+            WHERE EXISTS (
+                SELECT 1 FROM json_each({second_set}) AS b
+                WHERE a.value = b.value
+            )
+        )"""
+    
+    def generate_aggregate_with_condition(self, collection_expr: str, aggregate_type: str, condition: str) -> str:
+        """DuckDB aggregation with condition."""
+        agg_map = {
+            'count': 'COUNT',
+            'sum': 'SUM', 
+            'avg': 'AVG',
+            'min': 'MIN',
+            'max': 'MAX'
+        }
+        agg_func = agg_map.get(aggregate_type.lower(), 'COUNT')
+        return f"""(
+            SELECT {agg_func}(CASE WHEN {condition} THEN value ELSE NULL END)
+            FROM json_each({collection_expr})
+        )"""
+    
+    def generate_all_elements_match_criteria(self, collection_expr: str, criteria: str) -> str:
+        """DuckDB check if all elements match criteria."""
+        return f"""(
+            CASE 
+                WHEN {collection_expr} IS NULL THEN true
+                WHEN json_type({collection_expr}) = 'ARRAY' THEN (
+                    NOT EXISTS (
+                        SELECT 1 FROM json_each({collection_expr})
+                        WHERE NOT ({criteria})
+                    )
+                )
+                ELSE ({criteria})
+            END
+        )"""
+    
+    def generate_path_condition_comparison(self, left_expr: str, operator: str, right_expr: str, context_item: str = '$ITEM') -> str:
+        """DuckDB path-based condition comparison."""
+        # Map the operator - DuckDB uses first element of tuple
+        operator_mapping = {
+            '=': '=', '==': '=', '!=': '!=', '<>': '<>', '<': '<', 
+            '>': '>', '<=': '<=', '>=': '>='
+        }
+        mapped_op = operator_mapping.get(operator, operator)
+        return f"{left_expr} {mapped_op} {right_expr}"
+    
+    def generate_field_equality_condition(self, field_path: str, value: str, context_item: str = '$ITEM') -> str:
+        """DuckDB field equality condition."""
+        return f"json_extract_string({context_item}, '$.{field_path}') = '{value}'"
+    
+    def generate_field_extraction(self, item_placeholder: str, field_name: str) -> str:
+        """DuckDB field extraction from JSON."""
+        return f"json_extract_string({item_placeholder}, '$.{field_name}')"
+    
+    def generate_field_exists_check(self, item_placeholder: str, field_name: str) -> str:
+        """DuckDB check if field exists (is not null)."""
+        return f"json_extract_string({item_placeholder}, '$.{field_name}') IS NOT NULL"
+    
+    def generate_field_count_operation(self, item_placeholder: str, field_name: str) -> str:
+        """DuckDB count elements in a field array."""
+        return f"json_array_length(json_extract({item_placeholder}, '$.{field_name}'))"
+    
+    def generate_field_length_operation(self, item_placeholder: str, field_name: str) -> str:
+        """DuckDB get length of a field string."""
+        return f"LENGTH(json_extract_string({item_placeholder}, '$.{field_name}'))"
+    
+    def generate_path_expression_extraction(self, item_placeholder: str, path_expr: str) -> str:
+        """DuckDB complex path expression extraction (e.g., name.family.value)."""
+        return f"json_extract_string({item_placeholder}, '$.{path_expr}')"
+    
+    def generate_exclude_operation(self, first_collection: str, second_collection: str) -> str:
+        """DuckDB exclude operation - elements in first but not in second collection."""
+        return f"""(
+            CASE 
+                WHEN {first_collection} IS NULL THEN NULL
+                WHEN {second_collection} IS NULL THEN 
+                    CASE 
+                        WHEN json_type({first_collection}) = 'ARRAY' THEN {first_collection}
+                        ELSE json_array({first_collection})
+                    END
+                WHEN json_type({first_collection}) = 'ARRAY' AND json_type({second_collection}) = 'ARRAY' THEN (
+                    SELECT CASE 
+                        WHEN COUNT(*) = 0 THEN json_array()
+                        ELSE json_group_array(DISTINCT base_value)
+                    END
+                    FROM (
+                        SELECT base_val.value as base_value
+                        FROM json_each({first_collection}) base_val
+                        WHERE base_val.value IS NOT NULL
+                          AND NOT EXISTS (
+                              SELECT 1 FROM json_each({second_collection}) other_val
+                              WHERE other_val.value = base_val.value
+                          )
+                    )
+                )
+                ELSE json_array({first_collection})
+            END
+        )"""
+    
+    def generate_boolean_all_true(self, collection_expr: str) -> str:
+        """DuckDB check if all elements in collection are true."""
+        return f"""(
+            CASE 
+                WHEN {collection_expr} IS NULL THEN NULL
+                WHEN json_type({collection_expr}) = 'ARRAY' THEN
+                    CASE 
+                        WHEN json_array_length({collection_expr}) = 0 THEN NULL
+                        -- If any value is null, return null
+                        WHEN EXISTS (
+                            SELECT 1 FROM json_each({collection_expr})
+                            WHERE json_extract_string(value, '$') IS NULL OR 
+                                  json_extract_string(value, '$') NOT IN ('true', 'false')
+                        ) THEN NULL
+                        ELSE (
+                            SELECT COUNT(*) = COUNT(CASE WHEN 
+                                json_extract_string(value, '$') = 'true' THEN 1 END)
+                            FROM json_each({collection_expr})
+                            WHERE json_extract_string(value, '$') IN ('true', 'false')
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN json_extract_string({collection_expr}, '$') = 'true' THEN true
+                        WHEN json_extract_string({collection_expr}, '$') = 'false' THEN false
+                        ELSE NULL
+                    END
+            END
+        )"""
+    
+    def generate_boolean_all_false(self, collection_expr: str) -> str:
+        """DuckDB check if all elements in collection are false."""
+        return f"""(
+            CASE 
+                WHEN {collection_expr} IS NULL THEN NULL
+                WHEN json_type({collection_expr}) = 'ARRAY' THEN
+                    CASE 
+                        WHEN json_array_length({collection_expr}) = 0 THEN NULL
+                        -- If any value is null, return null
+                        WHEN EXISTS (
+                            SELECT 1 FROM json_each({collection_expr})
+                            WHERE json_extract_string(value, '$') IS NULL OR 
+                                  json_extract_string(value, '$') NOT IN ('true', 'false')
+                        ) THEN NULL
+                        ELSE (
+                            SELECT COUNT(*) = COUNT(CASE WHEN 
+                                json_extract_string(value, '$') = 'false' THEN 1 END)
+                            FROM json_each({collection_expr})
+                            WHERE json_extract_string(value, '$') IN ('true', 'false')
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN json_extract_string({collection_expr}, '$') = 'false' THEN true
+                        WHEN json_extract_string({collection_expr}, '$') = 'true' THEN false
+                        ELSE NULL
+                    END
+            END
+        )"""
+    
+    def generate_boolean_any_true(self, collection_expr: str) -> str:
+        """DuckDB check if any element in collection is true."""
+        return f"""(
+            CASE 
+                WHEN {collection_expr} IS NULL THEN NULL
+                WHEN json_type({collection_expr}) = 'ARRAY' THEN
+                    CASE 
+                        WHEN json_array_length({collection_expr}) = 0 THEN NULL
+                        ELSE EXISTS (
+                            SELECT 1 FROM json_each({collection_expr})
+                            WHERE json_extract_string(value, '$') = 'true'
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN json_extract_string({collection_expr}, '$') = 'true' THEN true
+                        ELSE false
+                    END
+            END
+        )"""
+    
+    def generate_boolean_any_false(self, collection_expr: str) -> str:
+        """DuckDB check if any element in collection is false."""
+        return f"""(
+            CASE 
+                WHEN {collection_expr} IS NULL THEN NULL
+                WHEN json_type({collection_expr}) = 'ARRAY' THEN
+                    CASE 
+                        WHEN json_array_length({collection_expr}) = 0 THEN NULL
+                        ELSE EXISTS (
+                            SELECT 1 FROM json_each({collection_expr})
+                            WHERE json_extract_string(value, '$') = 'false'
+                        )
+                    END
+                ELSE 
+                    CASE 
+                        WHEN json_extract_string({collection_expr}, '$') = 'false' THEN true
+                        ELSE false
+                    END
+            END
+        )"""
+    
+    def generate_children_extraction(self, collection_expr: str) -> str:
+        """DuckDB extract all immediate children from JSON object/array."""
+        return f"""(
+            CASE 
+                WHEN {collection_expr} IS NULL THEN json_array()
+                WHEN json_type({collection_expr}) = 'OBJECT' THEN (
+                    SELECT json_group_array(value)
+                    FROM json_each({collection_expr})
+                )
+                WHEN json_type({collection_expr}) = 'ARRAY' THEN (
+                    SELECT json_group_array(value)
+                    FROM json_each({collection_expr})
+                )
+                ELSE json_array({collection_expr})
+            END
+        )"""
+    
+    def generate_tail_operation(self, array_expr: str) -> str:
+        """DuckDB get all elements except the first (tail operation)."""
+        return self.generate_array_tail_operation(array_expr)
+    
+    def generate_collection_contains_element(self, collection_expr: str, search_element: str) -> str:
+        """DuckDB check if collection contains specific element."""
+        return f"""(
+            CASE 
+                WHEN {collection_expr} IS NULL THEN false
+                WHEN json_type({collection_expr}) = 'ARRAY' THEN 
+                    EXISTS (
+                        SELECT 1 FROM json_each({collection_expr})
+                        WHERE json_extract_string(value, '$') = {search_element}
+                    )
+                ELSE json_extract_string({collection_expr}, '$') = {search_element}
+            END
+        )"""
+    
+    def generate_subset_check(self, first_collection: str, second_collection: str) -> str:
+        """DuckDB check if first collection is subset of second collection."""
+        return f"""(
+            CASE 
+                WHEN {first_collection} IS NULL THEN true
+                WHEN json_type({first_collection}) = 'ARRAY' AND json_type({second_collection}) = 'ARRAY' THEN (
+                    NOT EXISTS (
+                        SELECT 1 FROM json_each({first_collection}) AS elem1
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM json_each({second_collection}) AS elem2
+                            WHERE elem1.value = elem2.value
+                        )
+                    )
+                )
+                ELSE false
+            END
+        )"""
+    
+    def generate_superset_check(self, first_collection: str, second_collection: str) -> str:
+        """DuckDB check if first collection is superset of second collection."""
+        return f"""(
+            CASE 
+                WHEN {second_collection} IS NULL THEN true
+                WHEN json_type({first_collection}) = 'ARRAY' AND json_type({second_collection}) = 'ARRAY' THEN (
+                    NOT EXISTS (
+                        SELECT 1 FROM json_each({second_collection}) AS elem2
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM json_each({first_collection}) AS elem1
+                            WHERE elem1.value = elem2.value
+                        )
+                    )
+                )
+                ELSE false
+            END
+        )"""    
+    def generate_repeat_operation(self, input_expr: str, expression: str, max_iterations: int = 10) -> str:
+        """DuckDB repeat operation with recursive CTE."""
+        return f"""(
+            WITH RECURSIVE repeat_result AS (
+                -- Base case: initial input
+                SELECT {input_expr} as value, 0 as iteration
+                
+                UNION ALL
+                
+                -- Recursive case: apply expression to previous results
+                SELECT {expression} as value, iteration + 1
+                FROM repeat_result
+                WHERE iteration < {max_iterations}
+            )
+            SELECT json_group_array(value) FROM repeat_result
+        )"""
+    
+    def generate_aggregate_operation(self, collection_expr: str, aggregator_expr: str, init_value: str = "NULL") -> str:
+        """DuckDB aggregate/fold operation."""
+        return f"""(
+            WITH RECURSIVE aggregate_result AS (
+                -- Base case: initialize with first element or init value
+                SELECT 
+                    CASE 
+                        WHEN {init_value} IS NOT NULL THEN {init_value}
+                        ELSE (SELECT value FROM json_each({collection_expr}) LIMIT 1)
+                    END as accumulator,
+                    1 as pos
+                FROM (SELECT 1) as dummy
+                
+                UNION ALL
+                
+                -- Recursive case: apply aggregator to next element
+                SELECT {aggregator_expr} as accumulator, pos + 1
+                FROM aggregate_result, json_each({collection_expr}) as elem
+                WHERE pos <= json_array_length({collection_expr})
+            )
+            SELECT accumulator FROM aggregate_result ORDER BY pos DESC LIMIT 1
+        )"""
+    
+    def generate_iif_expression(self, condition: str, true_result: str, false_result: str) -> str:
+        """DuckDB inline if expression."""
+        return f"CASE WHEN ({condition}) THEN ({true_result}) ELSE ({false_result}) END"
+    
+    def generate_flatten_operation(self, collection_expr: str) -> str:
+        """DuckDB flatten nested JSON arrays."""
+        return f"""(
+            CASE 
+                WHEN {collection_expr} IS NULL THEN json_array()
+                WHEN json_type({collection_expr}) = 'ARRAY' THEN (
+                    SELECT json_group_array(nested_value)
+                    FROM (
+                        SELECT 
+                            CASE 
+                                WHEN json_type(value) = 'ARRAY' THEN 
+                                    (SELECT nested_value FROM json_each(value) AS nested)
+                                ELSE value
+                            END as nested_value
+                        FROM json_each({collection_expr})
+                    ) flattened
+                    WHERE flattened.nested_value IS NOT NULL
+                )
+                ELSE json_array({collection_expr})
+            END
+        )"""
+    
+    def generate_all_criteria_check(self, collection_expr: str, criteria: str) -> str:
+        """DuckDB check if all elements satisfy criteria."""
+        return f"""(
+            CASE 
+                WHEN {collection_expr} IS NULL THEN true
+                WHEN json_type({collection_expr}) = 'ARRAY' THEN (
+                    NOT EXISTS (
+                        SELECT 1 FROM json_each({collection_expr})
+                        WHERE NOT ({criteria})
+                    )
+                )
+                ELSE ({criteria})
+            END
+        )"""
+    
+    def generate_converts_to_check(self, input_expr: str, target_type: str) -> str:
+        """DuckDB check if value can be converted to target type."""
+        if target_type == 'boolean':
+            # Check if value can be converted to boolean
+            return f"""(
+                {input_expr} IS NOT NULL AND 
+                LOWER({input_expr}::text) IN ('true', 'false', '1', '0', 't', 'f', 'yes', 'no')
+            )"""
+        elif target_type in ('integer', 'decimal'):
+            # Check if value is numeric
+            return f"TRY_CAST({input_expr} AS {target_type.upper()}) IS NOT NULL"
+        elif target_type in ('date', 'datetime', 'time'):
+            # Check if value can be converted to temporal type
+            cast_type = 'TIMESTAMP' if target_type == 'datetime' else target_type.upper()
+            return f"TRY_CAST({input_expr} AS {cast_type}) IS NOT NULL"
+        else:
+            # Default: check if not null (can convert to string)
+            return f"{input_expr} IS NOT NULL"
+
+    def generate_type_cast(self, input_expr: str, target_type: str) -> str:
+        """DuckDB cast value to target type."""
+        if target_type in ('integer', 'decimal', 'boolean', 'date', 'time'):
+            cast_type = 'TIMESTAMP' if target_type == 'datetime' else target_type.upper()
+            return f"TRY_CAST({input_expr} AS {cast_type})"
+        else:
+            return f"CAST({input_expr} AS STRING)"
+
+    def generate_of_type_filter(self, collection_expr: str, target_type: str) -> str:
+        """DuckDB filter collection by type."""
+        return f"""(
+            SELECT json_group_array(value)
+            FROM json_each({collection_expr})
+            WHERE json_typeof(value) = '{target_type}'
+        )"""
+
+    def generate_equivalent_check(self, left_expr: str, right_expr: str) -> str:
+        """DuckDB equivalent (~) operator with type-aware comparison."""
+        return f"""(
+            CASE 
+                -- Try to compare as numbers first
+                WHEN TRY_CAST({left_expr} AS DECIMAL) IS NOT NULL 
+                     AND TRY_CAST({right_expr} AS DECIMAL) IS NOT NULL THEN
+                    CAST({left_expr} AS DECIMAL) = CAST({right_expr} AS DECIMAL)
+                -- Otherwise, compare as strings
+                ELSE {left_expr} = {right_expr}
+            END
+        )"""
+
+    def generate_age_in_years(self, birthdate_expr: str) -> str:
+        """DuckDB calculate age in years from birth date."""
+        return f"CAST(EXTRACT(year FROM AGE(CURRENT_DATE, CAST({birthdate_expr} AS DATE))) AS INTEGER)"
+
+    def generate_age_in_years_at(self, birthdate_expr: str, as_of_date_expr: str) -> str:
+        """DuckDB calculate age in years at specific date."""
+        return f"CAST(EXTRACT(year FROM AGE(CAST({as_of_date_expr} AS DATE), CAST({birthdate_expr} AS DATE))) AS INTEGER)"
+
+    def generate_resource_query(self, input_state: 'SQLState', resource_type: str) -> str:
+        """DuckDB generate SQL for resource retrieval."""
+        base_table = input_state.base_table or "fhir_resources"
+        json_column = input_state.json_column or "resource"
+        
+        return f"""
+        (
+            SELECT {json_column}
+            FROM {base_table}
+            WHERE json_extract_string({json_column}, '$.resourceType') = '{resource_type}'
+        )
+        """
+
+    def generate_max_operation(self, operands: list) -> str:
+        """DuckDB max() function with multiple operands."""
+        if len(operands) == 2:
+            return f"CASE WHEN CAST({operands[0]} AS DECIMAL) > CAST({operands[1]} AS DECIMAL) THEN CAST({operands[0]} AS DECIMAL) ELSE CAST({operands[1]} AS DECIMAL) END"
+        else:
+            # Use GREATEST function (DuckDB supports it too)
+            operands_str = ', '.join(f"CAST({op} AS DECIMAL)" for op in operands)
+            return f"GREATEST({operands_str})"
+
+    def generate_min_operation(self, operands: list) -> str:
+        """DuckDB min() function with multiple operands."""
+        if len(operands) == 2:
+            return f"CASE WHEN CAST({operands[0]} AS DECIMAL) < CAST({operands[1]} AS DECIMAL) THEN CAST({operands[0]} AS DECIMAL) ELSE CAST({operands[1]} AS DECIMAL) END"
+        else:
+            # Use LEAST function (DuckDB supports it too)
+            operands_str = ', '.join(f"CAST({op} AS DECIMAL)" for op in operands)
+            return f"LEAST({operands_str})"
+
+    def generate_median_operation(self, operands: list) -> str:
+        """DuckDB median() function."""
+        operands_str = ', '.join(f"CAST({op} AS DOUBLE)" for op in operands)
+        return f"MEDIAN({operands_str})"
+
+    def generate_population_stddev(self, operands: list) -> str:
+        """DuckDB population standard deviation."""
+        operands_str = ', '.join(f"CAST({op} AS DOUBLE)" for op in operands)
+        return f"STDDEV_POP({operands_str})"
+
+    def generate_population_variance(self, operands: list) -> str:
+        """DuckDB population variance."""
+        operands_str = ', '.join(f"CAST({op} AS DOUBLE)" for op in operands)
+        return f"VAR_POP({operands_str})"
+
+    def generate_datetime_creation(self, year: str, month: str, day: str, hour: str, minute: str, second: str) -> str:
+        """DuckDB datetime creation."""
+        return f"make_timestamp({year}, {month}, {day}, {hour}, {minute}, {second})"
+
+    def generate_union_operation(self, first_collection: str, second_collection: str) -> str:
+        """DuckDB union of two collections."""
+        return f"""(
+            CASE 
+                WHEN {first_collection} IS NULL AND {second_collection} IS NULL THEN NULL
+                WHEN {first_collection} IS NULL THEN {second_collection}
+                WHEN {second_collection} IS NULL THEN {first_collection}
+                WHEN json_type({first_collection}) = 'ARRAY' AND json_type({second_collection}) = 'ARRAY' THEN (
+                    SELECT json_group_array(value)
+                    FROM (
+                        SELECT value FROM json_each({first_collection})
+                        UNION
+                        SELECT value FROM json_each({second_collection})
+                    )
+                )
+                ELSE json_array({first_collection}, {second_collection})
+            END
+        )"""
+
+    def generate_exists_check(self, fragment: str, is_collection: bool) -> str:
+        """DuckDB exists/empty checks."""
+        if is_collection:
+            return f"(json_array_length({fragment}) > 0)"
+        else:
+            return f"({fragment} IS NOT NULL)"
+
+    def generate_join_operation(self, collection_expr: str, separator: str) -> str:
+        """DuckDB join operation (concatenate array elements)."""
+        return f"""(
+            CASE 
+                WHEN {collection_expr} IS NULL THEN ''
+                WHEN json_type({collection_expr}) = 'ARRAY' THEN (
+                    SELECT COALESCE(string_agg(
+                        CASE 
+                            WHEN json_type(value) = 'ARRAY' THEN (
+                                SELECT string_agg(json_extract_string(nested_item.value, '$'), {separator})
+                                FROM json_each(value) AS nested_item
+                            )
+                            ELSE json_extract_string(value, '$')
+                        END, {separator}), '')
+                    FROM json_each({collection_expr}) AS item
+                    WHERE item.value IS NOT NULL
+                )
+                ELSE COALESCE(json_extract_string({collection_expr}, '$'), '')
+            END
+        )"""
+
+    def generate_percentile_calculation(self, expression: str, percentile: float) -> str:
+        """Generate SQL for percentile calculation using DuckDB syntax."""
+        return f"QUANTILE_CONT({expression}, {percentile})"
+
+    def generate_date_difference_years(self, start_date: str, end_date: str = "CURRENT_DATE") -> str:
+        """Generate SQL for date difference in years using DuckDB syntax."""
+        return f"CAST(({end_date} - DATE({start_date})) / 365.25 AS DOUBLE)"
+
+    def generate_nested_array_aggregation(self, json_col: str, array_field: str, nested_field: str, separator: str) -> str:
+        """Generate SQL for nested array aggregation using DuckDB syntax."""
+        # Get dialect-specific column names for array iteration
+        array_value_col, array_key_col = self.get_array_iteration_columns()
+        nested_value_col, nested_key_col = self.get_array_iteration_columns()
+        
+        # Build DuckDB-specific nested array SQL
+        nested_extract = self.extract_json_field(f'{nested_field}_item.{nested_value_col}', '$')
+        array_iterate = self.iterate_json_array(json_col, f'$.{array_field}')
+        nested_iterate = self.iterate_json_array(f'{array_field}_item.{array_value_col}', f'$.{nested_field}')
+        
+        return f"""(
+            SELECT COALESCE({self.string_agg_function}({nested_extract}, '{separator}'), '')
+            FROM {array_iterate} AS {array_field}_item,
+                 {nested_iterate} AS {nested_field}_item
+        )"""
+
+    def generate_date_difference_with_unit(self, start_date: str, end_date: str, unit: str) -> str:
+        """Generate SQL for date difference with specific unit using DuckDB syntax."""
+        unit_lower = unit.lower()
+        if unit_lower == 'months':
+            return f"DATEDIFF('month', {start_date}, {end_date})"
+        elif unit_lower == 'years':
+            return f"DATEDIFF('year', {start_date}, {end_date})"
+        elif unit_lower == 'days':
+            return f"DATEDIFF('day', {start_date}, {end_date})"
+        else:
+            # Default to days for unknown units
+            return f"DATEDIFF('day', {start_date}, {end_date})"
+
+    def generate_age_calculation(self, birth_date: str, reference_date: str = "CURRENT_DATE") -> str:
+        """Generate SQL for age calculation using DuckDB syntax (returns integer years)."""
+        return f"CAST(EXTRACT(YEAR FROM {reference_date}) - EXTRACT(YEAR FROM {birth_date}) AS INTEGER)"
+
+    def generate_intersect_operation(self, first_collection: str, second_collection: str) -> str:
+        """Generate SQL for collection intersection using DuckDB syntax."""
+        return f"""(
+            SELECT json_group_array(DISTINCT value)
+            FROM (
+                SELECT value FROM json_each({first_collection}) 
+                WHERE value IN (SELECT value FROM json_each({second_collection}))
+            )
+        )"""
+
+    def generate_collection_distinct_check(self, collection_expr: str) -> str:
+        """Generate SQL to check if all elements in collection are distinct using DuckDB."""
+        return f"""(
+            CASE
+                WHEN json_array_length({collection_expr}) = 0 THEN TRUE
+                WHEN json_array_length({collection_expr}) = 1 THEN TRUE
+                ELSE (
+                    SELECT COUNT(*) = COUNT(DISTINCT value)
+                    FROM json_each({collection_expr})
+                )
+            END
+        )"""
+
+    def normalize_terminology_system(self, system_expr: str) -> str:
+        """
+        Generate DuckDB SQL to normalize terminology system identifiers for comparison.
+
+        This handles canonical system URI crosswalking at execution time,
+        using the terminology_system_mappings table for efficient lookups.
+        """
+        return f"""COALESCE(
+            (SELECT canonical_system
+             FROM terminology_system_mappings
+             WHERE original_system = {system_expr}),
+            {system_expr}
+        )"""
+
+    def generate_valueset_match_condition(self, valueset_id: str) -> str:
+        """Generate DuckDB SQL condition to match resource codes against ValueSet expansion.
+
+        Uses execution-time system normalization to handle OID/URI crosswalking
+        without modifying stored data.
+        """
+        return f"""EXISTS (
+            SELECT 1 FROM fhir_resources vs
+            WHERE json_extract_string(vs.resource, '$.resourceType') = 'ValueSet'
+            AND json_extract_string(vs.resource, '$.id') = '{valueset_id}'
+            AND EXISTS (
+                SELECT 1 FROM json_each(json_extract(vs.resource, '$.expansion.contains')) AS vs_code,
+                             json_each(json_extract(resource, '$.code.coding')) AS resource_coding
+                WHERE json_extract_string(vs_code.value, '$.code') = json_extract_string(resource_coding.value, '$.code')
+                AND {self.normalize_terminology_system("json_extract_string(vs_code.value, '$.system')")} =
+                    {self.normalize_terminology_system("json_extract_string(resource_coding.value, '$.system')")}
+            )
+        )"""
+
+    # CQL Function Dialect Abstraction Methods - DuckDB Implementation
+
+    def generate_math_function(self, function_name: str, *args: str) -> str:
+        """DuckDB-specific mathematical function SQL generation."""
+        func_name = function_name.lower()
+
+        if func_name == 'power':
+            return f"POW({', '.join(args)})"
+        elif func_name in ['sqrt', 'ln', 'exp', 'log']:
+            return f"{func_name.upper()}({', '.join(args)})"
+        elif func_name == 'log10':
+            return f"LOG10({', '.join(args)})"
+        elif func_name == 'ceiling':
+            return f"CEIL({', '.join(args)})"
+        elif func_name == 'floor':
+            return f"FLOOR({', '.join(args)})"
+        elif func_name == 'round':
+            return f"ROUND({', '.join(args)})"
+        elif func_name == 'abs':
+            return f"ABS({', '.join(args)})"
+        else:
+            return f"{func_name.upper()}({', '.join(args)})"
+
+    def generate_date_diff(self, unit: str, start_date: str, end_date: str) -> str:
+        """DuckDB date difference using DATE_DIFF function."""
+        return f"DATE_DIFF('{unit}', {start_date}, {end_date})"
+
+    def generate_current_timestamp(self) -> str:
+        """DuckDB current timestamp."""
+        return "CURRENT_TIMESTAMP"
+
+    def generate_current_date(self) -> str:
+        """DuckDB current date."""
+        return "CURRENT_DATE"
+
+    def generate_regex_match(self, text_expr: str, pattern: str) -> str:
+        """DuckDB regex matching using REGEXP."""
+        return f"{text_expr} REGEXP '{pattern}'"
+
+    def generate_json_array_elements(self, json_expr: str) -> str:
+        """DuckDB JSON array elements extraction using json_each."""
+        return f"""(
+            SELECT json_array_agg(value)
+            FROM json_each({json_expr})
+        )"""
+
+    def generate_standard_type_cast(self, expression: str, target_type: str) -> str:
+        """DuckDB type casting with proper type names."""
+        type_mapping = {
+            'double_precision': 'DOUBLE',
+            'double': 'DOUBLE',
+            'bigint': 'BIGINT',
+            'integer': 'INTEGER',
+            'int': 'INTEGER',
+            'boolean': 'BOOLEAN',
+            'varchar': 'VARCHAR',
+            'text': 'VARCHAR'
+        }
+        db_type = type_mapping.get(target_type.lower(), target_type.upper())
+        return f"CAST({expression} AS {db_type})"
+
+    def generate_aggregate_function(self, function_name: str, expression: str,
+                                  filter_condition: str = None, distinct: bool = False) -> str:
+        """DuckDB aggregate function SQL generation."""
+        func_name = function_name.upper()
+
+        # Handle DuckDB-specific function name mappings
+        func_map = {
+            'VARIANCE': 'VAR_SAMP'
+        }
+        actual_func = func_map.get(func_name, func_name)
+
+        # Handle DISTINCT
+        expr = f"DISTINCT {expression}" if distinct else expression
+
+        # Generate function call
+        if actual_func in ['STDDEV', 'VAR_SAMP', 'AVG', 'SUM', 'COUNT', 'MIN', 'MAX']:
+            sql = f"{actual_func}({expr})"
+        else:
+            sql = f"{actual_func}({expr})"
+
+        # Add filter condition if provided
+        if filter_condition:
+            sql = f"{sql} FILTER (WHERE {filter_condition})"
+
+        return sql
+
+    def generate_interval_arithmetic(self, date_expr: str, interval_expr: str, operation: str = 'add') -> str:
+        """DuckDB interval arithmetic using INTERVAL syntax."""
+        if operation.lower() == 'add':
+            return f"({date_expr} + INTERVAL {interval_expr})"
+        elif operation.lower() == 'subtract':
+            return f"({date_expr} - INTERVAL {interval_expr})"
+        else:
+            raise ValueError(f"Unsupported interval operation: {operation}")
+
+    def generate_boolean_conversion(self, expression: str) -> str:
+        """DuckDB boolean conversion handling."""
+        return f"""CASE
+            WHEN LOWER(TRIM({expression})) IN ('true', 't', '1') THEN true
+            WHEN LOWER(TRIM({expression})) IN ('false', 'f', '0') THEN false
+            WHEN {expression} IS NULL OR TRIM({expression}) = '' THEN NULL
+            ELSE NULL
+        END"""
+
+    def generate_json_aggregate_function(self, function_name: str, json_expr: str,
+                                        cast_type: str = None) -> str:
+        """DuckDB aggregate function on JSON array elements."""
+        cast_type = cast_type or 'DOUBLE'
+
+        # Handle DuckDB-specific function names
+        func_map = {
+            'variance': 'VAR_SAMP',
+            'stddev': 'STDDEV'
+        }
+        actual_func = func_map.get(function_name.lower(), function_name.upper())
+
+        return f"""(
+    SELECT {actual_func}(CAST(value AS {cast_type}))
+    FROM (
+        SELECT json_extract(json_array_elements({json_expr}), '$') AS value
+    ) subq
+    WHERE value IS NOT NULL AND value != 'null'
+    AND value REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
+)"""
+
+    def generate_percentile_function(self, json_expr: str, percentile_fraction: str,
+                                   cast_type: str = None) -> str:
+        """DuckDB percentile function on JSON array."""
+        cast_type = cast_type or 'DOUBLE'
+
+        return f"""(
+    SELECT QUANTILE_CONT(CAST(value AS {cast_type}), {percentile_fraction})
+    FROM (
+        SELECT json_extract(json_array_elements({json_expr}), '$') AS value
+    ) subq
+    WHERE value IS NOT NULL AND value != 'null'
+    AND value REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
+)"""
+
+    def generate_json_array_elements(self, json_expr: str) -> str:
+        """DuckDB JSON array elements extraction."""
+        return f"json_each({json_expr}) AS elem"
+
+    def generate_json_object_creation(self, key_value_pairs: List[str]) -> str:
+        """DuckDB JSON object creation."""
+        pairs = []
+        for i in range(0, len(key_value_pairs), 2):
+            key = key_value_pairs[i]
+            value = key_value_pairs[i + 1] if i + 1 < len(key_value_pairs) else 'NULL'
+            pairs.append(f"{key}: {value}")
+        return f"{{{', '.join(pairs)}}}"
+
+    def generate_json_array_creation(self, elements: List[str]) -> str:
+        """DuckDB JSON array creation."""
+        return f"[{', '.join(elements)}]"
+
+    def generate_json_object_extraction(self, json_expr: str, path: str) -> str:
+        """DuckDB JSON object field extraction."""
+        return f"json_extract({json_expr}, '{path}')"
+
+    def generate_json_array_aggregation(self, expr: str) -> str:
+        """DuckDB JSON array aggregation."""
+        return f"json_group_array({expr})"

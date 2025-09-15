@@ -49,8 +49,9 @@ class FHIRDataStore:
             self._initialize_table()
     
     def _initialize_table(self):
-        """Initialize the FHIR resources table"""
+        """Initialize the FHIR resources table and terminology mappings table"""
         self.dialect.create_fhir_table(self.table_name, self.json_col)
+        self.dialect.create_terminology_system_mappings_table()
         self.logger.info(f"Initialized FHIR data store with {type(self.dialect).__name__}")
     
     def load_from_files(self, file_pattern: str, use_bulk_load: bool = True,
@@ -203,6 +204,110 @@ class FHIRDataStore:
     def get_resource_counts(self) -> Dict[str, int]:
         """Get counts of resources by type"""
         return self.dialect.get_resource_counts(self.table_name, self.json_col)
+
+    # ValueSet Caching Methods
+
+    def cache_valueset(self, valueset_name: str, valueset_resource: Dict[str, Any]) -> None:
+        """
+        Store VSAC-retrieved ValueSet in datastore cache.
+
+        Args:
+            valueset_name: Name of the ValueSet (e.g., "Galactosemia")
+            valueset_resource: FHIR ValueSet resource with expansion
+        """
+        # Ensure the resource has proper metadata for caching
+        if 'resourceType' not in valueset_resource:
+            valueset_resource['resourceType'] = 'ValueSet'
+
+        # Add cache metadata
+        valueset_resource['_cache_key'] = f"cached_valueset_{valueset_name}"
+        valueset_resource['_cached_at'] = self._get_current_timestamp()
+
+        # Store in datastore
+        self.load_resource(valueset_resource)
+        self.logger.info(f"Cached ValueSet '{valueset_name}' with {self._count_valueset_codes(valueset_resource)} codes")
+
+    def get_cached_valueset(self, valueset_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve cached ValueSet resource by name.
+
+        Args:
+            valueset_name: Name of the ValueSet to retrieve
+
+        Returns:
+            ValueSet resource dict if found, None otherwise
+        """
+        cache_key = f"cached_valueset_{valueset_name}"
+
+        # Query for cached ValueSet
+        sql = f"""
+        SELECT {self.json_col}
+        FROM {self.table_name}
+        WHERE json_extract_string({self.json_col}, '$._cache_key') = '{cache_key}'
+        AND json_extract_string({self.json_col}, '$.resourceType') = 'ValueSet'
+        """
+
+        try:
+            result = self.dialect.execute_query(sql)
+            if result and len(result) > 0:
+                # Return the first match (should be unique)
+                resource_json = result[0][0] if isinstance(result[0], tuple) else result[0]
+                if isinstance(resource_json, str):
+                    import json
+                    return json.loads(resource_json)
+                else:
+                    return resource_json
+        except Exception as e:
+            self.logger.warning(f"Failed to retrieve cached ValueSet '{valueset_name}': {e}")
+
+        return None
+
+    def is_valueset_cached(self, valueset_name: str) -> bool:
+        """
+        Check if ValueSet is available in cache.
+
+        Args:
+            valueset_name: Name of the ValueSet to check
+
+        Returns:
+            True if ValueSet is cached, False otherwise
+        """
+        return self.get_cached_valueset(valueset_name) is not None
+
+    def get_cached_valuesets(self) -> List[str]:
+        """
+        Get list of all cached ValueSet names.
+
+        Returns:
+            List of ValueSet names that are cached
+        """
+        sql = f"""
+        SELECT json_extract_string({self.json_col}, '$.name') as name
+        FROM {self.table_name}
+        WHERE json_extract_string({self.json_col}, '$.resourceType') = 'ValueSet'
+        AND json_extract_string({self.json_col}, '$._cache_key') IS NOT NULL
+        AND json_extract_string({self.json_col}, '$.name') IS NOT NULL
+        """
+
+        try:
+            result = self.dialect.execute_query(sql)
+            if result:
+                return [row[0] if isinstance(row, tuple) else row for row in result]
+        except Exception as e:
+            self.logger.warning(f"Failed to retrieve cached ValueSet list: {e}")
+
+        return []
+
+    def _get_current_timestamp(self) -> str:
+        """Get current timestamp for cache metadata"""
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def _count_valueset_codes(self, valueset_resource: Dict[str, Any]) -> int:
+        """Count the number of codes in a ValueSet expansion"""
+        expansion = valueset_resource.get('expansion', {})
+        contains = expansion.get('contains', [])
+        return len(contains)
     
     def _load_file_individually(self, file_path: str) -> int:
         """Load file by parsing JSON and inserting resources individually"""

@@ -16,39 +16,51 @@ logger = logging.getLogger(__name__)
 def load_vsac_api_key() -> Optional[str]:
     """
     Load VSAC API key from secure location.
-    
+
     Checks multiple sources in order of preference:
-    1. .vsac_api_key file in project root
-    2. VSAC_API_KEY environment variable
-    3. UMLS_API_KEY environment variable (alternative name)
-    
+    1. .env file (preferred method)
+    2. .vsac_api_key file in project root (legacy support)
+    3. VSAC_API_KEY environment variable
+    4. UMLS_API_KEY environment variable (alternative name)
+
     Returns:
         VSAC API key string, or None if not found
     """
-    # Try .vsac_api_key file in project root
+    # First try centralized configuration (which handles .env files)
+    try:
+        from ..config import get_vsac_api_key
+        api_key = get_vsac_api_key()
+        if api_key:
+            return api_key
+    except ImportError:
+        # Fallback if centralized config not available
+        pass
+
+    # Legacy support: Try .vsac_api_key file in project root
     try:
         key_file = Path(__file__).parent.parent.parent / '.vsac_api_key'
         if key_file.exists():
             api_key = key_file.read_text().strip()
-            if api_key:
+            if api_key and api_key != 'your_vsac_api_key_here':
                 logger.debug("VSAC API key loaded from .vsac_api_key file")
                 return api_key
     except Exception as e:
         logger.warning(f"Failed to read .vsac_api_key file: {e}")
-    
-    # Try environment variables
+
+    # Try environment variables directly
     for env_var in ['VSAC_API_KEY', 'UMLS_API_KEY']:
         api_key = os.getenv(env_var)
-        if api_key:
+        if api_key and api_key.strip() and api_key != 'your_vsac_api_key_here':
             logger.debug(f"VSAC API key loaded from {env_var} environment variable")
             return api_key.strip()
-    
+
     logger.warning("No VSAC API key found. Terminology services will be unavailable.")
     logger.info("To enable VSAC integration:")
-    logger.info("  1. Create .vsac_api_key file in project root with your UMLS API key")
-    logger.info("  2. Or set VSAC_API_KEY environment variable")
-    logger.info("  3. Get API key from: https://uts.nlm.nih.gov/uts/signup-login")
-    
+    logger.info("  1. Add VSAC_API_KEY to your .env file (recommended)")
+    logger.info("  2. Or create .vsac_api_key file in project root with your UMLS API key")
+    logger.info("  3. Or set VSAC_API_KEY environment variable")
+    logger.info("  4. Get API key from: https://uts.nlm.nih.gov/uts/signup-login")
+
     return None
 
 

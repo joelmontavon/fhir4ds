@@ -8,6 +8,7 @@ aggregates (Min, Max, Sum, Avg) and mathematical functions not present in FHIRPa
 import logging
 from typing import Any, List, Dict, Union
 from ...fhirpath.parser.ast_nodes import LiteralNode
+from .arithmetic_operators import CQLArithmeticOperators
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +22,25 @@ class CQLMathFunctionHandler:
     sqrt, truncate, exp, ln, log, power) reimplemented for CQL context.
     """
     
-    def __init__(self, dialect: str = "duckdb"):
+    def __init__(self, dialect: str = "duckdb", dialect_handler=None):
         """Initialize CQL math function handler with dialect support."""
         self.dialect = dialect
+
+        # Inject dialect handler for database-specific operations
+        if dialect_handler is None:
+            from ...dialects import DuckDBDialect, PostgreSQLDialect
+            from ...config import get_database_url
+            if dialect.lower() == "postgresql":
+                # Use centralized configuration
+                conn_str = get_database_url('postgresql')
+                self.dialect_handler = PostgreSQLDialect(conn_str)
+            else:  # default to DuckDB
+                self.dialect_handler = DuckDBDialect()
+        else:
+            self.dialect_handler = dialect_handler
+
+        # Initialize arithmetic operators with dialect handler
+        self.arithmetic_ops = CQLArithmeticOperators(dialect, dialect_handler)
         
         # Register all mathematical functions (CQL-specific + FHIRPath compatible)
         self.function_map = {
@@ -49,7 +66,13 @@ class CQLMathFunctionHandler:
             
             'predecessor': self.predecessor,
             'successor': self.successor,
-            
+
+            # Basic arithmetic operations (imported from arithmetic operators)
+            'add': self.add,
+            'subtract': self.subtract,
+            'multiply': self.multiply,
+            'divide': self.divide,
+
             # FHIRPath mathematical functions (reimplemented for CQL)
             'abs': self.abs,
             'ceiling': self.ceiling,
@@ -377,35 +400,12 @@ class CQLMathFunctionHandler:
         
         # Handle collection case: StdDev(collection)
         if isinstance(expr_val, str):
-            # Calculate standard deviation from JSON array
-            if self.dialect == "postgresql":
-                sql = f"""
-(
-    SELECT STDDEV(CAST(value AS DOUBLE PRECISION))
-    FROM (
-        SELECT json_array_elements_text({expr_val}) AS value
-    ) subq
-    WHERE value IS NOT NULL AND value != 'null'
-    AND value ~ '^-?[0-9]+(\\.[0-9]+)?$'
-)
-""".strip()
-            else:  # DuckDB
-                sql = f"""
-(
-    SELECT STDDEV(CAST(value AS DOUBLE))
-    FROM (
-        SELECT json_array_elements_text({expr_val}) AS value
-    ) subq
-    WHERE value IS NOT NULL AND value != 'null'
-    AND value REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
-)
-""".strip()
+            # Calculate standard deviation from JSON array using dialect abstraction
+            sql = self.dialect_handler.generate_json_aggregate_function('stddev', expr_val)
         else:
-            # Handle aggregate case
-            if self.dialect == "postgresql":
-                sql = f"STDDEV(CAST({expr_val} AS DOUBLE PRECISION))"
-            else:  # DuckDB
-                sql = f"STDDEV(CAST({expr_val} AS DOUBLE))"
+            # Handle aggregate case using dialect abstraction
+            cast_sql = self.dialect_handler.generate_standard_type_cast(expr_val, 'double')
+            sql = f"STDDEV({cast_sql.replace(f'CAST({expr_val} AS ', 'CAST(').replace(')', '')})"
         
         return LiteralNode(value=sql, type='sql')
     
@@ -434,35 +434,12 @@ class CQLMathFunctionHandler:
         
         # Handle collection case: Variance(collection)
         if isinstance(expr_val, str):
-            # Calculate variance from JSON array
-            if self.dialect == "postgresql":
-                sql = f"""
-(
-    SELECT VARIANCE(CAST(value AS DOUBLE PRECISION))
-    FROM (
-        SELECT json_array_elements_text({expr_val}) AS value
-    ) subq
-    WHERE value IS NOT NULL AND value != 'null'
-    AND value ~ '^-?[0-9]+(\\.[0-9]+)?$'
-)
-""".strip()
-            else:  # DuckDB
-                sql = f"""
-(
-    SELECT VAR_SAMP(CAST(value AS DOUBLE))
-    FROM (
-        SELECT json_array_elements_text({expr_val}) AS value
-    ) subq
-    WHERE value IS NOT NULL AND value != 'null'
-    AND value REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
-)
-""".strip()
+            # Calculate variance from JSON array using dialect abstraction
+            sql = self.dialect_handler.generate_json_aggregate_function('variance', expr_val)
         else:
-            # Handle aggregate case
-            if self.dialect == "postgresql":
-                sql = f"VARIANCE(CAST({expr_val} AS DOUBLE PRECISION))"
-            else:  # DuckDB
-                sql = f"VAR_SAMP(CAST({expr_val} AS DOUBLE))"
+            # Handle aggregate case using dialect abstraction
+            cast_sql = self.dialect_handler.generate_standard_type_cast(expr_val, 'double')
+            sql = self.dialect_handler.generate_aggregate_function('variance', cast_sql)
         
         return LiteralNode(value=sql, type='sql')
     
@@ -491,35 +468,12 @@ class CQLMathFunctionHandler:
         
         # Handle collection case: Median(collection)
         if isinstance(expr_val, str):
-            # Calculate median from JSON array using percentile approach
-            if self.dialect == "postgresql":
-                sql = f"""
-(
-    SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY CAST(value AS DOUBLE PRECISION))
-    FROM (
-        SELECT json_array_elements_text({expr_val}) AS value
-    ) subq
-    WHERE value IS NOT NULL AND value != 'null'
-    AND value ~ '^-?[0-9]+(\\.[0-9]+)?$'
-)
-""".strip()
-            else:  # DuckDB
-                sql = f"""
-(
-    SELECT QUANTILE_CONT(CAST(value AS DOUBLE), 0.5)
-    FROM (
-        SELECT json_array_elements_text({expr_val}) AS value
-    ) subq
-    WHERE value IS NOT NULL AND value != 'null'
-    AND value REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
-)
-""".strip()
+            # Calculate median from JSON array using dialect abstraction
+            sql = self.dialect_handler.generate_percentile_function(expr_val, '0.5')
         else:
-            # Handle aggregate case
-            if self.dialect == "postgresql":
-                sql = f"PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY CAST({expr_val} AS DOUBLE PRECISION))"
-            else:  # DuckDB
-                sql = f"QUANTILE_CONT(CAST({expr_val} AS DOUBLE), 0.5)"
+            # Handle aggregate case using dialect abstraction
+            cast_sql = self.dialect_handler.generate_standard_type_cast(expr_val, 'double')
+            sql = self.dialect_handler.generate_percentile_calculation(cast_sql, 0.5)
         
         return LiteralNode(value=sql, type='sql')
     
@@ -600,35 +554,12 @@ class CQLMathFunctionHandler:
         
         # Handle collection case: Percentile(collection, n)
         if isinstance(expr_val, str):
-            # Calculate percentile from JSON array
-            if self.dialect == "postgresql":
-                sql = f"""
-(
-    SELECT PERCENTILE_CONT({percentile_fraction}) WITHIN GROUP (ORDER BY CAST(value AS DOUBLE PRECISION))
-    FROM (
-        SELECT json_array_elements_text({expr_val}) AS value
-    ) subq
-    WHERE value IS NOT NULL AND value != 'null'
-    AND value ~ '^-?[0-9]+(\\.[0-9]+)?$'
-)
-""".strip()
-            else:  # DuckDB
-                sql = f"""
-(
-    SELECT QUANTILE_CONT(CAST(value AS DOUBLE), {percentile_fraction})
-    FROM (
-        SELECT json_array_elements_text({expr_val}) AS value
-    ) subq
-    WHERE value IS NOT NULL AND value != 'null'
-    AND value REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
-)
-""".strip()
+            # Calculate percentile from JSON array using dialect abstraction
+            sql = self.dialect_handler.generate_percentile_function(expr_val, percentile_fraction)
         else:
-            # Handle aggregate case
-            if self.dialect == "postgresql":
-                sql = f"PERCENTILE_CONT({percentile_fraction}) WITHIN GROUP (ORDER BY CAST({expr_val} AS DOUBLE PRECISION))"
-            else:  # DuckDB
-                sql = f"QUANTILE_CONT(CAST({expr_val} AS DOUBLE), {percentile_fraction})"
+            # Handle aggregate case using dialect abstraction
+            cast_sql = self.dialect_handler.generate_standard_type_cast(expr_val, 'double')
+            sql = self.dialect_handler.generate_percentile_calculation(cast_sql, float(percentile_val) / 100.0)
         
         return LiteralNode(value=sql, type='sql')
     
@@ -672,12 +603,9 @@ class CQLMathFunctionHandler:
             
             if precision.lower() in precision_map:
                 interval_unit = precision_map[precision.lower()]
-                if self.dialect == "duckdb":
-                    sql = f"({expr_val} - INTERVAL 1 {interval_unit})"
-                elif self.dialect == "postgresql":
-                    sql = f"({expr_val} - INTERVAL '1 {interval_unit}')"
-                else:
-                    sql = f"({expr_val} - 1)"
+                # Use dialect abstraction for date arithmetic
+                interval_expr = f"1 {interval_unit}"
+                sql = self.dialect_handler.generate_interval_arithmetic(expr_val, interval_expr, 'subtract')
             else:
                 sql = f"({expr_val} - 1)"
         else:
@@ -726,12 +654,8 @@ class CQLMathFunctionHandler:
             
             if precision.lower() in precision_map:
                 interval_unit = precision_map[precision.lower()]
-                if self.dialect == "duckdb":
-                    sql = f"({expr_val} + INTERVAL 1 {interval_unit})"
-                elif self.dialect == "postgresql":
-                    sql = f"({expr_val} + INTERVAL '1 {interval_unit}')"
-                else:
-                    sql = f"({expr_val} + 1)"
+                # Use dialect abstraction for date arithmetic
+                sql = f"({self.dialect_handler.generate_date_arithmetic(expr_val, '1', interval_unit)})"
             else:
                 sql = f"({expr_val} + 1)"
         else:
@@ -949,17 +873,28 @@ class CQLMathFunctionHandler:
             args_sql = [f"CAST({arg} AS DOUBLE)" for arg in args]
             
             if function_name == 'min':
-                # Use LEAST function for multiple arguments
-                if self.dialect == "postgresql":
-                    return f"LEAST({', '.join(args_sql)})"
-                else:  # DuckDB
-                    return f"LEAST({', '.join(args_sql)})"
+                # Use LEAST function for multiple arguments (same for both dialects)
+                return f"LEAST({', '.join(args_sql)})"
             else:  # max
-                # Use GREATEST function for multiple arguments
-                if self.dialect == "postgresql":
-                    return f"GREATEST({', '.join(args_sql)})"
-                else:  # DuckDB
-                    return f"GREATEST({', '.join(args_sql)})"
+                # Use GREATEST function for multiple arguments (same for both dialects)
+                return f"GREATEST({', '.join(args_sql)})"
         
         # Fallback for unknown multi-arg functions
         return f"-- Unsupported multi-arg function: {function_name}({', '.join(map(str, args))})"
+
+    # Basic arithmetic operations with null handling
+    def add(self, left: Any, right: Any) -> LiteralNode:
+        """CQL addition with null propagation."""
+        return self.arithmetic_ops.add(left, right)
+
+    def subtract(self, left: Any, right: Any) -> LiteralNode:
+        """CQL subtraction with null propagation."""
+        return self.arithmetic_ops.subtract(left, right)
+
+    def multiply(self, left: Any, right: Any) -> LiteralNode:
+        """CQL multiplication with null propagation."""
+        return self.arithmetic_ops.multiply(left, right)
+
+    def divide(self, left: Any, right: Any) -> LiteralNode:
+        """CQL division with null propagation and division by zero handling."""
+        return self.arithmetic_ops.divide(left, right)
