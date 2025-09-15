@@ -1065,9 +1065,11 @@ class FHIRPathParser:
                                    TokenType.AND, TokenType.OR]:
                 return True
             
-            # If at beginning of expression, likely identifier
+            # If at beginning of expression, default to string literal
+            # The only case where we'd want an identifier at position 0 is for CQL named expressions
+            # like "Patient Age at Asthma Encounter", but those should be handled by proper CQL parsing
             if self.position == 0:
-                return True
+                return False
             
             prev_token = self.tokens[self.position - 1]
             

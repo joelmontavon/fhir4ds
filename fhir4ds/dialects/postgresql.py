@@ -109,7 +109,49 @@ class PostgreSQLDialect(DatabaseDialect):
         
         # No need to commit with autocommit=True
         logger.info(f"Created FHIR table: {table_name} with JSONB optimization and enhanced indexing")
-    
+
+    def create_terminology_system_mappings_table(self) -> None:
+        """Create the terminology system mappings table for crosswalking OID/URI/URN"""
+        try:
+            from ..terminology.system_mappings import get_all_system_identifiers
+
+            cursor = self.connection.cursor()
+
+            # Drop and create terminology mappings table
+            cursor.execute("DROP TABLE IF EXISTS terminology_system_mappings")
+            cursor.execute("""
+                CREATE TABLE terminology_system_mappings (
+                    original_system TEXT PRIMARY KEY,
+                    canonical_system TEXT NOT NULL,
+                    system_type TEXT NOT NULL,
+                    name TEXT NOT NULL
+                )
+            """)
+
+            # Create index for fast lookups
+            cursor.execute("CREATE INDEX idx_terminology_mappings_original ON terminology_system_mappings(original_system)")
+
+            # Insert all mappings
+            mappings = get_all_system_identifiers()
+            insert_sql = """
+                INSERT INTO terminology_system_mappings
+                (original_system, canonical_system, system_type, name)
+                VALUES (%s, %s, %s, %s)
+            """
+
+            for mapping in mappings:
+                cursor.execute(insert_sql, (
+                    mapping['original_system'],
+                    mapping['canonical_system'],
+                    mapping['system_type'],
+                    mapping['name']
+                ))
+
+            logger.info(f"Created terminology mappings table with {len(mappings)} mappings")
+
+        except Exception as e:
+            self._handle_operation_error("terminology mappings table creation", e)
+
     def bulk_load_json(self, file_path: str, table_name: str, json_col: str) -> int:
         """Enhanced bulk load JSON using PostgreSQL COPY for better performance"""
         try:
@@ -292,6 +334,18 @@ class PostgreSQLDialect(DatabaseDialect):
     def contains_condition(self, item_expr: str, field_name: str, value: str) -> str:
         """Generate contains condition for field matching using PostgreSQL syntax"""
         return f"(@.{field_name} like_regex \".*{value}.*\")"
+    
+    def generate_field_startswith_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate field startsWith condition - delegates to starts_with_condition"""
+        return self.starts_with_condition(item_expr, field_name, value)
+    
+    def generate_field_endswith_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate field endsWith condition - delegates to ends_with_condition"""
+        return self.ends_with_condition(item_expr, field_name, value)
+    
+    def generate_field_contains_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate field contains condition - delegates to contains_condition"""
+        return self.contains_condition(item_expr, field_name, value)
     
     def get_value_primitive_sql(self, input_sql: str) -> str:
         """Generate SQL for getValue() function handling primitive and complex types using PostgreSQL JSONB functions"""
@@ -1132,6 +1186,23 @@ class PostgreSQLDialect(DatabaseDialect):
                 ELSE jsonb_build_array({first_collection}, {second_collection})
             END
         )"""
+
+    def generate_self_combine_operation(self, collection: str) -> str:
+        """PostgreSQL self-combination optimization (x.combine(x))."""
+        return f"""(
+            CASE 
+                WHEN {collection} IS NULL THEN NULL
+                WHEN jsonb_typeof({collection}) = 'array' THEN (
+                    SELECT jsonb_agg(elem)
+                    FROM (
+                        SELECT elem FROM jsonb_array_elements({collection}) AS elem
+                        UNION ALL
+                        SELECT elem FROM jsonb_array_elements({collection}) AS elem
+                    ) AS combined
+                )
+                ELSE jsonb_build_array({collection}, {collection})
+            END
+        )"""
     
     def generate_where_clause_filter(self, collection_expr: str, condition_sql: str) -> str:
         """PostgreSQL WHERE clause filtering using jsonb_path_query_array."""
@@ -1417,6 +1488,11 @@ class PostgreSQLDialect(DatabaseDialect):
                 WHEN jsonb_typeof({jsonb_expr}) = 'array' THEN
                     CASE 
                         WHEN jsonb_array_length({jsonb_expr}) = 0 THEN NULL
+                        -- If any value is null, return null
+                        WHEN EXISTS (
+                            SELECT 1 FROM jsonb_array_elements({jsonb_expr}) AS value
+                            WHERE value::text NOT IN ('true', 'false')
+                        ) THEN NULL
                         ELSE (
                             SELECT COUNT(*) = COUNT(CASE WHEN 
                                 value::text = 'true' THEN 1 END)
@@ -1442,6 +1518,11 @@ class PostgreSQLDialect(DatabaseDialect):
                 WHEN jsonb_typeof({jsonb_expr}) = 'array' THEN
                     CASE 
                         WHEN jsonb_array_length({jsonb_expr}) = 0 THEN NULL
+                        -- If any value is null, return null
+                        WHEN EXISTS (
+                            SELECT 1 FROM jsonb_array_elements({jsonb_expr}) AS value
+                            WHERE value::text NOT IN ('true', 'false')
+                        ) THEN NULL
                         ELSE (
                             SELECT COUNT(*) = COUNT(CASE WHEN 
                                 value::text = 'false' THEN 1 END)
@@ -1823,3 +1904,250 @@ class PostgreSQLDialect(DatabaseDialect):
                 ELSE COALESCE({collection_expr} #>> '{{}}', '')
             END
         )"""
+
+    def generate_percentile_calculation(self, expression: str, percentile: float) -> str:
+        """Generate SQL for percentile calculation using PostgreSQL syntax."""
+        return f"PERCENTILE_CONT({percentile}) WITHIN GROUP (ORDER BY {expression})"
+
+    def generate_date_difference_years(self, start_date: str, end_date: str = "CURRENT_DATE") -> str:
+        """Generate SQL for date difference in years using PostgreSQL syntax."""
+        return f"EXTRACT(DAYS FROM {end_date} - DATE({start_date})) / 365.25"
+
+    def generate_nested_array_aggregation(self, json_col: str, array_field: str, nested_field: str, separator: str) -> str:
+        """Generate SQL for nested array aggregation using PostgreSQL syntax."""
+        # Get dialect-specific column names for array iteration
+        array_value_col, array_key_col = self.get_array_iteration_columns()
+        nested_value_col, nested_key_col = self.get_array_iteration_columns()
+        
+        # Build PostgreSQL-specific nested array SQL
+        nested_extract = self.extract_json_field(f'({nested_field}_item).{nested_value_col}', '$')
+        array_iterate = self.iterate_json_array(json_col, f'$.{array_field}')
+        nested_iterate = self.iterate_json_array(f'({array_field}_item).{array_value_col}', f'$.{nested_field}')
+        
+        return f"""(
+            SELECT COALESCE({self.string_agg_function}({nested_extract}, '{separator}' ORDER BY ({array_field}_item).{array_key_col}, ({nested_field}_item).{nested_key_col}), '')
+            FROM {array_iterate} AS {array_field}_item({array_value_col}, {array_key_col}),
+                 {nested_iterate} AS {nested_field}_item({nested_value_col}, {nested_key_col})
+        )"""
+
+    def generate_date_difference_with_unit(self, start_date: str, end_date: str, unit: str) -> str:
+        """Generate SQL for date difference with specific unit using PostgreSQL syntax."""
+        unit_lower = unit.lower()
+        if unit_lower == 'months':
+            return f"EXTRACT(YEAR FROM AGE({end_date}, {start_date})) * 12 + EXTRACT(MONTH FROM AGE({end_date}, {start_date}))"
+        elif unit_lower == 'years':
+            return f"EXTRACT(YEAR FROM AGE({end_date}, {start_date}))"
+        elif unit_lower == 'days':
+            return f"EXTRACT(DAYS FROM {end_date} - {start_date})"
+        else:
+            # Default to days for unknown units
+            return f"EXTRACT(DAYS FROM {end_date} - {start_date})"
+
+    def generate_age_calculation(self, birth_date: str, reference_date: str = "CURRENT_DATE") -> str:
+        """Generate SQL for age calculation using PostgreSQL syntax (returns integer years)."""
+        return f"EXTRACT(YEAR FROM AGE({reference_date}, {birth_date}))"
+
+    def generate_intersect_operation(self, first_collection: str, second_collection: str) -> str:
+        """Generate SQL for collection intersection using PostgreSQL syntax."""
+        return f"""(
+            SELECT jsonb_agg(DISTINCT value)
+            FROM (
+                SELECT value FROM jsonb_array_elements({first_collection})
+                WHERE value IN (SELECT value FROM jsonb_array_elements({second_collection}))
+            ) AS intersection_values(value)
+        )"""
+
+    def generate_collection_distinct_check(self, collection_expr: str) -> str:
+        """Generate SQL to check if all elements in collection are distinct using PostgreSQL."""
+        return f"""(
+            CASE
+                WHEN jsonb_array_length({collection_expr}) = 0 THEN TRUE
+                WHEN jsonb_array_length({collection_expr}) = 1 THEN TRUE
+                ELSE (
+                    SELECT COUNT(*) = COUNT(DISTINCT value)
+                    FROM jsonb_array_elements({collection_expr}) AS t(value)
+                )
+            END
+        )"""
+
+    def normalize_terminology_system(self, system_expr: str) -> str:
+        """
+        Generate PostgreSQL SQL to normalize terminology system identifiers for comparison.
+
+        This handles canonical system URI crosswalking at execution time,
+        using the terminology_system_mappings table for efficient lookups.
+        """
+        return f"""COALESCE(
+            (SELECT canonical_system
+             FROM terminology_system_mappings
+             WHERE original_system = {system_expr}),
+            {system_expr}
+        )"""
+
+    def generate_valueset_match_condition(self, valueset_id: str) -> str:
+        """Generate PostgreSQL SQL condition to match resource codes against ValueSet expansion.
+
+        Uses execution-time system normalization to handle OID/URI crosswalking
+        without modifying stored data.
+        """
+        return f"""EXISTS (
+            SELECT 1 FROM fhir_resources vs
+            WHERE jsonb_extract_path_text(vs.resource, 'resourceType') = 'ValueSet'
+            AND jsonb_extract_path_text(vs.resource, 'id') = '{valueset_id}'
+            AND EXISTS (
+                SELECT 1 FROM jsonb_array_elements(jsonb_extract_path(vs.resource, 'expansion', 'contains')) AS vs_code,
+                             jsonb_array_elements(jsonb_extract_path(resource, 'code', 'coding')) AS resource_coding
+                WHERE vs_code ->> 'code' = resource_coding ->> 'code'
+                AND {self.normalize_terminology_system("vs_code ->> 'system'")} =
+                    {self.normalize_terminology_system("resource_coding ->> 'system'")}
+            )
+        )"""
+
+    # CQL Function Dialect Abstraction Methods - PostgreSQL Implementation
+
+    def generate_math_function(self, function_name: str, *args: str) -> str:
+        """PostgreSQL-specific mathematical function SQL generation."""
+        func_name = function_name.lower()
+
+        if func_name == 'power':
+            return f"POWER({', '.join(args)})"
+        elif func_name in ['sqrt', 'ln', 'exp', 'log']:
+            return f"{func_name.upper()}({', '.join(args)})"
+        elif func_name == 'log10':
+            return f"LOG({', '.join(args)})"  # PostgreSQL uses LOG for base 10
+        elif func_name == 'ceiling':
+            return f"CEIL({', '.join(args)})"
+        elif func_name == 'floor':
+            return f"FLOOR({', '.join(args)})"
+        elif func_name == 'round':
+            return f"ROUND({', '.join(args)})"
+        elif func_name == 'abs':
+            return f"ABS({', '.join(args)})"
+        else:
+            return f"{func_name.upper()}({', '.join(args)})"
+
+    def generate_date_diff(self, unit: str, start_date: str, end_date: str) -> str:
+        """PostgreSQL date difference using EXTRACT and AGE functions."""
+        unit_map = {
+            'year': f"EXTRACT(YEAR FROM AGE({end_date}, {start_date}))",
+            'month': f"(EXTRACT(YEAR FROM AGE({end_date}, {start_date})) * 12 + EXTRACT(MONTH FROM AGE({end_date}, {start_date})))",
+            'day': f"EXTRACT(DAY FROM ({end_date} - {start_date}))",
+            'hour': f"EXTRACT(EPOCH FROM ({end_date} - {start_date})) / 3600",
+            'minute': f"EXTRACT(EPOCH FROM ({end_date} - {start_date})) / 60",
+            'second': f"EXTRACT(EPOCH FROM ({end_date} - {start_date}))"
+        }
+        return unit_map.get(unit.lower(), f"EXTRACT(DAY FROM ({end_date} - {start_date}))")
+
+    def generate_current_timestamp(self) -> str:
+        """PostgreSQL current timestamp."""
+        return "CURRENT_TIMESTAMP"
+
+    def generate_current_date(self) -> str:
+        """PostgreSQL current date."""
+        return "CURRENT_DATE"
+
+    def generate_regex_match(self, text_expr: str, pattern: str) -> str:
+        """PostgreSQL regex matching using ~ operator."""
+        return f"{text_expr} ~ '{pattern}'"
+
+
+    def generate_standard_type_cast(self, expression: str, target_type: str) -> str:
+        """PostgreSQL type casting with proper type names."""
+        type_mapping = {
+            'double_precision': 'DOUBLE PRECISION',
+            'double': 'DOUBLE PRECISION',
+            'bigint': 'BIGINT',
+            'integer': 'INTEGER',
+            'int': 'INTEGER',
+            'boolean': 'BOOLEAN',
+            'varchar': 'VARCHAR',
+            'text': 'TEXT'
+        }
+        db_type = type_mapping.get(target_type.lower(), target_type.upper())
+        return f"CAST({expression} AS {db_type})"
+
+    def generate_aggregate_function(self, function_name: str, expression: str,
+                                  filter_condition: str = None, distinct: bool = False) -> str:
+        """PostgreSQL aggregate function SQL generation."""
+        func_name = function_name.upper()
+
+        # Handle DISTINCT
+        expr = f"DISTINCT {expression}" if distinct else expression
+
+        # Generate function call
+        if func_name in ['STDDEV', 'VARIANCE', 'AVG', 'SUM', 'COUNT', 'MIN', 'MAX']:
+            sql = f"{func_name}({expr})"
+        else:
+            sql = f"{func_name}({expr})"
+
+        # Add filter condition if provided
+        if filter_condition:
+            sql = f"{sql} FILTER (WHERE {filter_condition})"
+
+        return sql
+
+    def generate_interval_arithmetic(self, date_expr: str, interval_expr: str, operation: str = 'add') -> str:
+        """PostgreSQL interval arithmetic using INTERVAL syntax."""
+        if operation.lower() == 'add':
+            return f"({date_expr} + INTERVAL '{interval_expr}')"
+        elif operation.lower() == 'subtract':
+            return f"({date_expr} - INTERVAL '{interval_expr}')"
+        else:
+            raise ValueError(f"Unsupported interval operation: {operation}")
+
+    def generate_boolean_conversion(self, expression: str) -> str:
+        """PostgreSQL boolean conversion handling."""
+        return f"""CASE
+            WHEN LOWER(TRIM({expression})) IN ('true', 't', '1') THEN true
+            WHEN LOWER(TRIM({expression})) IN ('false', 'f', '0') THEN false
+            WHEN {expression} IS NULL OR TRIM({expression}) = '' THEN NULL
+            ELSE NULL
+        END"""
+
+    def generate_json_aggregate_function(self, function_name: str, json_expr: str,
+                                        cast_type: str = None) -> str:
+        """PostgreSQL aggregate function on JSON array elements."""
+        cast_type = cast_type or 'DOUBLE PRECISION'
+
+        return f"""(
+    SELECT {function_name.upper()}(CAST(value AS {cast_type}))
+    FROM (
+        SELECT jsonb_array_elements_text({json_expr}) AS value
+    ) subq
+    WHERE value IS NOT NULL AND value != 'null'
+    AND value ~ '^-?[0-9]+(\\.[0-9]+)?$'
+)"""
+
+    def generate_percentile_function(self, json_expr: str, percentile_fraction: str,
+                                   cast_type: str = None) -> str:
+        """PostgreSQL percentile function on JSON array."""
+        cast_type = cast_type or 'DOUBLE PRECISION'
+
+        return f"""(
+    SELECT PERCENTILE_CONT({percentile_fraction}) WITHIN GROUP (ORDER BY CAST(value AS {cast_type}))
+    FROM (
+        SELECT jsonb_array_elements_text({json_expr}) AS value
+    ) subq
+    WHERE value IS NOT NULL AND value != 'null'
+    AND value ~ '^-?[0-9]+(\\.[0-9]+)?$'
+)"""
+
+    def generate_json_array_elements(self, json_expr: str) -> str:
+        """PostgreSQL JSON array elements extraction."""
+        return f"jsonb_array_elements_text({json_expr}) WITH ORDINALITY AS elem(value, key)"
+
+    def generate_json_object_creation(self, key_value_pairs: List[str]) -> str:
+        """PostgreSQL JSON object creation."""
+        return f"jsonb_build_object({', '.join(key_value_pairs)})"
+
+    def generate_json_array_creation(self, elements: List[str]) -> str:
+        """PostgreSQL JSON array creation."""
+        return f"jsonb_build_array({', '.join(elements)})"
+
+    def generate_json_object_extraction(self, json_expr: str, path: str) -> str:
+        """PostgreSQL JSON object field extraction."""
+        return f"{json_expr} -> '{path}'"
+
+    def generate_json_array_aggregation(self, expr: str) -> str:
+        """PostgreSQL JSON array aggregation."""
+        return f"jsonb_agg({expr})"

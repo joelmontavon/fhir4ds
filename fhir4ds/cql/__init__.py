@@ -13,6 +13,7 @@ __author__ = "FHIR4DS Development Team"
 # Import main CQL components
 from .core.engine import CQLEngine
 from .core.context import CQLContext, CQLContextType, CQLContextManager
+from . import core
 from .measures.population import QualityMeasureDefinition, PopulationCriteria, PopulationType, QualityMeasureBuilder
 from .measures.scoring import MeasureScoring, ScoringMethod
 from .measures.quality import QualityMeasureEngine, QualityMeasureRegistry, quality_measure_registry, initialize_default_measures

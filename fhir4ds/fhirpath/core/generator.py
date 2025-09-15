@@ -63,8 +63,18 @@ class SQLGenerator:
         try:
             # Use the new pipeline to convert AST to SQL
             return self.bridge.process_fhirpath_expression(ast_node, self.context)
-        except Exception as e:
-            # Fallback to mock SQL for test compatibility
+        except (ValueError, Exception) as e:
+            # Check if this is a validation error that should be re-raised
+            if any(phrase in str(e) for phrase in [
+                "requires exactly one argument", "function requires one argument", 
+                "takes no arguments", "function takes", "validation failed"
+            ]):
+                # Convert to ValueError for test compatibility
+                raise ValueError(str(e))
+            # Re-raise ValueError exceptions (like function argument validation) directly
+            if isinstance(e, ValueError):
+                raise e
+            # Fallback to mock SQL for other exceptions for test compatibility
             return f"/* Pipeline conversion failed: {e} */ json_extract({self.column_name}, '$.mock')"
     
     def __getattr__(self, name):

@@ -25,14 +25,14 @@ class VSACClient(BaseTerminologyClient):
     terminology service API with UMLS API key authentication.
     """
     
-    def __init__(self, api_key: str, base_url: str = "https://cts.nlm.nih.gov/fhir/",
+    def __init__(self, api_key: str, base_url: str = "https://vsac.nlm.nih.gov/vsac/svs",
                  timeout: int = 30, verify_ssl: bool = True):
         """
         Initialize VSAC client.
         
         Args:
             api_key: UMLS API key for authentication
-            base_url: VSAC FHIR API base URL
+            base_url: VSAC SVS API base URL (not FHIR API)
             timeout: Request timeout in seconds
             verify_ssl: Whether to verify SSL certificates
         """
@@ -46,32 +46,32 @@ class VSACClient(BaseTerminologyClient):
         self.session.auth = ('apikey', api_key)  # Basic auth with API key as password
         self.session.verify = verify_ssl
         self.session.headers.update({
-            'Accept': 'application/fhir+json',
+            'Accept': 'text/xml,application/xml,*/*',
             'User-Agent': 'FHIR4DS-CQL-Engine/1.0'
         })
         
         logger.info(f"Initialized VSAC client with base URL: {self.base_url}")
     
-    def expand_valueset(self, valueset_url: str, version: str = None, 
+    def expand_valueset(self, valueset_oid: str, version: str = None, 
                        parameters: Dict[str, Any] = None) -> Dict[str, Any]:
         """
-        Expand VSAC valueset using $expand operation.
+        Expand VSAC valueset using SVS RetrieveValueSet operation.
         
         Args:
-            valueset_url: ValueSet canonical URL or VSAC OID
+            valueset_oid: ValueSet OID (not name or URL)
             version: Specific version (optional)
-            parameters: Additional parameters (count, offset, etc.)
+            parameters: Additional parameters (release, profile, etc.)
             
         Returns:
-            FHIR ValueSet resource with expansion
+            FHIR ValueSet resource with expansion (converted from SVS XML)
             
         Raises:
             TerminologyServiceError: If expansion fails
         """
-        logger.debug(f"Expanding valueset: {valueset_url}")
+        logger.debug(f"Expanding valueset OID: {valueset_oid}")
         
-        endpoint = f"{self.base_url}/ValueSet/$expand"
-        params = {'url': valueset_url}
+        endpoint = f"{self.base_url}/RetrieveValueSet"
+        params = {'id': valueset_oid}
         
         if version:
             params['version'] = version
@@ -84,8 +84,9 @@ class VSACClient(BaseTerminologyClient):
             response = self.session.get(endpoint, params=params, timeout=self.timeout)
             
             if response.status_code == 200:
-                result = response.json()
-                logger.debug(f"Successfully expanded valueset {valueset_url}")
+                # SVS returns XML, convert to FHIR JSON format
+                result = self._convert_svs_xml_to_fhir(response.text, valueset_oid)
+                logger.debug(f"Successfully expanded valueset OID {valueset_oid}")
                 return result
             else:
                 error_msg = f"VSAC expansion failed: {response.status_code}"
@@ -95,7 +96,7 @@ class VSACClient(BaseTerminologyClient):
                                             self._parse_error_response(response))
                 
         except requests.RequestException as e:
-            logger.error(f"VSAC request failed for {valueset_url}: {e}")
+            logger.error(f"VSAC request failed for OID {valueset_oid}: {e}")
             raise TerminologyServiceError(f"VSAC request failed: {e}")
     
     def validate_code(self, code: str, system: str, valueset_url: str = None,
@@ -251,6 +252,62 @@ class VSACClient(BaseTerminologyClient):
             logger.warning("VSAC connection test failed")
             return False
     
+    def _convert_svs_xml_to_fhir(self, svs_xml: str, valueset_oid: str) -> Dict[str, Any]:
+        """
+        Convert SVS XML response to FHIR ValueSet JSON format.
+        
+        Args:
+            svs_xml: SVS XML response from VSAC
+            valueset_oid: ValueSet OID for identification
+            
+        Returns:
+            FHIR ValueSet resource with expansion
+        """
+        import xml.etree.ElementTree as ET
+        from datetime import datetime
+        
+        try:
+            root = ET.fromstring(svs_xml)
+            
+            # Build FHIR ValueSet structure
+            fhir_valueset = {
+                "resourceType": "ValueSet",
+                "id": f"vsac-{valueset_oid}",
+                "url": f"http://cts.nlm.nih.gov/fhir/ValueSet/{valueset_oid}",
+                "identifier": [{"system": "urn:ietf:rfc:3986", "value": valueset_oid}],
+                "name": root.get('displayName', 'Unknown'),
+                "title": root.get('displayName', 'VSAC ValueSet'),
+                "status": "active",
+                "date": datetime.now().isoformat(),
+                "publisher": "NLM Value Set Authority Center",
+                "expansion": {
+                    "timestamp": datetime.now().isoformat(),
+                    "contains": []
+                }
+            }
+            
+            # Extract concepts from XML
+            concepts = root.findall('.//{urn:ihe:iti:svs:2008}Concept')
+            for concept in concepts:
+                code_entry = {
+                    "system": concept.get('codeSystem'),
+                    "code": concept.get('code'),
+                    "display": concept.get('displayName')
+                }
+                fhir_valueset["expansion"]["contains"].append(code_entry)
+            
+            fhir_valueset["expansion"]["total"] = len(fhir_valueset["expansion"]["contains"])
+            
+            logger.debug(f"Converted SVS XML to FHIR: {len(concepts)} concepts found")
+            return fhir_valueset
+            
+        except ET.ParseError as e:
+            logger.error(f"Failed to parse SVS XML response: {e}")
+            raise TerminologyServiceError(f"Invalid SVS XML response: {e}")
+        except Exception as e:
+            logger.error(f"Failed to convert SVS to FHIR: {e}")
+            raise TerminologyServiceError(f"SVS conversion failed: {e}")
+
     def _parse_error_response(self, response: requests.Response) -> Dict[str, Any]:
         """
         Parse error response from VSAC.

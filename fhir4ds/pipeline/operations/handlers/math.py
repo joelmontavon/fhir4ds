@@ -80,7 +80,8 @@ class MathFunctionHandler(FunctionHandler):
     
     def _handle_abs(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle abs() function."""
-        sql_fragment = f"ABS({input_state.sql_fragment})"
+        cast_operand = f"CAST({input_state.sql_fragment} AS DECIMAL)"
+        sql_fragment = f"ABS({cast_operand})"
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -90,7 +91,8 @@ class MathFunctionHandler(FunctionHandler):
     
     def _handle_ceiling(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle ceiling() function."""
-        sql_fragment = f"CEIL({input_state.sql_fragment})"
+        cast_operand = f"CAST({input_state.sql_fragment} AS DECIMAL)"
+        sql_fragment = f"CEIL({cast_operand})"
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -100,7 +102,8 @@ class MathFunctionHandler(FunctionHandler):
     
     def _handle_floor(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle floor() function."""
-        sql_fragment = f"FLOOR({input_state.sql_fragment})"
+        cast_operand = f"CAST({input_state.sql_fragment} AS DECIMAL)"
+        sql_fragment = f"FLOOR({cast_operand})"
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -110,8 +113,15 @@ class MathFunctionHandler(FunctionHandler):
     
     def _handle_round(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle round() function."""
-        precision = f", {self.args[0]}" if self.args else ""
-        sql_fragment = f"ROUND({input_state.sql_fragment}{precision})"
+        cast_operand = f"CAST({input_state.sql_fragment} AS DECIMAL)"
+        if self.args:
+            # Extract the actual value from LiteralOperation if needed
+            arg = self.args[0]
+            precision_val = arg.value if hasattr(arg, 'value') else arg
+            precision = f", {precision_val}"
+        else:
+            precision = ""
+        sql_fragment = f"ROUND({cast_operand}{precision})"
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -122,7 +132,9 @@ class MathFunctionHandler(FunctionHandler):
     def _handle_sqrt(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle sqrt() function."""
         cast_operand = f"CAST({input_state.sql_fragment} AS DECIMAL)"
-        sql_fragment = context.dialect.generate_mathematical_function('sqrt', cast_operand)
+        # Handle edge case: sqrt(negative) should return NULL
+        safe_operand = f"CASE WHEN {cast_operand} < 0 THEN NULL ELSE {cast_operand} END"
+        sql_fragment = context.dialect.generate_mathematical_function('sqrt', safe_operand)
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -155,7 +167,9 @@ class MathFunctionHandler(FunctionHandler):
     def _handle_ln(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle ln() function."""
         cast_operand = f"CAST({input_state.sql_fragment} AS DECIMAL)"
-        sql_fragment = context.dialect.generate_mathematical_function('ln', cast_operand)
+        # Handle edge cases: ln(0) and ln(negative) should return NULL
+        safe_operand = f"CASE WHEN {cast_operand} <= 0 THEN NULL ELSE {cast_operand} END"
+        sql_fragment = context.dialect.generate_mathematical_function('ln', safe_operand)
         
         return input_state.evolve(
             sql_fragment=sql_fragment,
@@ -166,7 +180,13 @@ class MathFunctionHandler(FunctionHandler):
     def _handle_log(self, input_state: SQLState, context: ExecutionContext) -> SQLState:
         """Handle log() function."""
         cast_operand = f"CAST({input_state.sql_fragment} AS DECIMAL)"
-        base = f", {self.args[0]}" if self.args else ""  # Optional base argument
+        if self.args:
+            # Extract the actual value from LiteralOperation if needed
+            arg = self.args[0]
+            base_val = arg.value if hasattr(arg, 'value') else arg
+            base = f", {base_val}"
+        else:
+            base = ""
         sql_fragment = context.dialect.generate_mathematical_function('log', cast_operand + base)
         
         return input_state.evolve(
@@ -180,7 +200,12 @@ class MathFunctionHandler(FunctionHandler):
         if not self.args:
             raise InvalidArgumentError("power() function requires an exponent argument")
         
-        exponent = str(self.args[0])
+        # Extract the actual value from LiteralOperation if needed
+        arg = self.args[0]
+        if hasattr(arg, 'value'):
+            exponent = str(arg.value)
+        else:
+            exponent = str(arg)
         base_expr = f"CAST({input_state.sql_fragment} AS DECIMAL)"
         sql_fragment = context.dialect.generate_power_operation(base_expr, exponent)
         
@@ -204,8 +229,9 @@ class MathFunctionHandler(FunctionHandler):
         if not self.args:
             raise InvalidArgumentError("Division operator requires a second operand")
         
-        # Get the second operand
-        second_operand = str(self.args[0])
+        # Extract the actual value from LiteralOperation if needed
+        arg = self.args[0]
+        second_operand = str(arg.value if hasattr(arg, 'value') else arg)
         
         # Generate SQL with proper division by zero handling
         sql_fragment = f"(CASE WHEN CAST({second_operand} AS DECIMAL) = 0 THEN NULL ELSE CAST({input_state.sql_fragment} AS DECIMAL) / CAST({second_operand} AS DECIMAL) END)"
@@ -227,7 +253,10 @@ class MathFunctionHandler(FunctionHandler):
         
         # Build list of all arguments (input_state.sql_fragment is first operand)
         all_operands = [input_state.sql_fragment]
-        all_operands.extend(str(arg) for arg in self.args)
+        # Extract actual values from LiteralOperation objects if needed
+        for arg in self.args:
+            operand_val = arg.value if hasattr(arg, 'value') else arg
+            all_operands.append(str(operand_val))
         
         # Generate SQL using dialect-specific max operation
         sql_fragment = context.dialect.generate_max_operation(all_operands)
@@ -245,7 +274,10 @@ class MathFunctionHandler(FunctionHandler):
         
         # Build list of all arguments (input_state.sql_fragment is first operand)
         all_operands = [input_state.sql_fragment]
-        all_operands.extend(str(arg) for arg in self.args)
+        # Extract actual values from LiteralOperation objects if needed
+        for arg in self.args:
+            operand_val = arg.value if hasattr(arg, 'value') else arg
+            all_operands.append(str(operand_val))
         
         # Generate SQL using dialect-specific min operation
         sql_fragment = context.dialect.generate_min_operation(all_operands)
@@ -263,7 +295,10 @@ class MathFunctionHandler(FunctionHandler):
         
         # Get all operands (input + arguments)
         all_operands = [input_state.sql_fragment]
-        all_operands.extend(str(arg) for arg in self.args)
+        # Extract actual values from LiteralOperation objects if needed
+        for arg in self.args:
+            operand_val = arg.value if hasattr(arg, 'value') else arg
+            all_operands.append(str(operand_val))
         
         # Use database-specific median calculation
         sql_fragment = context.dialect.generate_median_operation(all_operands)
@@ -281,7 +316,10 @@ class MathFunctionHandler(FunctionHandler):
         
         # Get all operands (input + arguments)
         all_operands = [input_state.sql_fragment]  
-        all_operands.extend(str(arg) for arg in self.args)
+        # Extract actual values from LiteralOperation objects if needed
+        for arg in self.args:
+            operand_val = arg.value if hasattr(arg, 'value') else arg
+            all_operands.append(str(operand_val))
         
         # Use window functions to find most frequent value
         # This is complex but works across both databases
@@ -309,7 +347,10 @@ class MathFunctionHandler(FunctionHandler):
         
         # Get all operands (input + arguments)
         all_operands = [input_state.sql_fragment]
-        all_operands.extend(str(arg) for arg in self.args)
+        # Extract actual values from LiteralOperation objects if needed
+        for arg in self.args:
+            operand_val = arg.value if hasattr(arg, 'value') else arg
+            all_operands.append(str(operand_val))
         
         # Use database-specific population standard deviation function
         sql_fragment = context.dialect.generate_population_stddev(all_operands)
@@ -327,7 +368,10 @@ class MathFunctionHandler(FunctionHandler):
         
         # Get all operands (input + arguments)
         all_operands = [input_state.sql_fragment]
-        all_operands.extend(str(arg) for arg in self.args)
+        # Extract actual values from LiteralOperation objects if needed
+        for arg in self.args:
+            operand_val = arg.value if hasattr(arg, 'value') else arg
+            all_operands.append(str(operand_val))
         
         # Use database-specific population variance function
         sql_fragment = context.dialect.generate_population_variance(all_operands)

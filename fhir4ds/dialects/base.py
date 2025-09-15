@@ -93,6 +93,11 @@ class DatabaseDialect(ABC):
     def create_fhir_table(self, table_name: str, json_col: str) -> None:
         """Create the FHIR resources table"""
         pass
+
+    @abstractmethod
+    def create_terminology_system_mappings_table(self) -> None:
+        """Create the terminology system mappings table for crosswalking OID/URI/URN"""
+        pass
     
     @abstractmethod
     def bulk_load_json(self, file_path: str, table_name: str, json_col: str) -> int:
@@ -990,19 +995,349 @@ class DatabaseDialect(ABC):
         """Generate SQL for join operation (concatenate array elements)."""
         pass
 
+    @abstractmethod
+    def generate_percentile_calculation(self, expression: str, percentile: float) -> str:
+        """Generate SQL for percentile calculation."""
+        pass
+
+    @abstractmethod 
+    def generate_date_difference_years(self, start_date: str, end_date: str = "CURRENT_DATE") -> str:
+        """Generate SQL for date difference in years."""
+        pass
+
+    @abstractmethod
+    def generate_nested_array_aggregation(self, json_col: str, array_field: str, nested_field: str, separator: str) -> str:
+        """Generate SQL for nested array aggregation (e.g., name.given where name is array and given is array within each name)."""
+        pass
+
+    @abstractmethod
+    def generate_date_difference_with_unit(self, start_date: str, end_date: str, unit: str) -> str:
+        """Generate SQL for date difference with specific unit (years, months, days)."""
+        pass
+
+    @abstractmethod
+    def generate_age_calculation(self, birth_date: str, reference_date: str = "CURRENT_DATE") -> str:
+        """Generate SQL for age calculation (returns integer years)."""
+        pass
+
+    @abstractmethod
+    def generate_intersect_operation(self, first_collection: str, second_collection: str) -> str:
+        """Generate SQL for collection intersection (elements in both collections)."""
+        pass
+
+    @abstractmethod
+    def generate_collection_distinct_check(self, collection_expr: str) -> str:
+        """Generate SQL to check if all elements in collection are distinct."""
+        pass
+
+    # Profile validation function methods
+    def generate_profile_element_definition(self, input_expr: str) -> str:
+        """Generate SQL for elementDefinition() profile function."""
+        # Basic implementation that returns element definition metadata
+        return f"""CASE 
+            WHEN {input_expr} IS NOT NULL THEN 
+                json_object(
+                    'definition', 'Basic element definition placeholder',
+                    'type', 'string',
+                    'path', 'element.path'
+                )
+            ELSE NULL 
+        END"""
+    
+    def generate_profile_slice(self, input_expr: str, slice_name: str, discriminator: str) -> str:
+        """Generate SQL for slice() profile function."""
+        # Basic implementation that adds slice metadata
+        # In a full implementation, this would filter based on discriminator values
+        return f"""CASE 
+            WHEN {input_expr} IS NOT NULL THEN 
+                json_object(
+                    'sliceName', '{slice_name}',
+                    'discriminator', '{discriminator}',
+                    'data', {input_expr},
+                    'elements', json_array()
+                )
+            ELSE NULL 
+        END"""
+    
+    def generate_check_modifiers(self, input_expr: str, known_modifiers: str) -> str:
+        """Generate SQL for checkModifiers() profile function."""
+        # Basic implementation that checks for modifier extensions
+        # In a full implementation, this would validate against actual modifier extensions
+        return f"""CASE 
+            WHEN {input_expr} IS NOT NULL THEN 
+                CASE 
+                    WHEN json_extract({input_expr}, '$.modifierExtension') IS NULL THEN TRUE
+                    ELSE json_array_length(json_extract({input_expr}, '$.modifierExtension')) = 0
+                END
+            ELSE TRUE
+        END"""
+
+    @abstractmethod
+    def normalize_terminology_system(self, system_expr: str) -> str:
+        """
+        Generate SQL to normalize terminology system identifiers for comparison.
+
+        This handles canonical system URI crosswalking at execution time,
+        converting between OIDs and URIs as needed for terminology matching.
+        Uses the terminology_system_mappings table for efficient lookups.
+
+        Args:
+            system_expr: SQL expression that evaluates to a system identifier
+
+        Returns:
+            SQL expression that returns the canonical system URI
+        """
+        pass
+
+    @abstractmethod
+    def generate_valueset_match_condition(self, valueset_id: str) -> str:
+        """
+        Generate SQL condition to match resource codes against ValueSet expansion.
+
+        Args:
+            valueset_id: ID of the ValueSet FHIR resource
+
+        Returns:
+            SQL EXISTS condition that matches both code and system
+        """
+        pass
+
     def optimize_pipeline(self, pipeline: 'FHIRPathPipeline') -> 'FHIRPathPipeline':
         """
         Apply dialect-specific optimizations to a pipeline.
-        
+
         This method can be overridden by specific dialects to apply
         optimizations like merging operations, using dialect-specific
         functions, or restructuring for better performance.
-        
+
         Args:
             pipeline: Pipeline to optimize
-            
+
         Returns:
             Optimized pipeline
         """
         # Default implementation - no optimization
         return pipeline
+
+    # CQL Function Dialect Abstraction Methods
+    # These methods replace hardcoded dialect conditionals in CQL functions
+
+    @abstractmethod
+    def generate_math_function(self, function_name: str, *args: str) -> str:
+        """
+        Generate database-specific mathematical function SQL.
+
+        Args:
+            function_name: Name of math function (power, sqrt, ln, exp, etc.)
+            *args: Function arguments as SQL expressions
+
+        Returns:
+            Database-specific SQL for mathematical function
+        """
+        pass
+
+    @abstractmethod
+    def generate_date_diff(self, unit: str, start_date: str, end_date: str) -> str:
+        """
+        Generate database-specific date difference SQL.
+
+        Args:
+            unit: Time unit (year, month, day, hour, minute, second)
+            start_date: Start date SQL expression
+            end_date: End date SQL expression
+
+        Returns:
+            Database-specific SQL for date difference calculation
+        """
+        pass
+
+    @abstractmethod
+    def generate_current_timestamp(self) -> str:
+        """
+        Generate database-specific current timestamp SQL.
+
+        Returns:
+            Database-specific SQL for current timestamp
+        """
+        pass
+
+    @abstractmethod
+    def generate_current_date(self) -> str:
+        """
+        Generate database-specific current date SQL.
+
+        Returns:
+            Database-specific SQL for current date
+        """
+        pass
+
+    @abstractmethod
+    def generate_regex_match(self, text_expr: str, pattern: str) -> str:
+        """
+        Generate database-specific regex matching SQL.
+
+        Args:
+            text_expr: Text SQL expression to match against
+            pattern: Regex pattern to match
+
+        Returns:
+            Database-specific SQL for regex matching
+        """
+        pass
+
+    @abstractmethod
+    def generate_json_array_elements(self, json_expr: str) -> str:
+        """
+        Generate database-specific JSON array elements extraction.
+
+        Args:
+            json_expr: JSON array SQL expression
+
+        Returns:
+            Database-specific SQL to extract array elements as text
+        """
+        pass
+
+    @abstractmethod
+    def generate_standard_type_cast(self, expression: str, target_type: str) -> str:
+        """
+        Generate database-specific type casting SQL for standard types.
+
+        Args:
+            expression: SQL expression to cast
+            target_type: Target type (double, double_precision, integer, bigint)
+
+        Returns:
+            Database-specific SQL for type casting
+        """
+        pass
+
+    @abstractmethod
+    def generate_aggregate_function(self, function_name: str, expression: str,
+                                  filter_condition: str = None, distinct: bool = False) -> str:
+        """
+        Generate database-specific aggregate function SQL.
+
+        Args:
+            function_name: Aggregate function name (stddev, variance, etc.)
+            expression: Expression to aggregate
+            filter_condition: Optional filter condition
+            distinct: Whether to use DISTINCT
+
+        Returns:
+            Database-specific SQL for aggregate function
+        """
+        pass
+
+    @abstractmethod
+    def generate_interval_arithmetic(self, date_expr: str, interval_expr: str, operation: str = 'add') -> str:
+        """
+        Generate database-specific interval arithmetic SQL.
+
+        Args:
+            date_expr: Date/timestamp SQL expression
+            interval_expr: Interval expression (e.g., "1 day", "1 year")
+            operation: Arithmetic operation ('add' or 'subtract')
+
+        Returns:
+            Database-specific SQL for interval arithmetic
+        """
+        pass
+
+    @abstractmethod
+    def generate_boolean_conversion(self, expression: str) -> str:
+        """
+        Generate database-specific boolean conversion SQL.
+
+        Args:
+            expression: Expression to convert to boolean
+
+        Returns:
+            Database-specific SQL for boolean conversion
+        """
+        pass
+
+    @abstractmethod
+    def generate_json_aggregate_function(self, function_name: str, json_expr: str,
+                                        cast_type: str = None) -> str:
+        """
+        Generate database-specific aggregate function on JSON array elements.
+
+        Args:
+            function_name: Aggregate function name (stddev, variance, percentile_cont, etc.)
+            json_expr: JSON array SQL expression
+            cast_type: Target type for casting (double, double_precision, etc.)
+
+        Returns:
+            Database-specific SQL for JSON array aggregation
+        """
+        pass
+
+    @abstractmethod
+    def generate_percentile_function(self, json_expr: str, percentile_fraction: str,
+                                   cast_type: str = None) -> str:
+        """
+        Generate database-specific percentile function on JSON array.
+
+        Args:
+            json_expr: JSON array SQL expression
+            percentile_fraction: Percentile as fraction (0.0-1.0)
+            cast_type: Target type for casting
+
+        Returns:
+            Database-specific SQL for percentile calculation
+        """
+        pass
+
+    @abstractmethod
+    def generate_json_object_creation(self, key_value_pairs: List[str]) -> str:
+        """
+        Generate database-specific JSON object creation.
+
+        Args:
+            key_value_pairs: List of key-value pairs as SQL strings
+
+        Returns:
+            Database-specific SQL to create JSON object
+        """
+        pass
+
+    @abstractmethod
+    def generate_json_array_creation(self, elements: List[str]) -> str:
+        """
+        Generate database-specific JSON array creation.
+
+        Args:
+            elements: List of array elements as SQL strings
+
+        Returns:
+            Database-specific SQL to create JSON array
+        """
+        pass
+
+    @abstractmethod
+    def generate_json_object_extraction(self, json_expr: str, path: str) -> str:
+        """
+        Generate database-specific JSON object field extraction.
+
+        Args:
+            json_expr: JSON object SQL expression
+            path: Field path to extract
+
+        Returns:
+            Database-specific SQL to extract JSON object field
+        """
+        pass
+
+    @abstractmethod
+    def generate_json_array_aggregation(self, expr: str) -> str:
+        """
+        Generate database-specific JSON array aggregation.
+
+        Args:
+            expr: SQL expression to aggregate into JSON array
+
+        Returns:
+            Database-specific SQL to aggregate values into JSON array
+        """
+        pass

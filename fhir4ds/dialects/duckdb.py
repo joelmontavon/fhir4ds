@@ -113,7 +113,55 @@ class DuckDBDialect(DatabaseDialect):
             )
         """)
         logger.info(f"Created FHIR table: {table_name}")
-    
+
+    def create_terminology_system_mappings_table(self) -> None:
+        """Create the terminology system mappings table for crosswalking OID/URI/URN"""
+        try:
+            from ..terminology.system_mappings import get_all_system_identifiers
+
+            # Check if table already exists
+            try:
+                result = self.connection.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'terminology_system_mappings'").fetchone()
+                table_exists = result[0] > 0 if result else False
+            except:
+                table_exists = False
+
+            if table_exists:
+                logger.info("Terminology system mappings table already exists, skipping creation")
+                return
+
+            # Create terminology mappings table
+            create_sql = """
+                CREATE TABLE terminology_system_mappings (
+                    original_system VARCHAR PRIMARY KEY,
+                    canonical_system VARCHAR NOT NULL,
+                    system_type VARCHAR NOT NULL,
+                    name VARCHAR NOT NULL
+                )
+            """
+            self.connection.execute(create_sql)
+
+            # Insert all mappings
+            mappings = get_all_system_identifiers()
+            insert_sql = """
+                INSERT INTO terminology_system_mappings
+                (original_system, canonical_system, system_type, name)
+                VALUES (?, ?, ?, ?)
+            """
+
+            for mapping in mappings:
+                self.connection.execute(insert_sql, [
+                    mapping['original_system'],
+                    mapping['canonical_system'],
+                    mapping['system_type'],
+                    mapping['name']
+                ])
+
+            logger.info(f"Created terminology mappings table with {len(mappings)} mappings")
+
+        except Exception as e:
+            self._handle_operation_error("terminology mappings table creation", e)
+
     def bulk_load_json(self, file_path: str, table_name: str, json_col: str) -> int:
         """Bulk load JSON file using DuckDB's read_json functionality"""
         # Detect file type by sampling
@@ -252,6 +300,18 @@ class DuckDBDialect(DatabaseDialect):
     def contains_condition(self, item_expr: str, field_name: str, value: str) -> str:
         """Generate contains condition for field matching using DuckDB syntax"""
         return f"contains(json_extract_string({item_expr}, '$.{field_name}'), '{value}')"
+    
+    def generate_field_startswith_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate field startsWith condition - delegates to starts_with_condition"""
+        return self.starts_with_condition(item_expr, field_name, value)
+    
+    def generate_field_endswith_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate field endsWith condition - delegates to ends_with_condition"""
+        return self.ends_with_condition(item_expr, field_name, value)
+    
+    def generate_field_contains_condition(self, item_expr: str, field_name: str, value: str) -> str:
+        """Generate field contains condition - delegates to contains_condition"""
+        return self.contains_condition(item_expr, field_name, value)
     
     def get_value_primitive_sql(self, input_sql: str) -> str:
         """Generate SQL for getValue() function handling primitive and complex types using DuckDB functions"""
@@ -941,6 +1001,23 @@ class DuckDBDialect(DatabaseDialect):
                 ELSE json_array({first_collection}, {second_collection})
             END
         )"""
+
+    def generate_self_combine_operation(self, collection: str) -> str:
+        """DuckDB self-combination optimization (x.combine(x))."""
+        return f"""(
+            CASE 
+                WHEN {collection} IS NULL THEN NULL
+                WHEN json_type({collection}) = 'ARRAY' THEN (
+                    SELECT json_group_array(value)
+                    FROM (
+                        SELECT value FROM json_each({collection})
+                        UNION ALL
+                        SELECT value FROM json_each({collection})
+                    )
+                )
+                ELSE json_array({collection}, {collection})
+            END
+        )"""
     
     def generate_where_clause_filter(self, collection_expr: str, condition_sql: str) -> str:
         """DuckDB WHERE clause filtering for collections."""
@@ -1223,6 +1300,12 @@ class DuckDBDialect(DatabaseDialect):
                 WHEN json_type({collection_expr}) = 'ARRAY' THEN
                     CASE 
                         WHEN json_array_length({collection_expr}) = 0 THEN NULL
+                        -- If any value is null, return null
+                        WHEN EXISTS (
+                            SELECT 1 FROM json_each({collection_expr})
+                            WHERE json_extract_string(value, '$') IS NULL OR 
+                                  json_extract_string(value, '$') NOT IN ('true', 'false')
+                        ) THEN NULL
                         ELSE (
                             SELECT COUNT(*) = COUNT(CASE WHEN 
                                 json_extract_string(value, '$') = 'true' THEN 1 END)
@@ -1247,6 +1330,12 @@ class DuckDBDialect(DatabaseDialect):
                 WHEN json_type({collection_expr}) = 'ARRAY' THEN
                     CASE 
                         WHEN json_array_length({collection_expr}) = 0 THEN NULL
+                        -- If any value is null, return null
+                        WHEN EXISTS (
+                            SELECT 1 FROM json_each({collection_expr})
+                            WHERE json_extract_string(value, '$') IS NULL OR 
+                                  json_extract_string(value, '$') NOT IN ('true', 'false')
+                        ) THEN NULL
                         ELSE (
                             SELECT COUNT(*) = COUNT(CASE WHEN 
                                 json_extract_string(value, '$') = 'false' THEN 1 END)
@@ -1608,3 +1697,266 @@ class DuckDBDialect(DatabaseDialect):
                 ELSE COALESCE(json_extract_string({collection_expr}, '$'), '')
             END
         )"""
+
+    def generate_percentile_calculation(self, expression: str, percentile: float) -> str:
+        """Generate SQL for percentile calculation using DuckDB syntax."""
+        return f"QUANTILE_CONT({expression}, {percentile})"
+
+    def generate_date_difference_years(self, start_date: str, end_date: str = "CURRENT_DATE") -> str:
+        """Generate SQL for date difference in years using DuckDB syntax."""
+        return f"CAST(({end_date} - DATE({start_date})) / 365.25 AS DOUBLE)"
+
+    def generate_nested_array_aggregation(self, json_col: str, array_field: str, nested_field: str, separator: str) -> str:
+        """Generate SQL for nested array aggregation using DuckDB syntax."""
+        # Get dialect-specific column names for array iteration
+        array_value_col, array_key_col = self.get_array_iteration_columns()
+        nested_value_col, nested_key_col = self.get_array_iteration_columns()
+        
+        # Build DuckDB-specific nested array SQL
+        nested_extract = self.extract_json_field(f'{nested_field}_item.{nested_value_col}', '$')
+        array_iterate = self.iterate_json_array(json_col, f'$.{array_field}')
+        nested_iterate = self.iterate_json_array(f'{array_field}_item.{array_value_col}', f'$.{nested_field}')
+        
+        return f"""(
+            SELECT COALESCE({self.string_agg_function}({nested_extract}, '{separator}'), '')
+            FROM {array_iterate} AS {array_field}_item,
+                 {nested_iterate} AS {nested_field}_item
+        )"""
+
+    def generate_date_difference_with_unit(self, start_date: str, end_date: str, unit: str) -> str:
+        """Generate SQL for date difference with specific unit using DuckDB syntax."""
+        unit_lower = unit.lower()
+        if unit_lower == 'months':
+            return f"DATEDIFF('month', {start_date}, {end_date})"
+        elif unit_lower == 'years':
+            return f"DATEDIFF('year', {start_date}, {end_date})"
+        elif unit_lower == 'days':
+            return f"DATEDIFF('day', {start_date}, {end_date})"
+        else:
+            # Default to days for unknown units
+            return f"DATEDIFF('day', {start_date}, {end_date})"
+
+    def generate_age_calculation(self, birth_date: str, reference_date: str = "CURRENT_DATE") -> str:
+        """Generate SQL for age calculation using DuckDB syntax (returns integer years)."""
+        return f"CAST(EXTRACT(YEAR FROM {reference_date}) - EXTRACT(YEAR FROM {birth_date}) AS INTEGER)"
+
+    def generate_intersect_operation(self, first_collection: str, second_collection: str) -> str:
+        """Generate SQL for collection intersection using DuckDB syntax."""
+        return f"""(
+            SELECT json_group_array(DISTINCT value)
+            FROM (
+                SELECT value FROM json_each({first_collection}) 
+                WHERE value IN (SELECT value FROM json_each({second_collection}))
+            )
+        )"""
+
+    def generate_collection_distinct_check(self, collection_expr: str) -> str:
+        """Generate SQL to check if all elements in collection are distinct using DuckDB."""
+        return f"""(
+            CASE
+                WHEN json_array_length({collection_expr}) = 0 THEN TRUE
+                WHEN json_array_length({collection_expr}) = 1 THEN TRUE
+                ELSE (
+                    SELECT COUNT(*) = COUNT(DISTINCT value)
+                    FROM json_each({collection_expr})
+                )
+            END
+        )"""
+
+    def normalize_terminology_system(self, system_expr: str) -> str:
+        """
+        Generate DuckDB SQL to normalize terminology system identifiers for comparison.
+
+        This handles canonical system URI crosswalking at execution time,
+        using the terminology_system_mappings table for efficient lookups.
+        """
+        return f"""COALESCE(
+            (SELECT canonical_system
+             FROM terminology_system_mappings
+             WHERE original_system = {system_expr}),
+            {system_expr}
+        )"""
+
+    def generate_valueset_match_condition(self, valueset_id: str) -> str:
+        """Generate DuckDB SQL condition to match resource codes against ValueSet expansion.
+
+        Uses execution-time system normalization to handle OID/URI crosswalking
+        without modifying stored data.
+        """
+        return f"""EXISTS (
+            SELECT 1 FROM fhir_resources vs
+            WHERE json_extract_string(vs.resource, '$.resourceType') = 'ValueSet'
+            AND json_extract_string(vs.resource, '$.id') = '{valueset_id}'
+            AND EXISTS (
+                SELECT 1 FROM json_each(json_extract(vs.resource, '$.expansion.contains')) AS vs_code,
+                             json_each(json_extract(resource, '$.code.coding')) AS resource_coding
+                WHERE json_extract_string(vs_code.value, '$.code') = json_extract_string(resource_coding.value, '$.code')
+                AND {self.normalize_terminology_system("json_extract_string(vs_code.value, '$.system')")} =
+                    {self.normalize_terminology_system("json_extract_string(resource_coding.value, '$.system')")}
+            )
+        )"""
+
+    # CQL Function Dialect Abstraction Methods - DuckDB Implementation
+
+    def generate_math_function(self, function_name: str, *args: str) -> str:
+        """DuckDB-specific mathematical function SQL generation."""
+        func_name = function_name.lower()
+
+        if func_name == 'power':
+            return f"POW({', '.join(args)})"
+        elif func_name in ['sqrt', 'ln', 'exp', 'log']:
+            return f"{func_name.upper()}({', '.join(args)})"
+        elif func_name == 'log10':
+            return f"LOG10({', '.join(args)})"
+        elif func_name == 'ceiling':
+            return f"CEIL({', '.join(args)})"
+        elif func_name == 'floor':
+            return f"FLOOR({', '.join(args)})"
+        elif func_name == 'round':
+            return f"ROUND({', '.join(args)})"
+        elif func_name == 'abs':
+            return f"ABS({', '.join(args)})"
+        else:
+            return f"{func_name.upper()}({', '.join(args)})"
+
+    def generate_date_diff(self, unit: str, start_date: str, end_date: str) -> str:
+        """DuckDB date difference using DATE_DIFF function."""
+        return f"DATE_DIFF('{unit}', {start_date}, {end_date})"
+
+    def generate_current_timestamp(self) -> str:
+        """DuckDB current timestamp."""
+        return "CURRENT_TIMESTAMP"
+
+    def generate_current_date(self) -> str:
+        """DuckDB current date."""
+        return "CURRENT_DATE"
+
+    def generate_regex_match(self, text_expr: str, pattern: str) -> str:
+        """DuckDB regex matching using REGEXP."""
+        return f"{text_expr} REGEXP '{pattern}'"
+
+    def generate_json_array_elements(self, json_expr: str) -> str:
+        """DuckDB JSON array elements extraction using json_each."""
+        return f"""(
+            SELECT json_array_agg(value)
+            FROM json_each({json_expr})
+        )"""
+
+    def generate_standard_type_cast(self, expression: str, target_type: str) -> str:
+        """DuckDB type casting with proper type names."""
+        type_mapping = {
+            'double_precision': 'DOUBLE',
+            'double': 'DOUBLE',
+            'bigint': 'BIGINT',
+            'integer': 'INTEGER',
+            'int': 'INTEGER',
+            'boolean': 'BOOLEAN',
+            'varchar': 'VARCHAR',
+            'text': 'VARCHAR'
+        }
+        db_type = type_mapping.get(target_type.lower(), target_type.upper())
+        return f"CAST({expression} AS {db_type})"
+
+    def generate_aggregate_function(self, function_name: str, expression: str,
+                                  filter_condition: str = None, distinct: bool = False) -> str:
+        """DuckDB aggregate function SQL generation."""
+        func_name = function_name.upper()
+
+        # Handle DuckDB-specific function name mappings
+        func_map = {
+            'VARIANCE': 'VAR_SAMP'
+        }
+        actual_func = func_map.get(func_name, func_name)
+
+        # Handle DISTINCT
+        expr = f"DISTINCT {expression}" if distinct else expression
+
+        # Generate function call
+        if actual_func in ['STDDEV', 'VAR_SAMP', 'AVG', 'SUM', 'COUNT', 'MIN', 'MAX']:
+            sql = f"{actual_func}({expr})"
+        else:
+            sql = f"{actual_func}({expr})"
+
+        # Add filter condition if provided
+        if filter_condition:
+            sql = f"{sql} FILTER (WHERE {filter_condition})"
+
+        return sql
+
+    def generate_interval_arithmetic(self, date_expr: str, interval_expr: str, operation: str = 'add') -> str:
+        """DuckDB interval arithmetic using INTERVAL syntax."""
+        if operation.lower() == 'add':
+            return f"({date_expr} + INTERVAL {interval_expr})"
+        elif operation.lower() == 'subtract':
+            return f"({date_expr} - INTERVAL {interval_expr})"
+        else:
+            raise ValueError(f"Unsupported interval operation: {operation}")
+
+    def generate_boolean_conversion(self, expression: str) -> str:
+        """DuckDB boolean conversion handling."""
+        return f"""CASE
+            WHEN LOWER(TRIM({expression})) IN ('true', 't', '1') THEN true
+            WHEN LOWER(TRIM({expression})) IN ('false', 'f', '0') THEN false
+            WHEN {expression} IS NULL OR TRIM({expression}) = '' THEN NULL
+            ELSE NULL
+        END"""
+
+    def generate_json_aggregate_function(self, function_name: str, json_expr: str,
+                                        cast_type: str = None) -> str:
+        """DuckDB aggregate function on JSON array elements."""
+        cast_type = cast_type or 'DOUBLE'
+
+        # Handle DuckDB-specific function names
+        func_map = {
+            'variance': 'VAR_SAMP',
+            'stddev': 'STDDEV'
+        }
+        actual_func = func_map.get(function_name.lower(), function_name.upper())
+
+        return f"""(
+    SELECT {actual_func}(CAST(value AS {cast_type}))
+    FROM (
+        SELECT json_extract(json_array_elements({json_expr}), '$') AS value
+    ) subq
+    WHERE value IS NOT NULL AND value != 'null'
+    AND value REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
+)"""
+
+    def generate_percentile_function(self, json_expr: str, percentile_fraction: str,
+                                   cast_type: str = None) -> str:
+        """DuckDB percentile function on JSON array."""
+        cast_type = cast_type or 'DOUBLE'
+
+        return f"""(
+    SELECT QUANTILE_CONT(CAST(value AS {cast_type}), {percentile_fraction})
+    FROM (
+        SELECT json_extract(json_array_elements({json_expr}), '$') AS value
+    ) subq
+    WHERE value IS NOT NULL AND value != 'null'
+    AND value REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
+)"""
+
+    def generate_json_array_elements(self, json_expr: str) -> str:
+        """DuckDB JSON array elements extraction."""
+        return f"json_each({json_expr}) AS elem"
+
+    def generate_json_object_creation(self, key_value_pairs: List[str]) -> str:
+        """DuckDB JSON object creation."""
+        pairs = []
+        for i in range(0, len(key_value_pairs), 2):
+            key = key_value_pairs[i]
+            value = key_value_pairs[i + 1] if i + 1 < len(key_value_pairs) else 'NULL'
+            pairs.append(f"{key}: {value}")
+        return f"{{{', '.join(pairs)}}}"
+
+    def generate_json_array_creation(self, elements: List[str]) -> str:
+        """DuckDB JSON array creation."""
+        return f"[{', '.join(elements)}]"
+
+    def generate_json_object_extraction(self, json_expr: str, path: str) -> str:
+        """DuckDB JSON object field extraction."""
+        return f"json_extract({json_expr}, '{path}')"
+
+    def generate_json_array_aggregation(self, expr: str) -> str:
+        """DuckDB JSON array aggregation."""
+        return f"json_group_array({expr})"

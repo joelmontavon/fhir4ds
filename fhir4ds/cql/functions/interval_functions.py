@@ -27,9 +27,22 @@ class CQLIntervalFunctionHandler:
     Replaces existing stub implementations with full CQL-compliant functionality.
     """
     
-    def __init__(self, dialect: str = "duckdb"):
+    def __init__(self, dialect: str = "duckdb", dialect_handler=None):
         """Initialize CQL interval function handler with dialect support."""
         self.dialect = dialect
+
+        # Inject dialect handler for database-specific operations
+        if dialect_handler is None:
+            from ...dialects import DuckDBDialect, PostgreSQLDialect
+            from ...config import get_database_url
+            if dialect.lower() == "postgresql":
+                # Use centralized configuration
+                conn_str = get_database_url('postgresql')
+                self.dialect_handler = PostgreSQLDialect(conn_str)
+            else:  # default to DuckDB
+                self.dialect_handler = DuckDBDialect()
+        else:
+            self.dialect_handler = dialect_handler
         
         # Register all interval functions
         self.function_map = {
@@ -435,22 +448,22 @@ class CQLIntervalFunctionHandler:
         start = self._extract_interval_start(interval_val)
         end = self._extract_interval_end(interval_val)
         
-        # Use the date/time functions for duration calculation
+        # Use dialect abstraction for duration calculation
         if precision == "year":
-            sql = f"DATE_DIFF('year', {start}, {end})" if self.dialect == "duckdb" else f"EXTRACT(YEAR FROM AGE({end}, {start}))"
+            sql = self.dialect_handler.generate_date_diff('year', start, end)
         elif precision == "month":
-            sql = f"DATE_DIFF('month', {start}, {end})" if self.dialect == "duckdb" else f"(EXTRACT(YEAR FROM AGE({end}, {start})) * 12 + EXTRACT(MONTH FROM AGE({end}, {start})))"
+            sql = self.dialect_handler.generate_date_diff('month', start, end)
         elif precision == "day":
-            sql = f"DATE_DIFF('day', {start}, {end})" if self.dialect == "duckdb" else f"EXTRACT(DAY FROM ({end} - {start}))"
+            sql = self.dialect_handler.generate_date_diff('day', start, end)
         elif precision == "hour":
-            sql = f"DATE_DIFF('hour', {start}, {end})" if self.dialect == "duckdb" else f"EXTRACT(EPOCH FROM ({end} - {start})) / 3600"
+            sql = self.dialect_handler.generate_date_diff('hour', start, end)
         elif precision == "minute":
-            sql = f"DATE_DIFF('minute', {start}, {end})" if self.dialect == "duckdb" else f"EXTRACT(EPOCH FROM ({end} - {start})) / 60"
+            sql = self.dialect_handler.generate_date_diff('minute', start, end)
         elif precision == "second":
-            sql = f"DATE_DIFF('second', {start}, {end})" if self.dialect == "duckdb" else f"EXTRACT(EPOCH FROM ({end} - {start}))"
+            sql = self.dialect_handler.generate_date_diff('second', start, end)
         else:
             # Default to days
-            sql = f"DATE_DIFF('day', {start}, {end})" if self.dialect == "duckdb" else f"EXTRACT(DAY FROM ({end} - {start}))"
+            sql = self.dialect_handler.generate_date_diff('day', start, end)
         
         return LiteralNode(value=sql, type='sql')
     
@@ -488,11 +501,8 @@ class CQLIntervalFunctionHandler:
         start2 = self._extract_interval_start(interval2_val)
         end2 = self._extract_interval_end(interval2_val)
         
-        # Return interval with minimum start and maximum end
-        if self.dialect == "postgresql":
-            sql = f"[LEAST({start1}, {start2}), GREATEST({end1}, {end2})]"
-        else:  # DuckDB
-            sql = f"[LEAST({start1}, {start2}), GREATEST({end1}, {end2})]"
+        # Return interval with minimum start and maximum end (same for both dialects)
+        sql = f"[LEAST({start1}, {start2}), GREATEST({end1}, {end2})]"
         
         return LiteralNode(value=sql, type='sql')
     
@@ -517,12 +527,9 @@ class CQLIntervalFunctionHandler:
         # Check for overlap first, then return intersection
         overlap_check = f"({start1} < {end2} AND {end1} > {start2})"
         
-        if self.dialect == "postgresql":
-            intersection_start = f"GREATEST({start1}, {start2})"
-            intersection_end = f"LEAST({end1}, {end2})"
-        else:  # DuckDB
-            intersection_start = f"GREATEST({start1}, {start2})"
-            intersection_end = f"LEAST({end1}, {end2})"
+        # Calculate intersection bounds (same for both dialects)
+        intersection_start = f"GREATEST({start1}, {start2})"
+        intersection_end = f"LEAST({end1}, {end2})"
         
         sql = f"""
 CASE 
@@ -577,15 +584,10 @@ END""".strip()
         start = self._extract_interval_start(interval_val)
         end = self._extract_interval_end(interval_val)
         
-        # Subtract quantity from start, add quantity to end
-        if self.dialect == "postgresql":
-            interval_unit = f"'{quantity_val} {precision}s'"
-            new_start = f"({start} - INTERVAL {interval_unit})"
-            new_end = f"({end} + INTERVAL {interval_unit})"
-        else:  # DuckDB
-            precision_upper = precision.upper()
-            new_start = f"({start} - INTERVAL ({quantity_val}) {precision_upper})"
-            new_end = f"({end} + INTERVAL ({quantity_val}) {precision_upper})"
+        # Use dialect abstraction for interval arithmetic
+        interval_expr = f"{quantity_val} {precision.upper()}"
+        new_start = self.dialect_handler.generate_interval_arithmetic(start, interval_expr, 'subtract')
+        new_end = self.dialect_handler.generate_interval_arithmetic(end, interval_expr, 'add')
         
         sql = f"[{new_start}, {new_end}]"
         return LiteralNode(value=sql, type='sql')
@@ -663,10 +665,8 @@ END""".strip()
         elif precision == "month":
             return f"(EXTRACT(YEAR FROM {dt1}) = EXTRACT(YEAR FROM {dt2}) AND EXTRACT(MONTH FROM {dt1}) = EXTRACT(MONTH FROM {dt2}))"
         elif precision == "day":
-            if self.dialect == "postgresql":
-                return f"(DATE({dt1}) = DATE({dt2}))"
-            else:  # DuckDB
-                return f"(DATE_TRUNC('day', {dt1}) = DATE_TRUNC('day', {dt2}))"
+            # Both dialects support DATE_TRUNC for day precision
+            return f"(DATE_TRUNC('day', {dt1}) = DATE_TRUNC('day', {dt2}))"
         elif precision == "hour":
             return f"(DATE_TRUNC('hour', {dt1}) = DATE_TRUNC('hour', {dt2}))"
         elif precision == "minute":

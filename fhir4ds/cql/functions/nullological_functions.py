@@ -21,9 +21,22 @@ class CQLNullologicalFunctionHandler:
     standard SQL or FHIRPath null semantics.
     """
     
-    def __init__(self, dialect: str = "duckdb"):
+    def __init__(self, dialect: str = "duckdb", dialect_handler=None):
         """Initialize CQL nullological function handler."""
         self.dialect = dialect
+        
+        # Inject dialect handler for database-specific operations
+        if dialect_handler is None:
+            from ...dialects import DuckDBDialect, PostgreSQLDialect
+            from ...config import get_database_url
+            if dialect.lower() == "postgresql":
+                # Use centralized configuration
+                conn_str = get_database_url('postgresql')
+                self.dialect_handler = PostgreSQLDialect(conn_str)
+            else:  # default to DuckDB
+                self.dialect_handler = DuckDBDialect()
+        else:
+            self.dialect_handler = dialect_handler
         
         # Register nullological functions
         self.function_map = {
@@ -253,34 +266,8 @@ class CQLNullologicalFunctionHandler:
         
         expr_val = extract_value(expression)
         
-        if self.dialect == "duckdb":
-            sql = f"""
-            CASE 
-                WHEN LOWER(TRIM({expr_val})) IN ('true', 't', '1') THEN true
-                WHEN LOWER(TRIM({expr_val})) IN ('false', 'f', '0') THEN false
-                WHEN {expr_val} IS NULL OR TRIM({expr_val}) = '' THEN NULL
-                ELSE NULL
-            END
-            """.strip()
-        elif self.dialect == "postgresql":
-            sql = f"""
-            CASE 
-                WHEN LOWER(TRIM({expr_val})) IN ('true', 't', '1') THEN true
-                WHEN LOWER(TRIM({expr_val})) IN ('false', 'f', '0') THEN false
-                WHEN {expr_val} IS NULL OR TRIM({expr_val}) = '' THEN NULL
-                ELSE NULL
-            END
-            """.strip()
-        else:
-            # Generic SQL fallback
-            sql = f"""
-            CASE 
-                WHEN LOWER(TRIM({expr_val})) IN ('true', 't', '1') THEN true
-                WHEN LOWER(TRIM({expr_val})) IN ('false', 'f', '0') THEN false
-                WHEN {expr_val} IS NULL OR TRIM({expr_val}) = '' THEN NULL
-                ELSE NULL
-            END
-            """.strip()
+        # Use dialect abstraction for boolean conversion
+        sql = self.dialect_handler.generate_boolean_conversion(expr_val)
         
         return LiteralNode(value=sql, type='sql')
     

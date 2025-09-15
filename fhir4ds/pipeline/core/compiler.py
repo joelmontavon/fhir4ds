@@ -11,6 +11,7 @@ from .base import (
     PipelineOperation, SQLState, ExecutionContext, CompiledSQL, 
     ContextMode, PipelineCompilationError, PipelineValidationError
 )
+from ..operations.functions import InvalidArgumentError, FHIRPathExecutionError
 from .builder import FHIRPathPipeline
 from .advanced_features import (
     get_cte_optimizer, get_query_plan_cache, get_smart_indexing_hints,
@@ -93,6 +94,10 @@ class PipelineCompiler:
             
             return result
             
+        except (ValueError, InvalidArgumentError, FHIRPathExecutionError, PipelineValidationError) as e:
+            # Re-raise validation exceptions (like function argument validation) directly
+            logger.error(f"Pipeline validation failed: {e}")
+            raise e
         except Exception as e:
             logger.error(f"Pipeline compilation failed: {e}")
             raise PipelineCompilationError(f"Failed to compile pipeline: {e}") from e
@@ -137,6 +142,10 @@ class PipelineCompiler:
                 operation.validate_preconditions(current_state, context)
                 # Simulate execution for validation
                 current_state = operation.execute(current_state, context)
+            except (ValueError, InvalidArgumentError, FHIRPathExecutionError) as e:
+                # Re-raise validation exceptions directly
+                logger.error(f"Operation {i} ({operation.get_operation_name()}) validation failed: {e}")
+                raise e
             except Exception as e:
                 raise PipelineValidationError(
                     f"Operation {i} ({operation.get_operation_name()}) validation failed: {e}"
