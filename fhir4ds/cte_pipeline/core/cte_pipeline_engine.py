@@ -99,24 +99,27 @@ class CTEPipelineEngine:
     - Drop-in replacement for existing execution interfaces
     """
     
-    def __init__(self, 
+    def __init__(self,
                  dialect: str,
                  database_connection: Any,
-                 terminology_client: Optional[Any] = None):
+                 terminology_client: Optional[Any] = None,
+                 datastore: Optional[Any] = None):
         """
         Initialize CTE Pipeline Engine.
-        
+
         Args:
             dialect: Database dialect ('duckdb' or 'postgresql')
             database_connection: Database connection object
             terminology_client: Optional terminology service client
+            datastore: Optional datastore for ValueSet caching
         """
         self.dialect = dialect.upper()
         self.database_connection = database_connection
         self.terminology_client = terminology_client
-        
-        # Initialize core components
-        self.cql_converter = CQLToCTEConverter(dialect, terminology_client)
+        self.datastore = datastore
+
+        # Initialize core components with datastore for ValueSet caching
+        self.cql_converter = CQLToCTEConverter(dialect, terminology_client, datastore)
         self.query_builder = CTEQueryBuilder(dialect)
         
         # Execution statistics for replacement validation
@@ -128,6 +131,10 @@ class CTEPipelineEngine:
             'queries_replaced_count': 0,
             'performance_improvement_ratio': 0.0
         }
+        
+        # Store last generated SQL for debugging and analysis
+        self.last_generated_sql = None
+        self.last_compiled_query = None
         
         logger.info(f"Initialized CTE Pipeline Engine for {self.dialect} dialect")
     
@@ -161,6 +168,9 @@ class CTEPipelineEngine:
             define_statements = self._extract_define_statements(library_content)
             logger.debug(f"Extracted {len(define_statements)} define statements from library")
             
+            # Phase 1.5: Parse valueset definitions for terminology resolution
+            self.cql_converter.set_valueset_mappings(library_content)
+            
             # Phase 2: Convert CQL defines to CTE fragments
             cte_fragments = self._convert_defines_to_ctes(define_statements, context)
             logger.debug(f"Converted {len(cte_fragments)} CQL defines to CTE fragments")
@@ -168,6 +178,10 @@ class CTEPipelineEngine:
             # Phase 3: Build monolithic query
             compiled_query = self._build_monolithic_query(define_statements, cte_fragments)
             logger.info(f"Built monolithic query with {len(compiled_query.fragments)} CTEs")
+            
+            # Store the compiled query and SQL for later retrieval
+            self.last_compiled_query = compiled_query
+            self.last_generated_sql = compiled_query.main_sql
             
             # Phase 4: Execute single comprehensive query
             execution_results = self._execute_monolithic_query(compiled_query, context)
@@ -305,7 +319,11 @@ class CTEPipelineEngine:
         # Add all fragments to query builder
         for fragment in cte_fragments:
             self.query_builder.add_fragment(fragment)
-        
+
+        # Add ValueSet CTEs from converter if available
+        if hasattr(self.cql_converter, 'get_required_valuesets'):
+            self.query_builder.add_valuesets_from_converter(self.cql_converter)
+
         # Build comprehensive monolithic query
         compiled_query = self.query_builder.build_monolithic_query(define_statements)
         
@@ -496,24 +514,45 @@ class CTEPipelineEngine:
             'performance_improvement_ratio': 0.0
         }
         logger.info("Reset CTE Pipeline Engine statistics")
+    
+    def get_last_generated_sql(self) -> Optional[str]:
+        """
+        Get the last generated SQL query.
+        
+        Returns:
+            The complete SQL query from the last library execution, or None if no execution occurred
+        """
+        return self.last_generated_sql
+    
+    def get_last_compiled_query(self) -> Optional['CompiledCTEQuery']:
+        """
+        Get the last compiled CTE query object.
+        
+        Returns:
+            The complete compiled query object from the last execution, or None if no execution occurred
+        """
+        return self.last_compiled_query
 
 
-def create_cte_pipeline_engine(dialect: str, 
+def create_cte_pipeline_engine(dialect: str,
                               database_connection: Any,
-                              terminology_client: Optional[Any] = None) -> CTEPipelineEngine:
+                              terminology_client: Optional[Any] = None,
+                              datastore: Optional[Any] = None) -> CTEPipelineEngine:
     """
     Factory function to create CTE Pipeline Engine.
-    
+
     Args:
         dialect: Database dialect ('duckdb' or 'postgresql')
         database_connection: Database connection object
         terminology_client: Optional terminology service client
-        
+        datastore: Optional datastore for ValueSet caching
+
     Returns:
         Configured CTE Pipeline Engine ready for use
     """
     return CTEPipelineEngine(
         dialect=dialect,
         database_connection=database_connection,
-        terminology_client=terminology_client
+        terminology_client=terminology_client,
+        datastore=datastore
     )

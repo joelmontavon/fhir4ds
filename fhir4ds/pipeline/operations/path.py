@@ -81,37 +81,68 @@ class PathNavigationOperation(PipelineOperation[SQLState]):
         # Generate SQL for path extraction using the NEW context mode, not the old one
         sql_fragment = self._generate_path_sql_with_mode(input_state, new_path, context, new_context_mode)
         
-        # Special case: If accessing a field on a filtered collection (from where()), 
-        # we need to return scalar value from the filtered collection
+        # Special case: If accessing a field on a collection result
         if (input_state.is_collection and 
             input_state.sql_fragment and 
             ("json_group_array" in input_state.sql_fragment or "jsonb_path_query_array" in input_state.sql_fragment) and
             new_path.startswith("$[*].") and
             not yields_collection):  # Only for non-collection fields
             
-            # This is field access on a where() result - extract field from filtered items
             field_name = new_path[5:]  # Remove "$[*]." prefix (5 chars)
             base_expr = input_state.sql_fragment
             
-            if context.dialect.name.upper() == 'DUCKDB':
-                # For DuckDB: Extract field from first matching item, return null if no matches
-                sql_fragment = f"""
-                CASE 
-                    WHEN {base_expr} IS NULL OR json_array_length({base_expr}) = 0 THEN NULL
-                    ELSE json_extract_string(json_extract({base_expr}, '$[0]'), '$.{field_name}')
-                END
-                """.strip()
-            else:  # PostgreSQL
-                # For PostgreSQL: Similar logic
-                sql_fragment = f"""
-                CASE 
-                    WHEN {base_expr} IS NULL OR jsonb_array_length({base_expr}) = 0 THEN NULL
-                    ELSE ({base_expr} -> 0 ->> '{field_name}')
-                END
-                """.strip()
+            # Detect if this came from a collection function (skip, take, tail) vs where() filtering
+            # Collection functions should return arrays of field values, where() should return scalar
+            is_collection_function = ("rn >" in input_state.sql_fragment or  # skip/tail pattern
+                                    "rn <= " in input_state.sql_fragment or  # take pattern  
+                                    "ROW_NUMBER() OVER" in input_state.sql_fragment)  # general collection function
             
-            # Update result characteristics - this returns scalar value
-            yields_collection = False
+            if is_collection_function:
+                # For collection functions: extract field from ALL elements and return as array
+                if context.dialect.name.upper() == 'DUCKDB':
+                    sql_fragment = f"""
+                    CASE 
+                        WHEN {base_expr} IS NULL OR json_array_length({base_expr}) = 0 THEN NULL
+                        ELSE (
+                            SELECT json_group_array(json_extract_string(value, '$.{field_name}'))
+                            FROM json_each({base_expr}, '$') 
+                            WHERE json_extract_string(value, '$.{field_name}') IS NOT NULL
+                        )
+                    END
+                    """.strip()
+                else:  # PostgreSQL
+                    sql_fragment = f"""
+                    CASE 
+                        WHEN {base_expr} IS NULL OR jsonb_array_length({base_expr}) = 0 THEN NULL
+                        ELSE (
+                            SELECT jsonb_agg(elem ->> '{field_name}')
+                            FROM jsonb_array_elements({base_expr}) AS elem
+                            WHERE elem ->> '{field_name}' IS NOT NULL
+                        )
+                    END
+                    """.strip()
+                
+                # Collection functions accessing fields should yield collections
+                yields_collection = True
+            else:
+                # For where() filtering: extract field from first matching item (original logic)
+                if context.dialect.name.upper() == 'DUCKDB':
+                    sql_fragment = f"""
+                    CASE 
+                        WHEN {base_expr} IS NULL OR json_array_length({base_expr}) = 0 THEN NULL
+                        ELSE json_extract_string(json_extract({base_expr}, '$[0]'), '$.{field_name}')
+                    END
+                    """.strip()
+                else:  # PostgreSQL
+                    sql_fragment = f"""
+                    CASE 
+                        WHEN {base_expr} IS NULL OR jsonb_array_length({base_expr}) = 0 THEN NULL
+                        ELSE ({base_expr} -> 0 ->> '{field_name}')
+                    END
+                    """.strip()
+                
+                # where() filtering returns scalar value
+                yields_collection = False
         
         return input_state.evolve(
             sql_fragment=sql_fragment,

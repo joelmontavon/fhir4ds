@@ -323,16 +323,10 @@ class CQLEngine:
             if self._is_direct_function_call(cql_expression):
                 return self._evaluate_function_via_registry(cql_expression, table_name, json_column)
             
-            # Try interim pattern-based translation first for common failing patterns
-            if self._has_known_parsing_issues(cql_expression):
-                interim_result = self._try_interim_pattern_translation(cql_expression, table_name, json_column)
-                if interim_result and not interim_result.startswith("--"):
-                    logger.info(f"Successfully translated via interim pattern matcher")
-                    return interim_result
+            # REMOVED: Interim pattern-based translation - pipeline integration handles all patterns now
             
             # Check if this is an advanced CQL construct (Phase 6)
-            # BUT first check if it matches our interim patterns (which take precedence)
-            if self._has_advanced_constructs(cql_expression) and not self._has_known_parsing_issues(cql_expression):
+            if self._has_advanced_constructs(cql_expression):
                 return self.evaluate_advanced_expression(cql_expression, table_name, json_column)
             
             # Step 1: Parse CQL expression to AST
@@ -377,11 +371,7 @@ class CQLEngine:
                 
         except Exception as e:
             logger.error(f"CQL evaluation failed: {e}")
-            # Try interim pattern-based translation before falling back to comment
-            interim_result = self._try_interim_pattern_translation(cql_expression, table_name, json_column)
-            if interim_result and not interim_result.startswith("--"):
-                logger.info(f"Successfully translated via interim pattern matcher")
-                return interim_result
+            # REMOVED: Interim pattern-based translation - pipeline handles all patterns now
             # Final fallback: treat as comment
             return f"-- CQL Expression (error: {e}): {cql_expression}"
     
@@ -1711,24 +1701,9 @@ FROM {final_step} final"""
                 json_path = self._convert_cql_field_to_json_path(end_expr, "")
                 end_date_sql = f"CAST(json_extract_string({json_column}, '{json_path}') AS DATE)"
             
-            # Generate SQL based on duration unit
-            if duration_unit.lower() == 'months':  
-                if self.dialect_name == "postgresql":
-                    sql = f"SELECT EXTRACT(YEAR FROM AGE({end_date_sql}, {start_date_sql})) * 12 + EXTRACT(MONTH FROM AGE({end_date_sql}, {start_date_sql})) as duration_months"
-                else:
-                    # DuckDB syntax
-                    sql = f"SELECT DATEDIFF('month', {start_date_sql}, {end_date_sql}) as duration_months"
-            elif duration_unit.lower() == 'years':
-                if self.dialect_name == "postgresql":
-                    sql = f"SELECT EXTRACT(YEAR FROM AGE({end_date_sql}, {start_date_sql})) as duration_years"
-                else:
-                    # DuckDB syntax
-                    sql = f"SELECT DATEDIFF('year', {start_date_sql}, {end_date_sql}) as duration_years"
-            elif duration_unit.lower() == 'days':
-                sql = f"SELECT DATEDIFF('day', {start_date_sql}, {end_date_sql}) as duration_days"
-            else:
-                # Default to days for other units
-                sql = f"SELECT DATEDIFF('day', {start_date_sql}, {end_date_sql}) as duration_{duration_unit.lower()}"
+            # Generate SQL using dialect method
+            date_diff_expr = self.dialect.generate_date_difference_with_unit(start_date_sql, end_date_sql, duration_unit)
+            sql = f"SELECT {date_diff_expr} as duration_{duration_unit.lower()}"
             
             logger.debug(f"Generated interim SQL for duration calculation: {sql[:100]}...")
             return sql
@@ -2538,12 +2513,9 @@ FROM {table_name} {alias.lower()}
             date_expr = match.group(1).strip()
             # Convert CQL field access to JSON path
             json_path = self._convert_cql_field_to_json_path(date_expr, alias)
-            # Use DuckDB syntax for age calculation
-            if self.dialect_name == "postgresql":
-                age_sql = f"EXTRACT(YEAR FROM AGE(CURRENT_DATE, DATE(json_extract_string({json_column}, '{json_path}'))))"
-            else:
-                # DuckDB syntax
-                age_sql = f"EXTRACT(YEAR FROM CURRENT_DATE) - EXTRACT(YEAR FROM CAST(json_extract_string({json_column}, '{json_path}') AS DATE))"
+            # Use dialect method for age calculation
+            birth_date_expr = f"CAST(json_extract_string({json_column}, '{json_path}') AS DATE)"
+            age_sql = self.dialect.generate_age_calculation(birth_date_expr, "CURRENT_DATE")
             
             # Replace the AgeInYears call with SQL equivalent
             computation_sql = re.sub(age_pattern, age_sql, computation, flags=re.IGNORECASE)
@@ -2579,11 +2551,10 @@ FROM {table_name} {alias.lower()}
             birth_column_ref = f"json_extract_string({json_column}, '{birth_json_path}')"
             
             # Use dialect-appropriate age calculation
-            if self.dialect_name == "postgresql":
-                age_at_sql = f"EXTRACT(YEAR FROM AGE(CAST({event_column_ref} AS DATE), CAST({birth_column_ref} AS DATE)))"
-            else:
-                # DuckDB syntax
-                age_at_sql = f"EXTRACT(YEAR FROM CAST({event_column_ref} AS DATE)) - EXTRACT(YEAR FROM CAST({birth_column_ref} AS DATE))"
+            # Use dialect method for age at event calculation
+            birth_date_cast = f"CAST({birth_column_ref} AS DATE)"
+            event_date_cast = f"CAST({event_column_ref} AS DATE)"
+            age_at_sql = self.dialect.generate_age_calculation(birth_date_cast, event_date_cast)
             
             # Replace the AgeInYearsAt call with SQL equivalent
             computation_sql = re.sub(age_at_pattern, age_at_sql, computation, flags=re.IGNORECASE)
@@ -2933,12 +2904,7 @@ FROM {table_name} {alias.lower()}
         logger.info(f"CQL Engine evaluating advanced expression: {cql_expression}")
         
         try:
-            # Check interim patterns first before advanced translator (for Pattern 15, etc.)
-            if self._has_known_parsing_issues(cql_expression):
-                interim_result = self._try_interim_pattern_translation(cql_expression, table_name, json_column)
-                if interim_result and not interim_result.startswith("--"):
-                    logger.info(f"Successfully translated via interim pattern matcher in advanced evaluation")
-                    return interim_result
+            # REMOVED: Interim patterns - pipeline integration handles all patterns now
             
             # Use advanced translator for Phase 6 constructs
             sql = self.advanced_translator.translate_advanced_cql(cql_expression)

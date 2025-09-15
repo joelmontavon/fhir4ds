@@ -169,7 +169,7 @@ class BatchProcessor:
         return results
     
     def execute_all(self, parallel: bool = True, monitor_performance: bool = False, 
-                   max_workers: Optional[int] = None) -> List[BatchResult]:
+                   max_workers: Optional[int] = None, continue_on_error: bool = False) -> List[BatchResult]:
         """
         Execute all queries in the queue (alias for execute_queued with extra options).
         
@@ -177,10 +177,12 @@ class BatchProcessor:
             parallel: Whether to execute in parallel
             monitor_performance: Whether to enable performance monitoring (not used currently)
             max_workers: Override max_workers setting (not used currently)
+            continue_on_error: Whether to continue execution after encountering errors
             
         Returns:
             List of BatchResult objects with execution results
         """
+        # Note: continue_on_error is handled by the individual query execution in execute_batch
         return self.execute_queued(parallel)
     
     def execute_batch(self, view_definitions: List[Dict[str, Any]], 

@@ -474,13 +474,8 @@ ORDER BY patient_id, record_sequence
         Returns:
             Dialect-appropriate percentile SQL
         """
-        if self.dialect and hasattr(self.dialect, 'name'):
-            if self.dialect.name == "POSTGRESQL":
-                # PostgreSQL uses PERCENTILE_CONT
-                return f"PERCENTILE_CONT({percentile}) WITHIN GROUP (ORDER BY {expression}) OVER ()"
-            else:
-                # DuckDB uses PERCENTILE_CONT
-                return f"PERCENTILE_CONT({percentile}) WITHIN GROUP (ORDER BY {expression}) OVER ()"
+        if self.dialect and hasattr(self.dialect, 'generate_percentile_calculation'):
+            return self.dialect.generate_percentile_calculation(expression, percentile)
         else:
             # Default percentile function
             return f"PERCENTILE_CONT({percentile}) WITHIN GROUP (ORDER BY {expression}) OVER ()"
@@ -496,13 +491,8 @@ ORDER BY patient_id, record_sequence
         Returns:
             Dialect-appropriate date difference SQL
         """
-        if self.dialect and hasattr(self.dialect, 'name'):
-            if self.dialect.name == "POSTGRESQL":
-                # PostgreSQL uses EXTRACT or date subtraction
-                return f"EXTRACT(DAYS FROM {end_date} - DATE({start_date})) / 365.25"
-            else:
-                # DuckDB uses DATEDIFF or date subtraction
-                return f"CAST(({end_date} - DATE({start_date})) / 365.25 AS DOUBLE)"
+        if self.dialect and hasattr(self.dialect, 'generate_date_difference_years'):
+            return self.dialect.generate_date_difference_years(start_date, end_date)
         else:
             # Default to DuckDB syntax
             return f"CAST(({end_date} - DATE({start_date})) / 365.25 AS DOUBLE)"

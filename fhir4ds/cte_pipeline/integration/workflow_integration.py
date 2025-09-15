@@ -136,7 +136,8 @@ class WorkflowCTEIntegration:
                  performance_comparison: bool = False,
                  result_format_legacy_compatible: bool = True,
                  terminology_client: Optional[Any] = None,
-                 legacy_executor: Optional[Callable] = None):
+                 legacy_executor: Optional[Callable] = None,
+                 datastore: Optional[Any] = None):
         """
         Initialize workflow integration.
 
@@ -146,12 +147,14 @@ class WorkflowCTEIntegration:
             performance_comparison: Enable performance comparison for testing
             result_format_legacy_compatible: Maintain legacy result format compatibility
             terminology_client: Optional terminology service client
-            legacy_executor: Optional fallback executor for legacy compatibility
+            legacy_executor: Optional legacy executor for fallback
+            datastore: Optional datastore for ValueSet caching
         """
         self.dialect = dialect
         self.database_connection = database_connection
         self.terminology_client = terminology_client
         self.legacy_executor = legacy_executor
+        self.datastore = datastore
         self.performance_comparison = performance_comparison
         self.result_format_legacy_compatible = result_format_legacy_compatible
 
@@ -159,7 +162,8 @@ class WorkflowCTEIntegration:
         self.cte_engine = create_cte_pipeline_engine(
             dialect=dialect,
             database_connection=database_connection,
-            terminology_client=terminology_client
+            terminology_client=terminology_client,
+            datastore=datastore
         )
 
         # Initialize result formatter

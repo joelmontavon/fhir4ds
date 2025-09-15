@@ -24,6 +24,7 @@ from ..functions.interval_functions import CQLIntervalFunctionHandler
 from ..functions.nullological_functions import CQLNullologicalFunctionHandler
 from ..functions.clinical import ClinicalFunctions, TerminologyFunctions
 from ..functions.logical_operators import CQLLogicalOperators
+from .context_provider import CQLContextProvider
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,6 @@ class UnifiedFunctionRegistry:
         
         # Initialize context provider for smart context detection
         if context_provider is None:
-            from .context_provider import CQLContextProvider
             self.context_provider = CQLContextProvider()
         else:
             self.context_provider = context_provider
@@ -372,7 +372,9 @@ class UnifiedFunctionRegistry:
             Exception: If function call fails
         """
         # Check if function needs context injection
-        context_required = self.context_provider.detect_context_requirement(function_name, list(args))
+        # Combine positional and keyword arguments for context detection
+        all_args = list(args) + list(kwargs.values())
+        context_required = self.context_provider.detect_context_requirement(function_name, all_args)
         
         if context_required:
             # Create enhanced function call with context
@@ -411,8 +413,28 @@ class UnifiedFunctionRegistry:
             raise ValueError(f"Function '{function_name}' is not supported")
         
         try:
-            # Get the function method from the handler
-            if hasattr(handler, 'function_map') and function_name.lower() in handler.function_map:
+            # First check the registry's function_map for proper handler routing
+            func_key = function_name.lower()
+            
+            if func_key in self.function_map:
+                func_info = self.function_map[func_key]
+                actual_handler = func_info['handler']
+                
+                # Try to call the function on the actual handler
+                # Convert CamelCase to snake_case for method name
+                import re
+                method_name = re.sub(r'(?<!^)(?=[A-Z])', '_', function_name).lower()
+                if hasattr(actual_handler, method_name):
+                    func_method = getattr(actual_handler, method_name)
+                    logger.debug(f"Calling {function_name} via registry function map")
+                    return func_method(*args, **kwargs)
+                else:
+                    raise AttributeError(f"Handler does not implement function '{function_name}'")
+            
+            # Fallback: check if handler has function_map or direct method
+            elif (hasattr(handler, 'function_map') and 
+                isinstance(handler.function_map, dict) and 
+                function_name.lower() in handler.function_map):
                 func_method = handler.function_map[function_name.lower()]
                 logger.debug(f"Calling {function_name} via handler function map")
                 return func_method(*args, **kwargs)

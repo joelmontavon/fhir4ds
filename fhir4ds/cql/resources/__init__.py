@@ -10,5 +10,6 @@ This module provides handlers for FHIR resources commonly used with CQL:
 from .library_handler import FHIRLibraryHandler
 from .parameters_handler import ParametersHandler
 from .workflow_engine import CQLWorkflowEngine
+from .measure_report_config import MeasureReportConfig
 
-__all__ = ['FHIRLibraryHandler', 'ParametersHandler', 'CQLWorkflowEngine']
+__all__ = ['FHIRLibraryHandler', 'ParametersHandler', 'CQLWorkflowEngine', 'MeasureReportConfig']
