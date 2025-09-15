@@ -24,51 +24,12 @@ from ..core.cte_pipeline_engine import (
     ExecutionResult,
     create_cte_pipeline_engine
 )
-from ..config import get_cte_config, should_use_cte_for_library
+# Config removed - CTE pipeline always enabled
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class WorkflowConfig:
-    """
-    Configuration for workflow integration.
-    
-    Simplified configuration that uses always-on defaults from the global config.
-    CTE pipeline is enabled by default with automatic fallback for ultra-complex libraries.
-    """
-    # Performance comparison for testing (optional)
-    performance_comparison: bool = False
-    # Always maintain legacy-compatible result format
-    result_format_legacy_compatible: bool = True
-    
-    def __post_init__(self):
-        """Initialize with global always-on configuration."""
-        self._cte_config = get_cte_config()
-    
-    @property
-    def enable_cte_pipeline(self) -> bool:
-        """CTE pipeline is always enabled by default."""
-        return self._cte_config.enabled
-    
-    @property
-    def fallback_to_legacy(self) -> bool:
-        """Automatic fallback is always enabled by default."""
-        return self._cte_config.fallback_enabled
-    
-    @property
-    def debug_mode(self) -> bool:
-        """Debug mode from global configuration."""
-        return self._cte_config.debug_mode
-    
-    @property
-    def max_defines_for_cte(self) -> int:
-        """Maximum defines limit from global configuration."""
-        return self._cte_config.max_defines
-    
-    def should_use_cte_pipeline(self, define_count: int) -> bool:
-        """Determine if CTE pipeline should be used for this execution."""
-        return should_use_cte_for_library(define_count)
+# WorkflowConfig removed - CTE pipeline always enabled with simple parameters
 
 
 class LegacyResultFormatter:
@@ -169,19 +130,21 @@ class WorkflowCTEIntegration:
     WITH: Monolithic CTE-based execution
     """
     
-    def __init__(self, 
+    def __init__(self,
                  dialect: str,
                  database_connection: Any,
-                 workflow_config: Optional[WorkflowConfig] = None,
+                 performance_comparison: bool = False,
+                 result_format_legacy_compatible: bool = True,
                  terminology_client: Optional[Any] = None,
                  legacy_executor: Optional[Callable] = None):
         """
         Initialize workflow integration.
-        
+
         Args:
             dialect: Database dialect ('duckdb' or 'postgresql')
             database_connection: Database connection object
-            workflow_config: Configuration for workflow behavior
+            performance_comparison: Enable performance comparison for testing
+            result_format_legacy_compatible: Maintain legacy result format compatibility
             terminology_client: Optional terminology service client
             legacy_executor: Optional fallback executor for legacy compatibility
         """
@@ -189,24 +152,21 @@ class WorkflowCTEIntegration:
         self.database_connection = database_connection
         self.terminology_client = terminology_client
         self.legacy_executor = legacy_executor
-        
-        self.config = workflow_config or WorkflowConfig()
-        
-        # Initialize CTE pipeline engine
-        if self.config.enable_cte_pipeline:
-            self.cte_engine = create_cte_pipeline_engine(
-                dialect=dialect,
-                database_connection=database_connection,
-                terminology_client=terminology_client
-            )
-        else:
-            self.cte_engine = None
-        
+        self.performance_comparison = performance_comparison
+        self.result_format_legacy_compatible = result_format_legacy_compatible
+
+        # Initialize CTE pipeline engine (always enabled)
+        self.cte_engine = create_cte_pipeline_engine(
+            dialect=dialect,
+            database_connection=database_connection,
+            terminology_client=terminology_client
+        )
+
         # Initialize result formatter
         self.result_formatter = LegacyResultFormatter(
-            legacy_compatible=self.config.result_format_legacy_compatible
+            legacy_compatible=result_format_legacy_compatible
         )
-        
+
         # Integration statistics
         self.integration_stats = {
             'cte_executions': 0,
@@ -215,15 +175,17 @@ class WorkflowCTEIntegration:
             'total_defines_processed': 0,
             'average_performance_improvement': 0.0
         }
-        
+
         logger.info(f"Initialized CTE Workflow Integration for {dialect} dialect")
-        logger.info(f"CTE Pipeline: {'enabled' if self.config.enable_cte_pipeline else 'disabled'}")
-        logger.info(f"Legacy Fallback: {'enabled' if self.config.fallback_to_legacy else 'disabled'}")
+        logger.info("CTE Pipeline: always enabled")
+        logger.info("Legacy Fallback: disabled")
     
-    @property
-    def workflow_config(self) -> WorkflowConfig:
-        """Access to the workflow configuration."""
-        return self.config
+    # WorkflowConfig property removed - using simple parameters
+
+    def _get_debug_mode(self) -> bool:
+        """Get debug mode from environment."""
+        import os
+        return os.getenv('FHIR4DS_DEBUG', '').lower() in ('true', '1', 'yes', 'on')
     
     def execute_cql_library(self, 
                            library_content: str,
@@ -250,13 +212,13 @@ class WorkflowCTEIntegration:
         define_count = self._estimate_define_count(library_content)
         
         # Determine execution strategy
-        use_cte = self.config.should_use_cte_pipeline(define_count)
+        use_cte = True  # Always use CTE pipeline
         
         if use_cte and self.cte_engine is not None:
             return self._execute_with_cte_pipeline(
                 library_content, library_id, execution_context
             )
-        elif self.legacy_executor and self.config.fallback_to_legacy:
+        elif self.legacy_executor:  # Legacy fallback disabled but keep for compatibility
             return self._execute_with_legacy_fallback(
                 library_content, library_id, execution_context
             )
@@ -298,7 +260,7 @@ class WorkflowCTEIntegration:
             logger.error(f"CTE pipeline execution failed for {library_id}: {str(e)}")
             
             # Attempt legacy fallback if configured
-            if self.config.fallback_to_legacy and self.legacy_executor:
+            if self.legacy_executor:  # Legacy fallback disabled
                 logger.info(f"Falling back to legacy execution for {library_id}")
                 return self._execute_with_legacy_fallback(
                     library_content, library_id, execution_context
@@ -346,7 +308,7 @@ class WorkflowCTEIntegration:
             library_version=workflow_context.get('library_version', '1.0'),
             patient_population=workflow_context.get('patient_population'),
             terminology_client=workflow_context.get('terminology_client', self.terminology_client),
-            debug_mode=workflow_context.get('debug_mode', self.config.debug_mode),
+            debug_mode=workflow_context.get('debug_mode', self._get_debug_mode()),
             performance_tracking=True
         )
     
@@ -379,9 +341,9 @@ class WorkflowCTEIntegration:
             'cte_usage_percentage': round(cte_usage_percentage, 2),
             'fallback_rate': round(100 - cte_usage_percentage, 2),
             'config_summary': {
-                'cte_enabled': self.config.enable_cte_pipeline,
-                'legacy_fallback': self.config.fallback_to_legacy,
-                'max_defines_limit': self.config.max_defines_for_cte
+                'cte_enabled': True,
+                'legacy_fallback': False,
+                'max_defines_limit': 'unlimited'
             }
         })
         
@@ -423,7 +385,7 @@ class WorkflowCTEIntegration:
         Returns:
             Performance comparison results
         """
-        if not self.config.performance_comparison:
+        if not self.performance_comparison:
             raise RuntimeError("Performance comparison not enabled in config")
         
         if not self.legacy_executor:

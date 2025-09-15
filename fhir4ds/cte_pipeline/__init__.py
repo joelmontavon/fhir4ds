@@ -28,10 +28,9 @@ from .core.cte_pipeline_engine import CTEPipelineEngine, ExecutionContext, Execu
 from .core.cte_fragment import CTEFragment
 from .core.cql_to_cte_converter import CQLToCTEConverter
 from .builders.cte_query_builder import CTEQueryBuilder, CompiledCTEQuery
-from .config import get_cte_config, should_use_cte_for_library, is_cte_enabled
+# Config module removed - CTE pipeline always enabled
 from .integration.workflow_integration import (
-    WorkflowCTEIntegration, 
-    WorkflowConfig, 
+    WorkflowCTEIntegration,
     LegacyResultFormatter,
     create_workflow_integration
 )
@@ -48,14 +47,10 @@ __all__ = [
     'CTEQueryBuilder',
     'CompiledCTEQuery',
     
-    # Always-On Configuration
-    'get_cte_config',
-    'should_use_cte_for_library',
-    'is_cte_enabled',
+    # Configuration removed - CTE always enabled
     
     # Workflow Integration (Always-On by Default)
     'WorkflowCTEIntegration',
-    'WorkflowConfig',
     'LegacyResultFormatter',
     'create_workflow_integration'
 ]

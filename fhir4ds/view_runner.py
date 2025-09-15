@@ -63,16 +63,13 @@ class ViewRunner:
     SQL-on-FHIR v2.0 specification compliance.
     """
     
-    def __init__(self, datastore, enable_enhanced_sql_generation: bool = True, 
-                 enable_pipeline: bool = False, pipeline_mode: str = 'gradual'):
+    def __init__(self, datastore, enable_enhanced_sql_generation: bool = True):
         """
         Initialize SQL on FHIR View Runner.
-        
+
         Args:
             datastore: FHIRDataStore instance (required)
             enable_enhanced_sql_generation: Enable enhanced SQL generation features
-            enable_pipeline: Enable new pipeline architecture for FHIRPath processing
-            pipeline_mode: Pipeline migration mode ('gradual', 'pipeline_only', 'ast_only')
         """
         if datastore is None:
             raise ValueError("datastore parameter is required")
@@ -85,8 +82,6 @@ class ViewRunner:
         self.dialect = datastore.dialect
             
         self.enable_enhanced_sql_generation = enable_enhanced_sql_generation
-        self.enable_pipeline = enable_pipeline
-        self.pipeline_mode = pipeline_mode
         self.logger = get_logger(__name__)
         
         # Performance tracking
@@ -103,19 +98,14 @@ class ViewRunner:
         # Setup logging
         self.logger = logging.getLogger(__name__)
         
-        # Initialize pipeline components (always enabled now)
-        try:
-            self.pipeline_bridge = PipelineASTBridge()
-            self.pipeline_bridge.set_migration_mode('pipeline_only')  # Always use pipeline mode
-            
-            # Create pipeline-enabled FHIRPath processor
-            self.fhirpath_pipeline = FHIRPath(dialect=self.dialect, use_pipeline=True)
-            self.fhirpath_pipeline.set_pipeline_mode('pipeline_only')  # Always use pipeline mode
-            
-            self.logger.info("Pipeline architecture enabled (legacy SQL generator removed)")
-        except ImportError as e:
-            self.logger.error(f"Pipeline architecture required but not available: {e}")
-            raise RuntimeError("Pipeline system is required - legacy SQLGenerator has been removed")
+        # CTE-only architecture - no migration mode needed
+        self.pipeline_bridge = PipelineASTBridge()
+
+        # Create pipeline-enabled FHIRPath processor
+        self.fhirpath_pipeline = FHIRPath(dialect=self.dialect, use_pipeline=True)
+        # CTE-only architecture - no pipeline mode setting needed
+
+        self.logger.info("Pipeline architecture enabled (legacy SQL generator removed)")
     
     # Dialect-aware helper methods for JSON operations
     def json_extract_string(self, column: str, path: str) -> str:
@@ -544,8 +534,8 @@ class ViewRunner:
             # Raise exception for validation errors
             raise ValueError("ViewDefinition validation failed: Invalid forEach paths")
         
-        # Try pipeline processing first if enabled
-        if self.enable_pipeline and self.pipeline_bridge:
+        # Use pipeline processing (CTE-only architecture)
+        if self.pipeline_bridge:
             try:
                 sql = self._generate_pipeline_sql(view_def)
                 self.execution_stats['pipeline_executions'] += 1

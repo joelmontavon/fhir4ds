@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from .measure_report_config import MeasureReportConfig
 from ...datastore import FHIRDataStore
 # CTE Pipeline imports for monolithic execution
-from ...cte_pipeline.integration.workflow_integration import WorkflowCTEIntegration, WorkflowConfig
+from ...cte_pipeline.integration.workflow_integration import WorkflowCTEIntegration
 from ...cte_pipeline.core.cte_pipeline_engine import ExecutionContext
 
 logger = logging.getLogger(__name__)
@@ -58,10 +58,6 @@ class CQLWorkflowEngine:
         self.parameters_handler = ParametersHandler()
         
         # Initialize CTE Pipeline Integration for monolithic execution
-        workflow_config = WorkflowConfig(
-            performance_comparison=True,
-            result_format_legacy_compatible=True
-        )
         
         # Get database connection for CTE pipeline
         database_connection = self.datastore.dialect.get_connection()
@@ -69,7 +65,8 @@ class CQLWorkflowEngine:
         self.cte_integration = WorkflowCTEIntegration(
             dialect=dialect,
             database_connection=database_connection,
-            workflow_config=workflow_config,
+            performance_comparison=True,
+            result_format_legacy_compatible=True,
             terminology_client=None
         )
         
