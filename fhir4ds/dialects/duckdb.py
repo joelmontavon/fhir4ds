@@ -1700,7 +1700,7 @@ class DuckDBDialect(DatabaseDialect):
 
     def generate_percentile_calculation(self, expression: str, percentile: float) -> str:
         """Generate SQL for percentile calculation using DuckDB syntax."""
-        return f"PERCENTILE_CONT({percentile}) WITHIN GROUP (ORDER BY {expression}) OVER ()"
+        return f"QUANTILE_CONT({expression}, {percentile})"
 
     def generate_date_difference_years(self, start_date: str, end_date: str = "CURRENT_DATE") -> str:
         """Generate SQL for date difference in years using DuckDB syntax."""
@@ -1795,3 +1795,168 @@ class DuckDBDialect(DatabaseDialect):
                     {self.normalize_terminology_system("json_extract_string(resource_coding.value, '$.system')")}
             )
         )"""
+
+    # CQL Function Dialect Abstraction Methods - DuckDB Implementation
+
+    def generate_math_function(self, function_name: str, *args: str) -> str:
+        """DuckDB-specific mathematical function SQL generation."""
+        func_name = function_name.lower()
+
+        if func_name == 'power':
+            return f"POW({', '.join(args)})"
+        elif func_name in ['sqrt', 'ln', 'exp', 'log']:
+            return f"{func_name.upper()}({', '.join(args)})"
+        elif func_name == 'log10':
+            return f"LOG10({', '.join(args)})"
+        elif func_name == 'ceiling':
+            return f"CEIL({', '.join(args)})"
+        elif func_name == 'floor':
+            return f"FLOOR({', '.join(args)})"
+        elif func_name == 'round':
+            return f"ROUND({', '.join(args)})"
+        elif func_name == 'abs':
+            return f"ABS({', '.join(args)})"
+        else:
+            return f"{func_name.upper()}({', '.join(args)})"
+
+    def generate_date_diff(self, unit: str, start_date: str, end_date: str) -> str:
+        """DuckDB date difference using DATE_DIFF function."""
+        return f"DATE_DIFF('{unit}', {start_date}, {end_date})"
+
+    def generate_current_timestamp(self) -> str:
+        """DuckDB current timestamp."""
+        return "CURRENT_TIMESTAMP"
+
+    def generate_current_date(self) -> str:
+        """DuckDB current date."""
+        return "CURRENT_DATE"
+
+    def generate_regex_match(self, text_expr: str, pattern: str) -> str:
+        """DuckDB regex matching using REGEXP."""
+        return f"{text_expr} REGEXP '{pattern}'"
+
+    def generate_json_array_elements(self, json_expr: str) -> str:
+        """DuckDB JSON array elements extraction using json_each."""
+        return f"""(
+            SELECT json_array_agg(value)
+            FROM json_each({json_expr})
+        )"""
+
+    def generate_standard_type_cast(self, expression: str, target_type: str) -> str:
+        """DuckDB type casting with proper type names."""
+        type_mapping = {
+            'double_precision': 'DOUBLE',
+            'double': 'DOUBLE',
+            'bigint': 'BIGINT',
+            'integer': 'INTEGER',
+            'int': 'INTEGER',
+            'boolean': 'BOOLEAN',
+            'varchar': 'VARCHAR',
+            'text': 'VARCHAR'
+        }
+        db_type = type_mapping.get(target_type.lower(), target_type.upper())
+        return f"CAST({expression} AS {db_type})"
+
+    def generate_aggregate_function(self, function_name: str, expression: str,
+                                  filter_condition: str = None, distinct: bool = False) -> str:
+        """DuckDB aggregate function SQL generation."""
+        func_name = function_name.upper()
+
+        # Handle DuckDB-specific function name mappings
+        func_map = {
+            'VARIANCE': 'VAR_SAMP'
+        }
+        actual_func = func_map.get(func_name, func_name)
+
+        # Handle DISTINCT
+        expr = f"DISTINCT {expression}" if distinct else expression
+
+        # Generate function call
+        if actual_func in ['STDDEV', 'VAR_SAMP', 'AVG', 'SUM', 'COUNT', 'MIN', 'MAX']:
+            sql = f"{actual_func}({expr})"
+        else:
+            sql = f"{actual_func}({expr})"
+
+        # Add filter condition if provided
+        if filter_condition:
+            sql = f"{sql} FILTER (WHERE {filter_condition})"
+
+        return sql
+
+    def generate_interval_arithmetic(self, date_expr: str, interval_expr: str, operation: str = 'add') -> str:
+        """DuckDB interval arithmetic using INTERVAL syntax."""
+        if operation.lower() == 'add':
+            return f"({date_expr} + INTERVAL {interval_expr})"
+        elif operation.lower() == 'subtract':
+            return f"({date_expr} - INTERVAL {interval_expr})"
+        else:
+            raise ValueError(f"Unsupported interval operation: {operation}")
+
+    def generate_boolean_conversion(self, expression: str) -> str:
+        """DuckDB boolean conversion handling."""
+        return f"""CASE
+            WHEN LOWER(TRIM({expression})) IN ('true', 't', '1') THEN true
+            WHEN LOWER(TRIM({expression})) IN ('false', 'f', '0') THEN false
+            WHEN {expression} IS NULL OR TRIM({expression}) = '' THEN NULL
+            ELSE NULL
+        END"""
+
+    def generate_json_aggregate_function(self, function_name: str, json_expr: str,
+                                        cast_type: str = None) -> str:
+        """DuckDB aggregate function on JSON array elements."""
+        cast_type = cast_type or 'DOUBLE'
+
+        # Handle DuckDB-specific function names
+        func_map = {
+            'variance': 'VAR_SAMP',
+            'stddev': 'STDDEV'
+        }
+        actual_func = func_map.get(function_name.lower(), function_name.upper())
+
+        return f"""(
+    SELECT {actual_func}(CAST(value AS {cast_type}))
+    FROM (
+        SELECT json_extract(json_array_elements({json_expr}), '$') AS value
+    ) subq
+    WHERE value IS NOT NULL AND value != 'null'
+    AND value REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
+)"""
+
+    def generate_percentile_function(self, json_expr: str, percentile_fraction: str,
+                                   cast_type: str = None) -> str:
+        """DuckDB percentile function on JSON array."""
+        cast_type = cast_type or 'DOUBLE'
+
+        return f"""(
+    SELECT QUANTILE_CONT(CAST(value AS {cast_type}), {percentile_fraction})
+    FROM (
+        SELECT json_extract(json_array_elements({json_expr}), '$') AS value
+    ) subq
+    WHERE value IS NOT NULL AND value != 'null'
+    AND value REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
+)"""
+
+    def generate_json_array_elements(self, json_expr: str) -> str:
+        """DuckDB JSON array elements extraction."""
+        return f"json_each({json_expr}) AS elem"
+
+    def generate_json_object_creation(self, key_value_pairs: List[str]) -> str:
+        """DuckDB JSON object creation."""
+        pairs = []
+        for i in range(0, len(key_value_pairs), 2):
+            key = key_value_pairs[i]
+            value = key_value_pairs[i + 1] if i + 1 < len(key_value_pairs) else 'NULL'
+            pairs.append(f"{key}: {value}")
+        return f"{{{', '.join(pairs)}}}"
+
+    def generate_json_array_creation(self, elements: List[str]) -> str:
+        """DuckDB JSON array creation."""
+        return f"[{', '.join(elements)}]"
+
+    def generate_json_object_extraction(self, json_expr: str, path: str) -> str:
+        """DuckDB JSON object field extraction."""
+        return f"json_extract({json_expr}, '{path}')"
+
+    def generate_json_array_aggregation(self, expr: str) -> str:
+        """DuckDB JSON array aggregation."""
+        return f"json_group_array({expr})"

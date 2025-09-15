@@ -1907,7 +1907,7 @@ class PostgreSQLDialect(DatabaseDialect):
 
     def generate_percentile_calculation(self, expression: str, percentile: float) -> str:
         """Generate SQL for percentile calculation using PostgreSQL syntax."""
-        return f"PERCENTILE_CONT({percentile}) WITHIN GROUP (ORDER BY {expression}) OVER ()"
+        return f"PERCENTILE_CONT({percentile}) WITHIN GROUP (ORDER BY {expression})"
 
     def generate_date_difference_years(self, start_date: str, end_date: str = "CURRENT_DATE") -> str:
         """Generate SQL for date difference in years using PostgreSQL syntax."""
@@ -2002,3 +2002,152 @@ class PostgreSQLDialect(DatabaseDialect):
                     {self.normalize_terminology_system("resource_coding ->> 'system'")}
             )
         )"""
+
+    # CQL Function Dialect Abstraction Methods - PostgreSQL Implementation
+
+    def generate_math_function(self, function_name: str, *args: str) -> str:
+        """PostgreSQL-specific mathematical function SQL generation."""
+        func_name = function_name.lower()
+
+        if func_name == 'power':
+            return f"POWER({', '.join(args)})"
+        elif func_name in ['sqrt', 'ln', 'exp', 'log']:
+            return f"{func_name.upper()}({', '.join(args)})"
+        elif func_name == 'log10':
+            return f"LOG({', '.join(args)})"  # PostgreSQL uses LOG for base 10
+        elif func_name == 'ceiling':
+            return f"CEIL({', '.join(args)})"
+        elif func_name == 'floor':
+            return f"FLOOR({', '.join(args)})"
+        elif func_name == 'round':
+            return f"ROUND({', '.join(args)})"
+        elif func_name == 'abs':
+            return f"ABS({', '.join(args)})"
+        else:
+            return f"{func_name.upper()}({', '.join(args)})"
+
+    def generate_date_diff(self, unit: str, start_date: str, end_date: str) -> str:
+        """PostgreSQL date difference using EXTRACT and AGE functions."""
+        unit_map = {
+            'year': f"EXTRACT(YEAR FROM AGE({end_date}, {start_date}))",
+            'month': f"(EXTRACT(YEAR FROM AGE({end_date}, {start_date})) * 12 + EXTRACT(MONTH FROM AGE({end_date}, {start_date})))",
+            'day': f"EXTRACT(DAY FROM ({end_date} - {start_date}))",
+            'hour': f"EXTRACT(EPOCH FROM ({end_date} - {start_date})) / 3600",
+            'minute': f"EXTRACT(EPOCH FROM ({end_date} - {start_date})) / 60",
+            'second': f"EXTRACT(EPOCH FROM ({end_date} - {start_date}))"
+        }
+        return unit_map.get(unit.lower(), f"EXTRACT(DAY FROM ({end_date} - {start_date}))")
+
+    def generate_current_timestamp(self) -> str:
+        """PostgreSQL current timestamp."""
+        return "CURRENT_TIMESTAMP"
+
+    def generate_current_date(self) -> str:
+        """PostgreSQL current date."""
+        return "CURRENT_DATE"
+
+    def generate_regex_match(self, text_expr: str, pattern: str) -> str:
+        """PostgreSQL regex matching using ~ operator."""
+        return f"{text_expr} ~ '{pattern}'"
+
+
+    def generate_standard_type_cast(self, expression: str, target_type: str) -> str:
+        """PostgreSQL type casting with proper type names."""
+        type_mapping = {
+            'double_precision': 'DOUBLE PRECISION',
+            'double': 'DOUBLE PRECISION',
+            'bigint': 'BIGINT',
+            'integer': 'INTEGER',
+            'int': 'INTEGER',
+            'boolean': 'BOOLEAN',
+            'varchar': 'VARCHAR',
+            'text': 'TEXT'
+        }
+        db_type = type_mapping.get(target_type.lower(), target_type.upper())
+        return f"CAST({expression} AS {db_type})"
+
+    def generate_aggregate_function(self, function_name: str, expression: str,
+                                  filter_condition: str = None, distinct: bool = False) -> str:
+        """PostgreSQL aggregate function SQL generation."""
+        func_name = function_name.upper()
+
+        # Handle DISTINCT
+        expr = f"DISTINCT {expression}" if distinct else expression
+
+        # Generate function call
+        if func_name in ['STDDEV', 'VARIANCE', 'AVG', 'SUM', 'COUNT', 'MIN', 'MAX']:
+            sql = f"{func_name}({expr})"
+        else:
+            sql = f"{func_name}({expr})"
+
+        # Add filter condition if provided
+        if filter_condition:
+            sql = f"{sql} FILTER (WHERE {filter_condition})"
+
+        return sql
+
+    def generate_interval_arithmetic(self, date_expr: str, interval_expr: str, operation: str = 'add') -> str:
+        """PostgreSQL interval arithmetic using INTERVAL syntax."""
+        if operation.lower() == 'add':
+            return f"({date_expr} + INTERVAL '{interval_expr}')"
+        elif operation.lower() == 'subtract':
+            return f"({date_expr} - INTERVAL '{interval_expr}')"
+        else:
+            raise ValueError(f"Unsupported interval operation: {operation}")
+
+    def generate_boolean_conversion(self, expression: str) -> str:
+        """PostgreSQL boolean conversion handling."""
+        return f"""CASE
+            WHEN LOWER(TRIM({expression})) IN ('true', 't', '1') THEN true
+            WHEN LOWER(TRIM({expression})) IN ('false', 'f', '0') THEN false
+            WHEN {expression} IS NULL OR TRIM({expression}) = '' THEN NULL
+            ELSE NULL
+        END"""
+
+    def generate_json_aggregate_function(self, function_name: str, json_expr: str,
+                                        cast_type: str = None) -> str:
+        """PostgreSQL aggregate function on JSON array elements."""
+        cast_type = cast_type or 'DOUBLE PRECISION'
+
+        return f"""(
+    SELECT {function_name.upper()}(CAST(value AS {cast_type}))
+    FROM (
+        SELECT jsonb_array_elements_text({json_expr}) AS value
+    ) subq
+    WHERE value IS NOT NULL AND value != 'null'
+    AND value ~ '^-?[0-9]+(\\.[0-9]+)?$'
+)"""
+
+    def generate_percentile_function(self, json_expr: str, percentile_fraction: str,
+                                   cast_type: str = None) -> str:
+        """PostgreSQL percentile function on JSON array."""
+        cast_type = cast_type or 'DOUBLE PRECISION'
+
+        return f"""(
+    SELECT PERCENTILE_CONT({percentile_fraction}) WITHIN GROUP (ORDER BY CAST(value AS {cast_type}))
+    FROM (
+        SELECT jsonb_array_elements_text({json_expr}) AS value
+    ) subq
+    WHERE value IS NOT NULL AND value != 'null'
+    AND value ~ '^-?[0-9]+(\\.[0-9]+)?$'
+)"""
+
+    def generate_json_array_elements(self, json_expr: str) -> str:
+        """PostgreSQL JSON array elements extraction."""
+        return f"jsonb_array_elements_text({json_expr}) WITH ORDINALITY AS elem(value, key)"
+
+    def generate_json_object_creation(self, key_value_pairs: List[str]) -> str:
+        """PostgreSQL JSON object creation."""
+        return f"jsonb_build_object({', '.join(key_value_pairs)})"
+
+    def generate_json_array_creation(self, elements: List[str]) -> str:
+        """PostgreSQL JSON array creation."""
+        return f"jsonb_build_array({', '.join(elements)})"
+
+    def generate_json_object_extraction(self, json_expr: str, path: str) -> str:
+        """PostgreSQL JSON object field extraction."""
+        return f"{json_expr} -> '{path}'"
+
+    def generate_json_array_aggregation(self, expr: str) -> str:
+        """PostgreSQL JSON array aggregation."""
+        return f"jsonb_agg({expr})"
