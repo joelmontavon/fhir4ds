@@ -4,12 +4,12 @@ Production-ready healthcare analytics platform providing 100% SQL-on-FHIR v2.0 c
 
 **Current Version**: 0.7.0  
 **FHIRPath Coverage**: 100% (91/91 functions implemented)
-**SQL-on-FHIR Compliance**: 100% (117/117 tests passing)
+**SQL-on-FHIR Compliance**: 100% (129/129 tests passing)
 **Database Support**: DuckDB 100% + PostgreSQL 100%  
 
 ## Key Features
 
-- **100% SQL-on-FHIR v2.0 compliance** - All 117 official tests passing
+- **100% SQL-on-FHIR v2.0 compliance** - All 129 official tests passing
 - **100% FHIRPath specification coverage** - All 91 functions implemented
 - **Dual database support** - DuckDB and PostgreSQL with identical functionality
 - **Advanced FHIRPath parsing** - Complete parser with 187 choice type mappings
@@ -37,6 +37,7 @@ db = QuickConnect.postgresql("postgresql://user:pass@host:5432/db")
 
 # Auto-detect from connection string
 db = QuickConnect.auto("./local.db")  # → DuckDB
+# Note: Use file paths for auto-detection, not :memory:
 ```
 
 ### Load Data
@@ -101,7 +102,7 @@ from fhir4ds.cql.measures.quality import QualityMeasureEngine
 from fhir4ds.dialects import DuckDBDialect
 
 # Initialize CQL engine (defaults to population-first processing)
-cql_engine = CQLEngine(dialect=DuckDBDialect())
+cql_engine = CQLEngine(dialect="duckdb")
 
 # Simple CQL expression evaluation
 sql = cql_engine.evaluate_expression("Patient.name.family")
@@ -131,7 +132,7 @@ python tests/run_tests.py --dialect duckdb
 python tests/run_tests.py --dialect postgresql
 ```
 
-Test results: 117/117 tests passing on both DuckDB and PostgreSQL.
+Test results: 129/129 tests passing on both DuckDB and PostgreSQL (100% success rate).
 
 ## License
 

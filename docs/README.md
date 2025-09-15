@@ -379,7 +379,7 @@ FHIR4DS includes comprehensive **Clinical Quality Language (CQL)** support with 
 ```python
 from fhir4ds.cql.core.engine import CQLEngine
 
-# Initialize CQL engine  
+# Initialize CQL engine
 engine = CQLEngine(dialect="duckdb", initial_context="Population")
 
 # Basic CQL expressions
@@ -662,10 +662,10 @@ except Exception as e:
 
 ### Run Official Tests
 ```bash
-# SQL-on-FHIR v2.0 compliance tests (117 tests)
+# SQL-on-FHIR v2.0 compliance tests (129 tests)
 uv run python tests/run_tests.py --test-dir tests/official
 
-# Expected: 117/117 tests passing
+# Expected: 129/129 tests passing
 ```
 
 ### Dual Dialect Testing
@@ -689,7 +689,7 @@ uv run python tests/run_tests_for_all_dialects.py
 FHIR4DS provides comprehensive healthcare analytics standards compliance:
 
 ### SQL-on-FHIR v2.0 Compliance
-- ✅ **117/117 official tests passing** (100% compliance)
+- ✅ **129/129 official tests passing** (100% compliance)
 - ✅ **100% FHIRPath specification coverage** (91/91 functions implemented)
 - ✅ **Dual database compatibility** (DuckDB + PostgreSQL)
 - ✅ **Production-ready performance** with enterprise features

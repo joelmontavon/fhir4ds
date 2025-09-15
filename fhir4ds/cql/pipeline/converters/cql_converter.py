@@ -11,9 +11,9 @@ from typing import Dict, Any, Optional, Union, List, Tuple
 from dataclasses import dataclass
 
 from ...core.parser import (
-    CQLASTNode, LibraryNode, DefineNode, RetrieveNode, QueryNode, 
-    ContextNode, ParameterNode, IncludeNode, WithClauseNode, 
-    SortClauseNode, LetClauseNode
+    CQLASTNode, LibraryNode, DefineNode, RetrieveNode, QueryNode,
+    ContextNode, ParameterNode, IncludeNode, WithClauseNode,
+    SortClauseNode, LetClauseNode, IntervalLiteralNode
 )
 from ....fhirpath.parser.ast_nodes import ASTNode, IdentifierNode, FunctionCallNode, PathNode
 from ....pipeline.core.base import PipelineOperation, SQLState, ExecutionContext
@@ -83,6 +83,7 @@ class CQLToPipelineConverter:
             ContextNode: self._convert_context,
             ParameterNode: self._convert_parameter,
             IncludeNode: self._convert_include,
+            IntervalLiteralNode: self._convert_interval_literal,
         }
     
     def convert(self, cql_ast: Union[CQLASTNode, ASTNode]) -> Union[PipelineOperation, FHIRPathPipeline]:
@@ -626,7 +627,36 @@ class CQLToPipelineConverter:
                 source_pipeline=source_operation,
                 return_expression="resource"
             )
-    
+
+    def _convert_interval_literal(self, interval: IntervalLiteralNode) -> FHIRPathPipeline:
+        """
+        Convert CQL interval literal to FHIRPath pipeline.
+
+        Args:
+            interval: IntervalLiteralNode to convert
+
+        Returns:
+            FHIRPath pipeline with interval literal operation
+        """
+        logger.debug(f"Converting interval literal: {interval}")
+
+        from ....pipeline.operations.literals import LiteralOperation
+        from ....pipeline.core.builder import FHIRPathPipeline
+
+        # Format the interval as a string representation for SQL generation
+        start_bracket = '[' if interval.start_inclusive else '('
+        end_bracket = ']' if interval.end_inclusive else ')'
+        interval_value = f"Interval{start_bracket}{interval.start_value}, {interval.end_value}{end_bracket}"
+
+        # Create a literal operation for the interval
+        literal_op = LiteralOperation(value=interval_value, value_type='value')
+
+        # Create and return FHIRPath pipeline with the literal operation
+        pipeline = FHIRPathPipeline(operations=[literal_op])
+
+        logger.debug(f"Created interval literal pipeline: {interval_value}")
+        return pipeline
+
     def reset_context(self):
         """Reset conversion context."""
         self.context = ConversionContext()

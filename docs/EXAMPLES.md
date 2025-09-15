@@ -1,36 +1,32 @@
-# SQL-on-FHIR View Runner Examples
+# FHIR4DS Examples
 
-This document provides comprehensive examples of using the SQL-on-FHIR View Runner library.
+This document provides comprehensive examples of using FHIR4DS for healthcare analytics with 100% SQL-on-FHIR v2.0 compliance.
 
 ## Basic Setup
 
 ```python
-import duckdb
 import json
-from sql_on_fhir import SQLOnFHIRViewRunner
+from fhir4ds.datastore import QuickConnect
 
-# Initialize runner with in-memory database
-runner = SQLOnFHIRViewRunner()
+# Initialize with DuckDB (recommended for analytics)
+db = QuickConnect.duckdb("healthcare_analytics.db")
 
-# Or use existing DuckDB connection
-conn = duckdb.connect("fhir_data.db")
-runner = SQLOnFHIRViewRunner(connection=conn)
+# Or use in-memory for testing
+db = QuickConnect.duckdb(":memory:")
+
+# Or use PostgreSQL for production
+db = QuickConnect.postgresql("postgresql://user:pass@localhost:5432/fhir_db")
 ```
 
 ## Sample Data Setup
 
 ```python
-def setup_sample_data(runner):
-    """Create sample FHIR data for examples"""
-    
-    # Create table
-    runner.connection.execute("""
-        CREATE OR REPLACE TABLE fhir_resources (
-            id STRING,
-            resource JSON
-        )
-    """)
-    
+def setup_sample_data(db):
+    """Load sample FHIR data for examples"""
+
+    # FHIR tables are automatically created by QuickConnect
+    # Just load the resources using the high-level API
+
     # Sample patients
     patients = [
         {
@@ -92,22 +88,16 @@ def setup_sample_data(runner):
             }]
         }
     ]
-    
-    # Insert sample data
-    for patient in patients:
-        runner.connection.execute(
-            "INSERT INTO fhir_resources VALUES (?, ?)",
-            [patient['id'], json.dumps(patient)]
-        )
-    
-    for org in organizations:
-        runner.connection.execute(
-            "INSERT INTO fhir_resources VALUES (?, ?)",
-            [org['id'], json.dumps(org)]
-        )
+
+    # Load all resources using high-performance API
+    all_resources = patients + organizations
+    db.load_resources(all_resources, parallel=True)
+
+    print(f"✅ Loaded {len(all_resources)} FHIR resources")
+    return db
 
 # Setup data for examples
-setup_sample_data(runner)
+db = setup_sample_data(db)
 ```
 
 ## Example 1: Basic Patient Demographics
@@ -148,10 +138,14 @@ patient_demographics = {
     }]
 }
 
-results = runner.execute_view_definition(patient_demographics)
+# Execute as DataFrame (recommended)
+df = db.execute_to_dataframe(patient_demographics)
 print("Patient Demographics:")
-for row in results.fetchall():
-    print(f"  {row}")
+print(df)
+
+# Or execute as JSON
+json_results = db.execute_to_json(patient_demographics)
+print(f"Retrieved {len(json_results)} patients")
 ```
 
 ## Example 2: Using WHERE Clauses
@@ -180,10 +174,10 @@ active_patients = {
     }]
 }
 
-results = runner.execute_view_definition(active_patients)
+# Execute with modern API
+df_active = db.execute_to_dataframe(active_patients)
 print("\\nActive Patients:")
-for row in results.fetchall():
-    print(f"  {row}")
+print(df_active)
 ```
 
 ## Example 3: Collection Handling
