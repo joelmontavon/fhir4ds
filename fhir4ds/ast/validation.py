@@ -13,7 +13,9 @@ from fhir4ds.ast.nodes import (
     BinaryOperation,
     UnaryOperation,
     FunctionCall,
-    PathExpression,
+    InvocationExpression,
+    MemberAccess,
+    Indexer,
     Operator,
 )
 
@@ -72,5 +74,11 @@ class SemanticValidator(ASTVisitor[None]):
     def visit_function_call(self, node: FunctionCall) -> None:
         self._visit_children(node)
 
-    def visit_path_expression(self, node: PathExpression) -> None:
+    def visit_invocation_expression(self, node: InvocationExpression) -> None:
+        self._visit_children(node)
+
+    def visit_member_access(self, node: MemberAccess) -> None:
+        self._visit_children(node)
+
+    def visit_indexer(self, node: Indexer) -> None:
         self._visit_children(node)

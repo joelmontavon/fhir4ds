@@ -1,34 +1,29 @@
-# fhir4ds.parser
+# FHIR4DS Parser Package
 
 """
 FHIRPath Parser
 ---------------
 
 This package contains the complete FHIRPath parsing system, including
-lexer for tokenization and parser for generating Abstract Syntax Trees (AST).
+unified lexer for tokenization and advanced parser for generating
+Abstract Syntax Trees (AST) with complete grammar support.
 
 The parser is a key component of the FHIR4DS library, enabling the
 interpretation and execution of FHIRPath expressions.
 
-Modules:
-- lexer: FHIRPath tokenization and lexical analysis.
-- tokens: Token type definitions and data structures.
-- fhirpath_parser: The main parser implementation.
-- exceptions: Custom exceptions for parsing and lexing errors.
-- precedence: Operator precedence and associativity rules.
+Components:
+- lexer: Unified lexer with comprehensive token support
+- parser: Advanced parser with complete FHIRPath grammar
 """
 
-from .lexer import FHIRPathLexer
-from .tokens import Token, TokenType, SourceLocation
-from .fhirpath_parser import FHIRPathParser
-from .exceptions import ParseError, LexerError
+from .lexer import Lexer, Token, TokenType, SourceLocation, LexerError
+from .parser import Parser
 
 __all__ = [
-    "FHIRPathLexer",
+    "Lexer",
+    "Parser",
     "Token",
     "TokenType",
     "SourceLocation",
-    "FHIRPathParser",
-    "ParseError",
     "LexerError",
 ]
