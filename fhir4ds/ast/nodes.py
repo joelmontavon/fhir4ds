@@ -331,21 +331,80 @@ class FunctionCall(Expression):
 
 
 @dataclass(frozen=True)
-class PathExpression(Expression):
+class InvocationExpression(Expression):
     """
-    Represents a path expression, which is a sequence of connected nodes.
+    Represents a function call on an expression, e.g., `Patient.children()`.
     """
-    path: List[FHIRPathNode]
+    expression: FHIRPathNode
+    name: Identifier
+    arguments: List[FHIRPathNode]
 
     def __eq__(self, other: Any) -> bool:
-        return isinstance(other, PathExpression) and self.path == other.path
+        return (
+            isinstance(other, InvocationExpression)
+            and self.expression == other.expression
+            and self.name == other.name
+            and self.arguments == other.arguments
+        )
 
     def __hash__(self) -> int:
-        return hash(tuple(self.path))
+        return hash((self.expression, self.name, tuple(self.arguments)))
 
     @property
     def children(self) -> List[FHIRPathNode]:
-        return self.path
+        return [self.expression, self.name] + self.arguments
 
     def accept(self, visitor: "ASTVisitor[T]") -> T:
-        return visitor.visit_path_expression(self)
+        return visitor.visit_invocation_expression(self)
+
+
+@dataclass(frozen=True)
+class MemberAccess(Expression):
+    """
+    Represents a member access on an expression, e.g., `Patient.name`.
+    """
+    expression: FHIRPathNode
+    member: Identifier
+
+    def __eq__(self, other: Any) -> bool:
+        return (
+            isinstance(other, MemberAccess)
+            and self.expression == other.expression
+            and self.member == other.member
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.expression, self.member))
+
+    @property
+    def children(self) -> List[FHIRPathNode]:
+        return [self.expression, self.member]
+
+    def accept(self, visitor: "ASTVisitor[T]") -> T:
+        return visitor.visit_member_access(self)
+
+
+@dataclass(frozen=True)
+class Indexer(Expression):
+    """
+    Represents an indexer operation on a collection, e.g., `Patient.name[0]`.
+    """
+    collection: FHIRPathNode
+    index: FHIRPathNode
+
+    def __eq__(self, other: Any) -> bool:
+        return (
+            isinstance(other, Indexer)
+            and self.collection == other.collection
+            and self.index == other.index
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.collection, self.index))
+
+    @property
+    def children(self) -> List[FHIRPathNode]:
+        return [self.collection, self.index]
+
+    def accept(self, visitor: "ASTVisitor[T]") -> T:
+        return visitor.visit_indexer(self)

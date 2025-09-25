@@ -15,7 +15,9 @@ from fhir4ds.ast.nodes import (
     BinaryOperation,
     UnaryOperation,
     FunctionCall,
-    PathExpression,
+    InvocationExpression,
+    MemberAccess,
+    Indexer,
 )
 
 T = TypeVar("T")
@@ -68,7 +70,13 @@ class ASTVisitor(Generic[T]):
     def visit_function_call(self, node: FunctionCall) -> T:
         raise NotImplementedError
 
-    def visit_path_expression(self, node: PathExpression) -> T:
+    def visit_invocation_expression(self, node: InvocationExpression) -> T:
+        raise NotImplementedError
+
+    def visit_member_access(self, node: MemberAccess) -> T:
+        raise NotImplementedError
+
+    def visit_indexer(self, node: Indexer) -> T:
         raise NotImplementedError
 
 
@@ -144,11 +152,35 @@ class ASTPrinter(ASTVisitor[str]):
         s += f"{self._make_indent()}]\n"
         return s
 
-    def visit_path_expression(self, node: PathExpression) -> str:
-        s = f"{self._make_indent()}PathExpression[\n"
+    def visit_invocation_expression(self, node: InvocationExpression) -> str:
+        s = f"{self._make_indent()}InvocationExpression(name={node.name.value})[\n"
         self._indent += 1
-        for part in node.path:
-            s += self.visit(part)
+        s += f"{self._make_indent()}EXPRESSION:\n"
+        s += self.visit(node.expression)
+        if node.arguments:
+            s += f"{self._make_indent()}ARGUMENTS:\n"
+            for arg in node.arguments:
+                s += self.visit(arg)
+        self._indent -= 1
+        s += f"{self._make_indent()}]\n"
+        return s
+
+    def visit_member_access(self, node: MemberAccess) -> str:
+        s = f"{self._make_indent()}MemberAccess(member={node.member.value})[\n"
+        self._indent += 1
+        s += f"{self._make_indent()}EXPRESSION:\n"
+        s += self.visit(node.expression)
+        self._indent -= 1
+        s += f"{self._make_indent()}]\n"
+        return s
+
+    def visit_indexer(self, node: Indexer) -> str:
+        s = f"{self._make_indent()}Indexer[\n"
+        self._indent += 1
+        s += f"{self._make_indent()}COLLECTION:\n"
+        s += self.visit(node.collection)
+        s += f"{self._make_indent()}INDEX:\n"
+        s += self.visit(node.index)
         self._indent -= 1
         s += f"{self._make_indent()}]\n"
         return s
