@@ -1,7 +1,7 @@
 # fhir4ds.parser.exceptions
 
 """
-Custom exceptions for the FHIRPath parser.
+Custom exceptions for the FHIRPath parser and lexer.
 """
 
 class ParseError(Exception):
@@ -23,3 +23,17 @@ class ParseError(Exception):
         if self.line is not None and self.column is not None:
             return f"ParseError at line {self.line}, column {self.column}: {self.message}"
         return f"ParseError: {self.message}"
+
+
+class LexerError(Exception):
+    """
+    Raised when the lexer encounters an error while tokenizing a FHIRPath expression.
+
+    Attributes:
+        message: The error message.
+        location: The source location where the error occurred.
+    """
+    def __init__(self, message: str, location):
+        self.message = message
+        self.location = location
+        super().__init__(f"Lexer error at line {location.line}, column {location.column}: {message}")
