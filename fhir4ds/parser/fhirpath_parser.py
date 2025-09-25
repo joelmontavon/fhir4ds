@@ -8,8 +8,8 @@ This module contains the core FHIRPath parser. It takes a stream of tokens
 from the lexer and builds an Abstract Syntax Tree (AST).
 """
 
-from collections import namedtuple
-from typing import List
+from dataclasses import dataclass
+from typing import List, Any
 
 from fhir4ds.ast.nodes import (
     Identifier, StringLiteral, NumberLiteral, BooleanLiteral,
@@ -22,8 +22,13 @@ from .exceptions import ParseError
 from .precedence import PRECEDENCE, ASSOCIATIVITY
 
 
-# Placeholder for the Token class that will be provided by the lexer.
-Token = namedtuple('Token', ['type', 'value', 'line', 'column'])
+@dataclass(frozen=True)
+class Token:
+    """Represents a token from the lexer."""
+    type: str
+    value: Any
+    line: int
+    column: int
 
 
 class FHIRPathParser:
@@ -173,7 +178,7 @@ class FHIRPathParser:
 
         if token.type == 'STRING_LITERAL':
             return StringLiteral(value=token.value, source_location=loc, metadata=meta)
-        if token.type == 'NUMBER_LITERAL':
+        if token.type in ('NUMBER_LITERAL', 'INTEGER_LITERAL', 'DECIMAL_LITERAL'):
             return NumberLiteral(value=float(token.value), source_location=loc, metadata=meta)
         if token.type == 'BOOLEAN_LITERAL':
             return BooleanLiteral(value=(token.value.lower() == 'true'), source_location=loc, metadata=meta)
