@@ -14,10 +14,12 @@ interpretation and execution of FHIRPath expressions.
 Components:
 - lexer: Unified lexer with comprehensive token support
 - parser: Advanced parser with complete FHIRPath grammar
+- core: High-level parsing interface for test integration
 """
 
 from .lexer import Lexer, Token, TokenType, SourceLocation, LexerError
 from .parser import Parser
+from .core import parse
 
 __all__ = [
     "Lexer",
@@ -26,4 +28,5 @@ __all__ = [
     "TokenType",
     "SourceLocation",
     "LexerError",
+    "parse",
 ]
