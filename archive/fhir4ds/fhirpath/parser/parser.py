@@ -11,6 +11,9 @@ from dataclasses import dataclass
 from typing import List, Optional
 from contextlib import contextmanager
 
+from fhir4ds.parser.exceptions import LexerError, ParseError
+from fhir4ds.parser.tokens import SourceLocation
+
 from .ast_nodes import (
     ASTNode, ThisNode, VariableNode, LiteralNode, IdentifierNode, FunctionCallNode,
     BinaryOpNode, UnaryOpNode, PathNode, IndexerNode, TupleNode, IntervalConstructorNode, ListLiteralNode,
@@ -153,7 +156,10 @@ class FHIRPathLexer:
             self.advance()  # Skip closing quote
             return number_part, unit
         else:
-            raise ValueError(f"Unterminated unit in quantity literal at position {self.position}")
+            raise LexerError(
+                "Unterminated unit in quantity literal",
+                SourceLocation(line=1, column=self.position + 1, offset=self.position),
+            )
     
     def read_long_integer(self, number_part):
         """Check if number is followed by 'L' suffix for long integers"""
@@ -218,10 +224,9 @@ class FHIRPathLexer:
                         continue
                 # If we get here, it's an unrecognized $ variable
                 else:
-                    raise ValueError(
-                        f"Unrecognized context variable at position {self.position} "
-                        f"in FHIRPath expression '{self.expression}'. "
-                        f"Supported context variables are: $this, $index, $total"
+                    raise LexerError(
+                        f"Unrecognized context variable starting with '$'",
+                        SourceLocation(line=1, column=self.position + 1, offset=self.position),
                     )
             if not self.current_char:
                 break
@@ -388,10 +393,9 @@ class FHIRPathLexer:
                 self.advance()
             else:
                 # Invalid character - reject with helpful error
-                raise ValueError(
-                    f"Invalid character '{self.current_char}' at position {self.position} "
-                    f"in FHIRPath expression '{self.expression}'. "
-                    f"Valid operators are: = != < <= > >= + - * / and or not"
+                raise LexerError(
+                    f"Invalid character '{self.current_char}'",
+                    SourceLocation(line=1, column=self.position + 1, offset=self.position),
                 )
         
         tokens.append(Token(TokenType.EOF, '', self.position))
@@ -1240,16 +1244,15 @@ class FHIRPathParser:
             column_num = self._get_column_number(expression, current_pos)
             context_lines = self._get_context_lines(expression, line_num)
             
-            enhanced_error = f"""
-Parse Error at line {line_num}, column {column_num}:
-{str(e)}
+            location = SourceLocation(
+                line=line_num, column=column_num, offset=current_pos
+            )
 
-Context:
-{context_lines}
-
-Expression: {expression}
-"""
-            raise ValueError(enhanced_error) from e
+            raise ParseError(
+                message=str(e),
+                location=location,
+                context=context_lines,
+            ) from e
     
     def _get_line_number(self, expression: str, position: int) -> int:
         """Get line number for character position in expression."""
