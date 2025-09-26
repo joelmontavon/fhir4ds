@@ -1,60 +1,47 @@
 from decimal import Decimal
-from fhir4ds.parser.lexer import Token, TokenType, Lexer
+from typing import Optional, List
+from fhir4ds.parser.lexer import Token, TokenType
 from fhir4ds.parser.literals import DateTimeParser
 from fhir4ds.ast.nodes import (
-    FHIRPathNode,
-    Identifier,
-    StringLiteral,
-    NumberLiteral,
-    BooleanLiteral,
-    TimeLiteral,
-    DateTimeLiteral,
-    QuantityLiteral,
-    CollectionLiteral,
-    BinaryOperation,
-    UnaryOperation,
-    FunctionCall,
-    InvocationExpression,
-    MemberAccess,
-    Indexer,
-    Operator,
-    UnaryOperator,
-    SourceLocation,
+    FHIRPathNode, Identifier, StringLiteral, NumberLiteral, BooleanLiteral,
+    TimeLiteral, DateTimeLiteral, QuantityLiteral, CollectionLiteral,
+    BinaryOperation, UnaryOperation, InvocationExpression, MemberAccess,
+    Indexer, Operator, UnaryOperator, SourceLocation
 )
-from fhir4ds.ast.metadata import Cardinality, PopulationMetadata
+from fhir4ds.ast.metadata import PopulationMetadata
 from fhir4ds.parser.functions.registry import FHIRPathFunctionRegistry
-from fhir4ds.parser.functions.core.first import FirstFunction
-from fhir4ds.parser.functions.core.last import LastFunction
-from fhir4ds.parser.functions.core.tail import TailFunction
-from fhir4ds.parser.functions.core.exists import ExistsFunction
-from fhir4ds.parser.functions.core.empty import EmptyFunction
-from fhir4ds.parser.functions.core.not_function import NotFunction
-from fhir4ds.parser.functions.core.count import CountFunction
-from fhir4ds.parser.functions.core.where import WhereFunction
-from fhir4ds.parser.functions.core.select import SelectFunction
-from fhir4ds.parser.functions.core.sum import SumFunction
-from fhir4ds.parser.functions.core.avg import AvgFunction
-
+from fhir4ds.parser.functions.core import (
+    FirstFunction, LastFunction, TailFunction, ExistsFunction, EmptyFunction,
+    NotFunction, CountFunction, WhereFunction, SelectFunction, SumFunction, AvgFunction
+)
+from fhir4ds.parser.exceptions import (
+    FHIRPathParseError, FHIRPathSyntaxError, FHIRPathFunctionError, FHIRPathSemanticError
+)
+from fhir4ds.parser.configuration import ParserConfiguration, ConfigurationManager
+from fhir4ds.parser.metadata_inference import MetadataInferenceEngine, ParseContext
 
 class Parser:
-    def __init__(self, tokens: list[Token]):
+    """
+    Enhanced parser with architecture compliance, including configuration management,
+    a proper exception hierarchy, and metadata inference before node creation.
+    """
+    def __init__(self, tokens: list[Token], config: Optional[ParserConfiguration] = None):
         self.tokens = tokens
         self.pos = 0
+        self.config = config or ConfigurationManager().get_config()
+        self.metadata_engine = MetadataInferenceEngine()
+        self.parse_context = ParseContext()
         self.function_registry = FHIRPathFunctionRegistry()
         self._register_core_functions()
 
     def _register_core_functions(self):
-        self.function_registry.register_function(FirstFunction())
-        self.function_registry.register_function(LastFunction())
-        self.function_registry.register_function(TailFunction())
-        self.function_registry.register_function(ExistsFunction())
-        self.function_registry.register_function(EmptyFunction())
-        self.function_registry.register_function(NotFunction())
-        self.function_registry.register_function(CountFunction())
-        self.function_registry.register_function(WhereFunction())
-        self.function_registry.register_function(SelectFunction())
-        self.function_registry.register_function(SumFunction())
-        self.function_registry.register_function(AvgFunction())
+        core_functions = [
+            FirstFunction(), LastFunction(), TailFunction(), ExistsFunction(),
+            EmptyFunction(), NotFunction(), CountFunction(), WhereFunction(),
+            SelectFunction(), SumFunction(), AvgFunction()
+        ]
+        for func in core_functions:
+            self.function_registry.register_function(func)
 
     def _peek(self) -> Token:
         return self.tokens[self.pos]
@@ -85,46 +72,54 @@ class Parser:
     def _consume(self, token_type: TokenType, message: str) -> Token:
         if self._check(token_type):
             return self._advance()
-        raise Exception(message) # TODO: better error handling
+        self._raise_syntax_error(expected=token_type.name, found=self._peek().token_type.name)
 
-    def _get_source_location(self) -> SourceLocation:
+    def _get_current_location(self) -> SourceLocation:
         token = self._peek()
         return SourceLocation(line=token.location.line, column=token.location.column)
 
-    def _create_mock_metadata(self) -> PopulationMetadata:
-        # In a real scenario, this would involve more complex logic.
-        return PopulationMetadata(
-            cardinality=Cardinality.COLLECTION,
-            fhir_type="Any"
+    def _get_error_context(self) -> str:
+        start = max(0, self.pos - 5)
+        end = min(len(self.tokens), self.pos + 5)
+        context_tokens = " ".join([t.value for t in self.tokens[start:end]])
+        return f"Around: ...{context_tokens}..."
+
+    def _raise_parse_error(self, message: str, suggestion: Optional[str] = None):
+        raise FHIRPathParseError(
+            message, location=self._get_current_location(),
+            context=self._get_error_context(), suggestion=suggestion
+        )
+
+    def _raise_syntax_error(self, expected: str, found: str):
+        message = f"Expected {expected}, but found {found}"
+        suggestion = f"Check for missing or misplaced tokens."
+        raise FHIRPathSyntaxError(
+            message, location=self._get_current_location(),
+            context=self._get_error_context(), suggestion=suggestion
         )
 
     def parse(self) -> FHIRPathNode:
-        return self._parse_expression()
+        expr = self._parse_expression()
+        if not self._is_at_end():
+            self._raise_parse_error("Unexpected tokens at the end of the expression.")
+        return expr
 
     OPERATOR_MAP = {
-        TokenType.PLUS: Operator.ADD,
-        TokenType.MINUS: Operator.SUB,
-        TokenType.MULTIPLY: Operator.MUL,
-        TokenType.DIVIDE: Operator.DIV,
-        TokenType.MOD: Operator.MOD,
-        TokenType.EQUAL: Operator.EQ,
-        TokenType.NOT_EQUAL: Operator.NE,
-        TokenType.GREATER_THAN: Operator.GT,
-        TokenType.GREATER_EQUAL: Operator.GTE,
-        TokenType.LESS_THAN: Operator.LT,
-        TokenType.LESS_EQUAL: Operator.LTE,
-        TokenType.AND: Operator.AND,
-        TokenType.OR: Operator.OR,
-        TokenType.XOR: Operator.XOR,
-        TokenType.IMPLIES: Operator.IMPLIES,
-        TokenType.IS: Operator.IS,
+        TokenType.PLUS: Operator.ADD, TokenType.MINUS: Operator.SUB,
+        TokenType.MULTIPLY: Operator.MUL, TokenType.DIVIDE: Operator.DIV,
+        TokenType.MOD: Operator.MOD, TokenType.EQUAL: Operator.EQ,
+        TokenType.NOT_EQUAL: Operator.NE, TokenType.GREATER_THAN: Operator.GT,
+        TokenType.GREATER_EQUAL: Operator.GTE, TokenType.LESS_THAN: Operator.LT,
+        TokenType.LESS_EQUAL: Operator.LTE, TokenType.AND: Operator.AND,
+        TokenType.OR: Operator.OR, TokenType.XOR: Operator.XOR,
+        TokenType.IMPLIES: Operator.IMPLIES, TokenType.IS: Operator.IS,
         TokenType.AS: Operator.AS,
     }
 
     def _token_to_operator(self, token: Token) -> Operator:
         operator = self.OPERATOR_MAP.get(token.token_type)
         if operator is None:
-            raise Exception(f"Unknown operator token: {token}")
+            self._raise_parse_error(f"Unknown operator token: {token.value}")
         return operator
 
     def _binary_op_parser(self, higher_precedence_parser, *token_types: TokenType) -> FHIRPathNode:
@@ -133,12 +128,10 @@ class Parser:
             op_token = self._previous()
             operator = self._token_to_operator(op_token)
             right = higher_precedence_parser()
+            metadata = self.metadata_engine.infer_for_binary_operation(expr, operator, right, self.parse_context)
             expr = BinaryOperation(
-                left=expr,
-                operator=operator,
-                right=right,
-                source_location=self._get_source_location(),
-                metadata=self._create_mock_metadata(),
+                left=expr, operator=operator, right=right,
+                source_location=self._get_current_location(), metadata=metadata
             )
         return expr
 
@@ -171,13 +164,12 @@ class Parser:
 
     def _parse_unary(self) -> FHIRPathNode:
         if self._match(TokenType.MINUS):
-            operator = UnaryOperator.MINUS
+            op = UnaryOperator.MINUS
             operand = self._parse_unary()
+            metadata = self.metadata_engine.infer_for_unary_operation(op, operand, self.parse_context)
             return UnaryOperation(
-                operator=operator,
-                operand=operand,
-                source_location=self._get_source_location(),
-                metadata=self._create_mock_metadata(),
+                operator=op, operand=operand,
+                source_location=self._get_current_location(), metadata=metadata
             )
         return self._parse_path_expression()
 
@@ -188,164 +180,126 @@ class Parser:
             if token.token_type == TokenType.DOT:
                 member_token = self._peek()
                 if member_token.token_type == TokenType.EOF:
-                    raise Exception("Unexpected end of expression after '.'")
-
-                self._advance() # Consume the member/function name
-
+                    self._raise_parse_error("Unexpected end of expression after '.'")
+                self._advance()
                 if self._match(TokenType.LPAREN):
-                    # It's a function call, use the new registry
                     function_name = member_token.value
-                    function_impl = self.function_registry.get_function(function_name)
+                    if self.function_registry.get_function(function_name) is None:
+                        raise FHIRPathFunctionError(f"Unknown function: '{function_name}'", location=self._get_current_location())
 
-                    if not function_impl:
-                        raise Exception(f"Unknown function: {function_name}")
-
-                    # Parse arguments
                     arguments = []
                     if not self._check(TokenType.RPAREN):
                         arguments.append(self._parse_expression())
                         while self._match(TokenType.COMMA):
                             arguments.append(self._parse_expression())
-                    self._consume(TokenType.RPAREN, "Expect ')' after arguments.")
+                    self._consume(TokenType.RPAREN, "Expect ')' after function arguments.")
 
-                    # Validate arguments
-                    validation_errors = function_impl.validate_arguments(arguments)
-                    if validation_errors:
-                        # For now, just raise the first error
-                        raise Exception(f"Invalid arguments for {function_name}: {validation_errors[0].message}")
-
-                    # Create AST node using the function's own logic
+                    metadata = self.metadata_engine.infer_for_invocation(expr, function_name, arguments, self.parse_context)
+                    function_impl = self.function_registry.get_function(function_name)
                     expr = function_impl.create_ast_node(expr, arguments)
+                    expr.metadata = metadata
                 else:
-                    # Member access. Keywords are not allowed here.
                     if member_token.token_type != TokenType.IDENTIFIER:
-                        raise Exception(f"Cannot access property '{member_token.value}' because it is a reserved keyword.")
+                        self._raise_semantic_error(f"Cannot access property '{member_token.value}' because it is a reserved keyword.")
 
+                    member_metadata = self.metadata_engine.infer_for_identifier(member_token.value, self.parse_context)
+                    member_identifier = Identifier(
+                        value=member_token.value,
+                        source_location=SourceLocation(member_token.location.line, member_token.location.column),
+                        metadata=member_metadata,
+                    )
+
+                    access_metadata = self.metadata_engine.infer_for_member_access(expr, member_identifier, self.parse_context)
                     expr = MemberAccess(
-                        expression=expr,
-                        member=Identifier(
-                            value=member_token.value,
-                            source_location=SourceLocation(member_token.location.line, member_token.location.column),
-                            metadata=self._create_mock_metadata(),
-                        ),
-                        source_location=self._get_source_location(),
-                        metadata=self._create_mock_metadata(),
+                        expression=expr, member=member_identifier,
+                        source_location=self._get_current_location(), metadata=access_metadata
                     )
             elif token.token_type == TokenType.LBRACKET:
                 index = self._parse_expression()
-                self._consume(TokenType.RBRACKET, "Expect ']' after index.")
+                self._consume(TokenType.RBRACKET, "Expect ']' after index expression.")
+                metadata = self.metadata_engine.infer_for_indexer(expr, index, self.parse_context)
                 expr = Indexer(
-                    collection=expr,
-                    index=index,
-                    source_location=self._get_source_location(),
-                    metadata=self._create_mock_metadata(),
+                    collection=expr, index=index,
+                    source_location=self._get_current_location(), metadata=metadata
                 )
         return expr
 
-    def _infer_collection_metadata(self, elements: list[FHIRPathNode]) -> PopulationMetadata:
-        """Infer metadata for collection based on elements"""
-        return PopulationMetadata(
-            cardinality=Cardinality.COLLECTION,
-            fhir_type="Collection",
-            complexity_score=len(elements),
-            dependencies=set()
-        )
-
-    def _parse_collection_literal(self) -> CollectionLiteral:
-        """Parse collection literal {element1, element2, ...}"""
-        start_token = self._previous() # This is the LBRACE token
-        elements = []
-
-        if not self._check(TokenType.RBRACE):
-            elements.append(self._parse_expression())
-            while self._match(TokenType.COMMA):
-                elements.append(self._parse_expression())
-
-        self._consume(TokenType.RBRACE, "Expect '}' after collection elements.")
-
-        return CollectionLiteral(
-            elements=elements,
-            source_location=SourceLocation(start_token.location.line, start_token.location.column),
-            metadata=self._infer_collection_metadata(elements)
-        )
-
-    def _parse_quantity_literal(self) -> QuantityLiteral:
-        token = self._previous()
-        # The lexer pre-parses the quantity into a dict
-        value_str = token.value['value']
-        unit_str = token.value['unit']
-        return QuantityLiteral(
-            value=Decimal(value_str),
-            unit=unit_str,
-            source_location=SourceLocation(token.location.line, token.location.column),
-            metadata=self._create_mock_metadata()
-        )
-
-    def _parse_datetime_literal(self) -> DateTimeLiteral:
-        """Parse datetime literal token into AST node"""
-        token = self._previous()
-        parser = DateTimeParser()
-        # We need to manually set source location and metadata here
-        dt_literal = parser.parse_datetime(token.value)
-        return DateTimeLiteral(
-            value=dt_literal.value,
-            precision=dt_literal.precision,
-            timezone=dt_literal.timezone,
-            source_location=SourceLocation(token.location.line, token.location.column),
-            metadata=self._create_mock_metadata()
-        )
-
-    def _parse_time_literal(self) -> TimeLiteral:
-        """Parse time literal token into AST node"""
-        token = self._previous()
-        parser = DateTimeParser()
-        # We need to manually set source location and metadata here
-        time_literal = parser.parse_time(token.value)
-        return TimeLiteral(
-            value=time_literal.value,
-            precision=time_literal.precision,
-            source_location=SourceLocation(token.location.line, token.location.column),
-            metadata=self._create_mock_metadata()
-        )
-
     def _parse_primary(self) -> FHIRPathNode:
         if self._match(TokenType.STRING_LITERAL):
-            return StringLiteral(
-                value=self._previous().value,
-                source_location=self._get_source_location(),
-                metadata=self._create_mock_metadata(),
-            )
+            value = self._previous().value
+            metadata = self.metadata_engine.infer_for_literal(value, self.parse_context)
+            return StringLiteral(value=value, source_location=self._get_current_location(), metadata=metadata)
+
         if self._match(TokenType.INTEGER_LITERAL, TokenType.DECIMAL_LITERAL):
-            return NumberLiteral(
-                value=float(self._previous().value),
-                source_location=self._get_source_location(),
-                metadata=self._create_mock_metadata(),
-            )
+            value = Decimal(self._previous().value)
+            metadata = self.metadata_engine.infer_for_literal(value, self.parse_context)
+            return NumberLiteral(value=value, source_location=self._get_current_location(), metadata=metadata)
+
         if self._match(TokenType.BOOLEAN_LITERAL):
-            token_value = self._previous().value
-            return BooleanLiteral(value=(token_value == 'true'), source_location=self._get_source_location(), metadata=self._create_mock_metadata())
+            value = self._previous().value == 'true'
+            metadata = self.metadata_engine.infer_for_literal(value, self.parse_context)
+            return BooleanLiteral(value=value, source_location=self._get_current_location(), metadata=metadata)
 
         if self._match(TokenType.DATETIME_LITERAL):
-            return self._parse_datetime_literal()
+            token = self._previous()
+            dt_parser = DateTimeParser()
+            dt_literal = dt_parser.parse_datetime(token.value)
+            metadata = self.metadata_engine.infer_for_literal(dt_literal, self.parse_context)
+            return DateTimeLiteral(
+                value=dt_literal.value,
+                precision=dt_literal.precision,
+                timezone=dt_literal.timezone,
+                source_location=SourceLocation(token.location.line, token.location.column),
+                metadata=metadata
+            )
 
         if self._match(TokenType.TIME_LITERAL):
-            return self._parse_time_literal()
+            token = self._previous()
+            dt_parser = DateTimeParser()
+            time_literal = dt_parser.parse_time(token.value)
+            metadata = self.metadata_engine.infer_for_literal(time_literal, self.parse_context)
+            return TimeLiteral(
+                value=time_literal.value,
+                precision=time_literal.precision,
+                source_location=SourceLocation(token.location.line, token.location.column),
+                metadata=metadata
+            )
 
         if self._match(TokenType.QUANTITY_LITERAL):
-            return self._parse_quantity_literal()
+            token = self._previous()
+            value_str = token.value['value']
+            unit_str = token.value['unit']
+            metadata = self.metadata_engine.infer_for_literal(Decimal(value_str), self.parse_context)
+            return QuantityLiteral(
+                value=Decimal(value_str),
+                unit=unit_str,
+                source_location=SourceLocation(token.location.line, token.location.column),
+                metadata=metadata
+            )
 
         if self._match(TokenType.LBRACE):
-            return self._parse_collection_literal()
+            start_token = self._previous()
+            elements = []
+            if not self._check(TokenType.RBRACE):
+                elements.append(self._parse_expression())
+                while self._match(TokenType.COMMA):
+                    elements.append(self._parse_expression())
+            self._consume(TokenType.RBRACE, "Expect '}' after collection elements.")
+            metadata = self.metadata_engine.infer_for_collection(elements, self.parse_context)
+            return CollectionLiteral(
+                elements=elements,
+                source_location=SourceLocation(start_token.location.line, start_token.location.column),
+                metadata=metadata
+            )
 
         if self._match(TokenType.IDENTIFIER):
-            return Identifier(
-                value=self._previous().value,
-                source_location=self._get_source_location(),
-                metadata=self._create_mock_metadata(),
-            )
+            value = self._previous().value
+            metadata = self.metadata_engine.infer_for_identifier(value, self.parse_context)
+            return Identifier(value=value, source_location=self._get_current_location(), metadata=metadata)
+
         if self._match(TokenType.LPAREN):
             expr = self._parse_expression()
             self._consume(TokenType.RPAREN, "Expect ')' after expression.")
             return expr
 
-        raise Exception("Expect expression.") # TODO: better error handling
+        self._raise_parse_error("Expression expected.", "Did you forget an identifier or a literal value?")

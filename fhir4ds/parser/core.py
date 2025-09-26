@@ -1,6 +1,6 @@
-from .lexer import FHIRPathLexer
+from .lexer import Lexer
 from .parser import Parser
-from .exceptions import ParseError, LexerError
+from .exceptions import FHIRPathParseError, LexerError
 
 def parse(expression: str, resource: dict = None):
     """
@@ -15,11 +15,11 @@ def parse(expression: str, resource: dict = None):
 
     Raises:
         LexerError: If the expression cannot be tokenized.
-        ParseError: If the expression is syntactically incorrect.
+        FHIRPathParseError: If the expression is syntactically incorrect.
     """
     # The try/except block was removed to allow exceptions to bubble up to the caller,
     # which is necessary for the test suite to correctly identify and handle parsing failures.
-    lexer = FHIRPathLexer(expression)
+    lexer = Lexer(expression)
     tokens = list(lexer.tokenize())
     parser = Parser(tokens)
     ast = parser.parse()
