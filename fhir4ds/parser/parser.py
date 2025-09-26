@@ -21,11 +21,39 @@ from fhir4ds.ast.nodes import (
     SourceLocation,
 )
 from fhir4ds.ast.metadata import Cardinality, PopulationMetadata
+from fhir4ds.parser.functions.registry import FHIRPathFunctionRegistry
+from fhir4ds.parser.functions.core.first import FirstFunction
+from fhir4ds.parser.functions.core.last import LastFunction
+from fhir4ds.parser.functions.core.tail import TailFunction
+from fhir4ds.parser.functions.core.exists import ExistsFunction
+from fhir4ds.parser.functions.core.empty import EmptyFunction
+from fhir4ds.parser.functions.core.not_function import NotFunction
+from fhir4ds.parser.functions.core.count import CountFunction
+from fhir4ds.parser.functions.core.where import WhereFunction
+from fhir4ds.parser.functions.core.select import SelectFunction
+from fhir4ds.parser.functions.core.sum import SumFunction
+from fhir4ds.parser.functions.core.avg import AvgFunction
+
 
 class Parser:
     def __init__(self, tokens: list[Token]):
         self.tokens = tokens
         self.pos = 0
+        self.function_registry = FHIRPathFunctionRegistry()
+        self._register_core_functions()
+
+    def _register_core_functions(self):
+        self.function_registry.register_function(FirstFunction())
+        self.function_registry.register_function(LastFunction())
+        self.function_registry.register_function(TailFunction())
+        self.function_registry.register_function(ExistsFunction())
+        self.function_registry.register_function(EmptyFunction())
+        self.function_registry.register_function(NotFunction())
+        self.function_registry.register_function(CountFunction())
+        self.function_registry.register_function(WhereFunction())
+        self.function_registry.register_function(SelectFunction())
+        self.function_registry.register_function(SumFunction())
+        self.function_registry.register_function(AvgFunction())
 
     def _peek(self) -> Token:
         return self.tokens[self.pos]
@@ -157,34 +185,46 @@ class Parser:
         while self._match(TokenType.DOT, TokenType.LBRACKET):
             token = self._previous()
             if token.token_type == TokenType.DOT:
-                member = self._consume(TokenType.IDENTIFIER, "Expect identifier after '.'.")
+                member_token = self._peek()
+                if member_token.token_type == TokenType.EOF:
+                    raise Exception("Unexpected end of expression after '.'")
+
+                self._advance() # Consume the member/function name
 
                 if self._match(TokenType.LPAREN):
-                    # Invocation expression
+                    # It's a function call, use the new registry
+                    function_name = member_token.value
+                    function_impl = self.function_registry.get_function(function_name)
+
+                    if not function_impl:
+                        raise Exception(f"Unknown function: {function_name}")
+
+                    # Parse arguments
                     arguments = []
                     if not self._check(TokenType.RPAREN):
                         arguments.append(self._parse_expression())
                         while self._match(TokenType.COMMA):
                             arguments.append(self._parse_expression())
                     self._consume(TokenType.RPAREN, "Expect ')' after arguments.")
-                    expr = InvocationExpression(
-                        expression=expr,
-                        name=Identifier(
-                            value=member.value,
-                            source_location=SourceLocation(member.location.line, member.location.column),
-                            metadata=self._create_mock_metadata(),
-                        ),
-                        arguments=arguments,
-                        source_location=self._get_source_location(),
-                        metadata=self._create_mock_metadata(),
-                    )
+
+                    # Validate arguments
+                    validation_errors = function_impl.validate_arguments(arguments)
+                    if validation_errors:
+                        # For now, just raise the first error
+                        raise Exception(f"Invalid arguments for {function_name}: {validation_errors[0].message}")
+
+                    # Create AST node using the function's own logic
+                    expr = function_impl.create_ast_node(expr, arguments)
                 else:
-                    # Member access
+                    # Member access. Keywords are not allowed here.
+                    if member_token.token_type != TokenType.IDENTIFIER:
+                        raise Exception(f"Cannot access property '{member_token.value}' because it is a reserved keyword.")
+
                     expr = MemberAccess(
                         expression=expr,
                         member=Identifier(
-                            value=member.value,
-                            source_location=SourceLocation(member.location.line, member.location.column),
+                            value=member_token.value,
+                            source_location=SourceLocation(member_token.location.line, member_token.location.column),
                             metadata=self._create_mock_metadata(),
                         ),
                         source_location=self._get_source_location(),
