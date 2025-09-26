@@ -98,6 +98,12 @@ class Parser:
             context=self._get_error_context(), suggestion=suggestion
         )
 
+    def _raise_semantic_error(self, message: str, suggestion: Optional[str] = None):
+        raise FHIRPathSemanticError(
+            message, location=self._get_current_location(),
+            context=self._get_error_context(), suggestion=suggestion
+        )
+
     def parse(self) -> FHIRPathNode:
         expr = self._parse_expression()
         if not self._is_at_end():
@@ -196,8 +202,13 @@ class Parser:
 
                     metadata = self.metadata_engine.infer_for_invocation(expr, function_name, arguments, self.parse_context)
                     function_impl = self.function_registry.get_function(function_name)
-                    expr = function_impl.create_ast_node(expr, arguments)
-                    expr.metadata = metadata
+
+                    # Create a temporary expression with inferred metadata for function creation
+                    temp_expr = type(expr)(
+                        **{field.name: getattr(expr, field.name) for field in expr.__dataclass_fields__.values() if field.name != 'metadata'},
+                        metadata=metadata
+                    )
+                    expr = function_impl.create_ast_node(temp_expr, arguments)
                 else:
                     if member_token.token_type != TokenType.IDENTIFIER:
                         self._raise_semantic_error(f"Cannot access property '{member_token.value}' because it is a reserved keyword.")

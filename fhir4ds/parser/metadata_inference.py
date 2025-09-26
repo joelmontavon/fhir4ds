@@ -1,3 +1,4 @@
+from decimal import Decimal
 from typing import Optional, Set, Dict, Any, List, Union
 from fhir4ds.ast.nodes import (
     FHIRPathNode, Operator, UnaryOperator, Identifier
