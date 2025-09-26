@@ -1,28 +1,15 @@
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Optional, Set
+from typing import Dict, Any
 
-class Cardinality(Enum):
-    SINGLE = "SINGLE"
-    COLLECTION = "COLLECTION"
-    OPTIONAL = "OPTIONAL"
-
-@dataclass(frozen=True)
-class ResourceImpact:
-    """
-    Represents the estimated impact of an AST node on system resources.
-    This is a placeholder for a more sophisticated resource modeling system.
-    """
-    memory_impact: int = 0
-    performance_impact: int = 0
-
-@dataclass(frozen=True)
+@dataclass
 class PopulationMetadata:
     """
-    Contains metadata for each AST node to support population-scale optimization.
+    Stores metadata about a node's context in a population-scale query.
     """
-    cardinality: Cardinality = Cardinality.OPTIONAL
-    fhir_type: Optional[str] = None
-    complexity_score: int = 1
-    dependencies: Set[str] = field(default_factory=set)
-    resource_impact: ResourceImpact = field(default_factory=ResourceImpact)
+    # Example field: the SQL alias for the CTE representing this node
+    sql_alias: str = ""
+    # Other potential metadata:
+    # - Inferred data type
+    # - Cardinality estimate
+    # - Dependencies on other nodes
+    annotations: Dict[str, Any] = field(default_factory=dict)
