@@ -1,11 +1,12 @@
+from decimal import Decimal
 from fhir4ds.parser.lexer import Token, TokenType, Lexer
+from fhir4ds.parser.literals import DateTimeParser
 from fhir4ds.ast.nodes import (
     FHIRPathNode,
     Identifier,
     StringLiteral,
     NumberLiteral,
     BooleanLiteral,
-    DateLiteral,
     TimeLiteral,
     DateTimeLiteral,
     QuantityLiteral,
@@ -201,6 +202,72 @@ class Parser:
                 )
         return expr
 
+    def _infer_collection_metadata(self, elements: list[FHIRPathNode]) -> PopulationMetadata:
+        """Infer metadata for collection based on elements"""
+        return PopulationMetadata(
+            cardinality=Cardinality.COLLECTION,
+            fhir_type="Collection",
+            complexity_score=len(elements),
+            dependencies=set()
+        )
+
+    def _parse_collection_literal(self) -> CollectionLiteral:
+        """Parse collection literal {element1, element2, ...}"""
+        start_token = self._previous() # This is the LBRACE token
+        elements = []
+
+        if not self._check(TokenType.RBRACE):
+            elements.append(self._parse_expression())
+            while self._match(TokenType.COMMA):
+                elements.append(self._parse_expression())
+
+        self._consume(TokenType.RBRACE, "Expect '}' after collection elements.")
+
+        return CollectionLiteral(
+            elements=elements,
+            source_location=SourceLocation(start_token.location.line, start_token.location.column),
+            metadata=self._infer_collection_metadata(elements)
+        )
+
+    def _parse_quantity_literal(self) -> QuantityLiteral:
+        token = self._previous()
+        # The lexer pre-parses the quantity into a dict
+        value_str = token.value['value']
+        unit_str = token.value['unit']
+        return QuantityLiteral(
+            value=Decimal(value_str),
+            unit=unit_str,
+            source_location=SourceLocation(token.location.line, token.location.column),
+            metadata=self._create_mock_metadata()
+        )
+
+    def _parse_datetime_literal(self) -> DateTimeLiteral:
+        """Parse datetime literal token into AST node"""
+        token = self._previous()
+        parser = DateTimeParser()
+        # We need to manually set source location and metadata here
+        dt_literal = parser.parse_datetime(token.value)
+        return DateTimeLiteral(
+            value=dt_literal.value,
+            precision=dt_literal.precision,
+            timezone=dt_literal.timezone,
+            source_location=SourceLocation(token.location.line, token.location.column),
+            metadata=self._create_mock_metadata()
+        )
+
+    def _parse_time_literal(self) -> TimeLiteral:
+        """Parse time literal token into AST node"""
+        token = self._previous()
+        parser = DateTimeParser()
+        # We need to manually set source location and metadata here
+        time_literal = parser.parse_time(token.value)
+        return TimeLiteral(
+            value=time_literal.value,
+            precision=time_literal.precision,
+            source_location=SourceLocation(token.location.line, token.location.column),
+            metadata=self._create_mock_metadata()
+        )
+
     def _parse_primary(self) -> FHIRPathNode:
         if self._match(TokenType.STRING_LITERAL):
             return StringLiteral(
@@ -217,6 +284,19 @@ class Parser:
         if self._match(TokenType.BOOLEAN_LITERAL):
             token_value = self._previous().value
             return BooleanLiteral(value=(token_value == 'true'), source_location=self._get_source_location(), metadata=self._create_mock_metadata())
+
+        if self._match(TokenType.DATETIME_LITERAL):
+            return self._parse_datetime_literal()
+
+        if self._match(TokenType.TIME_LITERAL):
+            return self._parse_time_literal()
+
+        if self._match(TokenType.QUANTITY_LITERAL):
+            return self._parse_quantity_literal()
+
+        if self._match(TokenType.LBRACE):
+            return self._parse_collection_literal()
+
         if self._match(TokenType.IDENTIFIER):
             return Identifier(
                 value=self._previous().value,

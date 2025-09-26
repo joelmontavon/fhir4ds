@@ -6,7 +6,6 @@ from fhir4ds.ast.nodes import (
     StringLiteral,
     NumberLiteral,
     BooleanLiteral,
-    DateLiteral,
     TimeLiteral,
     DateTimeLiteral,
     QuantityLiteral,
@@ -44,9 +43,6 @@ class ASTVisitor(Generic[T]):
         raise NotImplementedError
 
     def visit_boolean_literal(self, node: BooleanLiteral) -> T:
-        raise NotImplementedError
-
-    def visit_date_literal(self, node: DateLiteral) -> T:
         raise NotImplementedError
 
     def visit_time_literal(self, node: TimeLiteral) -> T:
@@ -103,14 +99,11 @@ class ASTPrinter(ASTVisitor[str]):
     def visit_boolean_literal(self, node: BooleanLiteral) -> str:
         return f"{self._make_indent()}BooleanLiteral(value={node.value})\n"
 
-    def visit_date_literal(self, node: DateLiteral) -> str:
-        return f"{self._make_indent()}DateLiteral(value={node.value})\n"
-
     def visit_time_literal(self, node: TimeLiteral) -> str:
-        return f"{self._make_indent()}TimeLiteral(value={node.value})\n"
+        return f"{self._make_indent()}TimeLiteral(value={node.value}, precision={node.precision.value})\n"
 
     def visit_datetime_literal(self, node: DateTimeLiteral) -> str:
-        return f"{self._make_indent()}DateTimeLiteral(value={node.value})\n"
+        return f"{self._make_indent()}DateTimeLiteral(value={node.value}, precision={node.precision.value}, timezone={node.timezone})\n"
 
     def visit_quantity_literal(self, node: QuantityLiteral) -> str:
         return f"{self._make_indent()}QuantityLiteral(value={node.value}, unit='{node.unit}')\n"

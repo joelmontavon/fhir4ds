@@ -1,7 +1,9 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import time, timezone, datetime
+from decimal import Decimal
 from enum import Enum
-from typing import Any, List, TypeVar, TYPE_CHECKING
+from typing import Any, List, Optional, TypeVar, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from fhir4ds.ast.visitors import ASTVisitor
@@ -121,63 +123,69 @@ class BooleanLiteral(Literal):
         return visitor.visit_boolean_literal(self)
 
 
-@dataclass(frozen=True)
-class DateLiteral(Literal):
-    """
-    Represents a date literal value.
-    """
-    value: str  # Using string to preserve lexical representation, e.g., @2025-01-01
-
-    def __eq__(self, other: Any) -> bool:
-        return isinstance(other, DateLiteral) and self.value == other.value
-
-    def __hash__(self) -> int:
-        return hash(self.value)
-
-    def accept(self, visitor: "ASTVisitor[T]") -> T:
-        return visitor.visit_date_literal(self)
+class DateTimePrecision(Enum):
+    YEAR = "year"
+    MONTH = "month"
+    DAY = "day"
+    HOUR = "hour"
+    MINUTE = "minute"
+    SECOND = "second"
+    MILLISECOND = "millisecond"
 
 
-@dataclass(frozen=True)
-class TimeLiteral(Literal):
-    """
-    Represents a time literal value.
-    """
-    value: str  # Using string to preserve lexical representation, e.g., @T12:30:00
-
-    def __eq__(self, other: Any) -> bool:
-        return isinstance(other, TimeLiteral) and self.value == other.value
-
-    def __hash__(self) -> int:
-        return hash(self.value)
-
-    def accept(self, visitor: "ASTVisitor[T]") -> T:
-        return visitor.visit_time_literal(self)
+class TimePrecision(Enum):
+    HOUR = "hour"
+    MINUTE = "minute"
+    SECOND = "second"
+    MILLISECOND = "millisecond"
 
 
 @dataclass(frozen=True)
 class DateTimeLiteral(Literal):
-    """
-    Represents a dateTime literal value.
-    """
-    value: str  # Using string to preserve lexical representation, e.g., @2025-01-01T12:30:00Z
+    """DateTime literal like @2024-01-01T12:30:00Z"""
+    value: datetime
+    precision: DateTimePrecision  # year, month, day, hour, minute, second, millisecond
+    timezone: Optional[timezone]
 
     def __eq__(self, other: Any) -> bool:
-        return isinstance(other, DateTimeLiteral) and self.value == other.value
+        return (
+            isinstance(other, DateTimeLiteral)
+            and self.value == other.value
+            and self.precision == other.precision
+            and self.timezone == other.timezone
+        )
 
     def __hash__(self) -> int:
-        return hash(self.value)
+        return hash((self.value, self.precision, self.timezone))
 
     def accept(self, visitor: "ASTVisitor[T]") -> T:
         return visitor.visit_datetime_literal(self)
 
 
 @dataclass(frozen=True)
+class TimeLiteral(Literal):
+    """Time literal like @T12:30:00"""
+    value: time
+    precision: TimePrecision  # hour, minute, second, millisecond
+
+    def __eq__(self, other: Any) -> bool:
+        return (
+            isinstance(other, TimeLiteral)
+            and self.value == other.value
+            and self.precision == other.precision
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.value, self.precision))
+
+    def accept(self, visitor: "ASTVisitor[T]") -> T:
+        return visitor.visit_time_literal(self)
+
+
+@dataclass(frozen=True)
 class QuantityLiteral(Literal):
-    """
-    Represents a quantity literal with a value and a unit.
-    """
-    value: float
+    """Quantity literal like 5 'mg'"""
+    value: Decimal
     unit: str
 
     def __eq__(self, other: Any) -> bool:

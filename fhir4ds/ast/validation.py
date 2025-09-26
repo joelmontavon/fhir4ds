@@ -5,7 +5,6 @@ from fhir4ds.ast.nodes import (
     StringLiteral,
     NumberLiteral,
     BooleanLiteral,
-    DateLiteral,
     TimeLiteral,
     DateTimeLiteral,
     QuantityLiteral,
@@ -43,9 +42,6 @@ class SemanticValidator(ASTVisitor[None]):
         self._visit_children(node)
 
     def visit_boolean_literal(self, node: BooleanLiteral) -> None:
-        self._visit_children(node)
-
-    def visit_date_literal(self, node: DateLiteral) -> None:
         self._visit_children(node)
 
     def visit_time_literal(self, node: TimeLiteral) -> None:
