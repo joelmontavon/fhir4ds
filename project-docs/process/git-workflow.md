@@ -343,6 +343,33 @@ For urgent production fixes:
 
 ### Communication
 
+#### Git State Communication Protocol
+To avoid confusion about work completion status, all communication about git operations must clearly distinguish between different states:
+
+**Git States and Communication**:
+1. **Working Directory Changes**: "I've created/updated files" (not visible to others)
+2. **Staged Changes**: "Changes are staged for commit" (not visible to others)
+3. **Local Commits**: "Changes committed locally, ready for push" (not visible on GitHub)
+4. **Pushed to Remote**: "Changes pushed to GitHub at [URL]" (visible to everyone)
+5. **Merged to Main**: "Changes merged to main branch" (task truly complete)
+
+**Required Communication Format**:
+- ❌ **Unclear**: "I've completed the task" or "Everything is committed"
+- ✅ **Clear**: "Work committed locally, ready for you to push: `git push origin complete-rewrite`"
+- ✅ **Clear**: "Changes pushed to GitHub and visible at https://github.com/user/repo/tree/branch/path"
+
+**Work Completion Definition**:
+- **Tasks are NOT complete** until merged to main branch
+- **Local commits** are preparation work, not completion
+- **GitHub visibility** is required for review and collaboration
+- **Main branch merge** is the final completion milestone
+
+**Status Update Requirements**:
+- Always specify exact git state when reporting progress
+- Provide GitHub URLs when work should be visible
+- Indicate required actions: "Ready for push", "Ready for review", "Ready for merge"
+- Include exact commands when user action needed: `git push origin branch-name`
+
 #### Commit Messages as Communication
 - Write commit messages for future developers (including yourself)
 - Explain **why** changes were made, not just **what** changed
@@ -353,6 +380,19 @@ For urgent production fixes:
 - Explain the reasoning behind suggestions
 - Ask questions when unclear about implementation decisions
 - Acknowledge good practices and improvements
+
+#### Developer-to-User Handoff Protocol
+When development work is ready for user review/action:
+
+**Immediate Notification**: "Work committed locally, ready for push"
+**Push Suggestion**: "Recommend pushing to GitHub: `git push origin branch-name`"
+**Review Request**: "Ready for review when pushed to GitHub"
+**Next Steps**: "After review, ready for PR creation and merge"
+
+**GitHub URL Verification**: Always provide specific GitHub URLs where work should be visible after push:
+- Branch URL: `https://github.com/user/repo/tree/branch-name`
+- File URLs: `https://github.com/user/repo/blob/branch-name/path/to/file.md`
+- Diff URLs: `https://github.com/user/repo/compare/main...branch-name`
 
 ### Conflict Resolution
 
