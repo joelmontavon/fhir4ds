@@ -3625,5 +3625,8 @@ class ViewRunner:
         except Exception as e:
             # Fallback to simple path extraction if translation fails
             self.logger.warning(f"Pipeline translation failed for '{path}': {e}")
-            return f'{self.dialect.extract_json_field("resource", f"$.{path}")}'
+            # FIX: Escape single quotes in the path to prevent SQL injection issues
+            # when falling back to simple path extraction.
+            sql_safe_path = path.replace("'", "''")
+            return f'{self.dialect.extract_json_field("resource", f"$.{sql_safe_path}")}'
 

@@ -29,13 +29,3 @@ class ParseError(Exception):
         self.location = location
         self.context = context
         super().__init__(f"Parse error at line {location.line}, column {location.column}: {message}")
-
-
-@dataclass
-class ValidationError:
-    """
-    Semantic validation error.
-    """
-    message: str
-    node: FHIRPathNode
-    error_type: str

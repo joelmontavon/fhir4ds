@@ -1,4 +1,4 @@
-from fhir4ds.parser.exceptions import ValidationError
+from fhir4ds.parser.errors import ValidationError
 from fhir4ds.ast.visitors import ASTVisitor
 from fhir4ds.ast.nodes import (
     FHIRPathNode,
