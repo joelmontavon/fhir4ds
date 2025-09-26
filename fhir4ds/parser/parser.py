@@ -34,7 +34,7 @@ class Parser:
         return self.tokens[self.pos - 1]
 
     def _is_at_end(self) -> bool:
-        return self._peek().type == TokenType.EOF
+        return self._peek().token_type == TokenType.EOF
 
     def _advance(self) -> Token:
         if not self._is_at_end():
@@ -44,7 +44,7 @@ class Parser:
     def _check(self, token_type: TokenType) -> bool:
         if self._is_at_end():
             return False
-        return self._peek().type == token_type
+        return self._peek().token_type == token_type
 
     def _match(self, *token_types: TokenType) -> bool:
         for token_type in token_types:
@@ -60,7 +60,7 @@ class Parser:
 
     def _get_source_location(self) -> SourceLocation:
         token = self._peek()
-        return SourceLocation(line=token.line, column=token.column)
+        return SourceLocation(line=token.location.line, column=token.location.column)
 
     def _create_mock_metadata(self) -> PopulationMetadata:
         # In a real scenario, this would involve more complex logic.
@@ -75,15 +75,15 @@ class Parser:
     OPERATOR_MAP = {
         TokenType.PLUS: Operator.ADD,
         TokenType.MINUS: Operator.SUB,
-        TokenType.STAR: Operator.MUL,
-        TokenType.SLASH: Operator.DIV,
+        TokenType.MULTIPLY: Operator.MUL,
+        TokenType.DIVIDE: Operator.DIV,
         TokenType.MOD: Operator.MOD,
-        TokenType.EQ: Operator.EQ,
-        TokenType.NE: Operator.NE,
-        TokenType.GT: Operator.GT,
-        TokenType.GTE: Operator.GTE,
-        TokenType.LT: Operator.LT,
-        TokenType.LTE: Operator.LTE,
+        TokenType.EQUAL: Operator.EQ,
+        TokenType.NOT_EQUAL: Operator.NE,
+        TokenType.GREATER_THAN: Operator.GT,
+        TokenType.GREATER_EQUAL: Operator.GTE,
+        TokenType.LESS_THAN: Operator.LT,
+        TokenType.LESS_EQUAL: Operator.LTE,
         TokenType.AND: Operator.AND,
         TokenType.OR: Operator.OR,
         TokenType.XOR: Operator.XOR,
@@ -93,7 +93,7 @@ class Parser:
     }
 
     def _token_to_operator(self, token: Token) -> Operator:
-        operator = self.OPERATOR_MAP.get(token.type)
+        operator = self.OPERATOR_MAP.get(token.token_type)
         if operator is None:
             raise Exception(f"Unknown operator token: {token}")
         return operator
@@ -126,10 +126,10 @@ class Parser:
         return self._binary_op_parser(self._parse_equality, TokenType.AND)
 
     def _parse_equality(self) -> FHIRPathNode:
-        return self._binary_op_parser(self._parse_comparison, TokenType.EQ, TokenType.NE)
+        return self._binary_op_parser(self._parse_comparison, TokenType.EQUAL, TokenType.NOT_EQUAL)
 
     def _parse_comparison(self) -> FHIRPathNode:
-        return self._binary_op_parser(self._parse_type_ops, TokenType.GT, TokenType.GTE, TokenType.LT, TokenType.LTE)
+        return self._binary_op_parser(self._parse_type_ops, TokenType.GREATER_THAN, TokenType.GREATER_EQUAL, TokenType.LESS_THAN, TokenType.LESS_EQUAL)
 
     def _parse_type_ops(self) -> FHIRPathNode:
         return self._binary_op_parser(self._parse_term, TokenType.IS, TokenType.AS)
@@ -138,7 +138,7 @@ class Parser:
         return self._binary_op_parser(self._parse_factor, TokenType.PLUS, TokenType.MINUS)
 
     def _parse_factor(self) -> FHIRPathNode:
-        return self._binary_op_parser(self._parse_unary, TokenType.STAR, TokenType.SLASH, TokenType.MOD)
+        return self._binary_op_parser(self._parse_unary, TokenType.MULTIPLY, TokenType.DIVIDE, TokenType.MOD)
 
     def _parse_unary(self) -> FHIRPathNode:
         if self._match(TokenType.MINUS):
@@ -156,7 +156,7 @@ class Parser:
         expr = self._parse_primary()
         while self._match(TokenType.DOT, TokenType.LBRACKET):
             token = self._previous()
-            if token.type == TokenType.DOT:
+            if token.token_type == TokenType.DOT:
                 member = self._consume(TokenType.IDENTIFIER, "Expect identifier after '.'.")
 
                 if self._match(TokenType.LPAREN):
@@ -171,7 +171,7 @@ class Parser:
                         expression=expr,
                         name=Identifier(
                             value=member.value,
-                            source_location=SourceLocation(member.line, member.column),
+                            source_location=SourceLocation(member.location.line, member.location.column),
                             metadata=self._create_mock_metadata(),
                         ),
                         arguments=arguments,
@@ -184,13 +184,13 @@ class Parser:
                         expression=expr,
                         member=Identifier(
                             value=member.value,
-                            source_location=SourceLocation(member.line, member.column),
+                            source_location=SourceLocation(member.location.line, member.location.column),
                             metadata=self._create_mock_metadata(),
                         ),
                         source_location=self._get_source_location(),
                         metadata=self._create_mock_metadata(),
                     )
-            elif token.type == TokenType.LBRACKET:
+            elif token.token_type == TokenType.LBRACKET:
                 index = self._parse_expression()
                 self._consume(TokenType.RBRACKET, "Expect ']' after index.")
                 expr = Indexer(
@@ -208,16 +208,15 @@ class Parser:
                 source_location=self._get_source_location(),
                 metadata=self._create_mock_metadata(),
             )
-        if self._match(TokenType.NUMBER_LITERAL):
+        if self._match(TokenType.INTEGER_LITERAL, TokenType.DECIMAL_LITERAL):
             return NumberLiteral(
                 value=float(self._previous().value),
                 source_location=self._get_source_location(),
                 metadata=self._create_mock_metadata(),
             )
-        if self._match(TokenType.TRUE):
-            return BooleanLiteral(value=True, source_location=self._get_source_location(), metadata=self._create_mock_metadata())
-        if self._match(TokenType.FALSE):
-            return BooleanLiteral(value=False, source_location=self._get_source_location(), metadata=self._create_mock_metadata())
+        if self._match(TokenType.BOOLEAN_LITERAL):
+            token_value = self._previous().value
+            return BooleanLiteral(value=(token_value == 'true'), source_location=self._get_source_location(), metadata=self._create_mock_metadata())
         if self._match(TokenType.IDENTIFIER):
             return Identifier(
                 value=self._previous().value,

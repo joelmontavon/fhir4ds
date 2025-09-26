@@ -20,6 +20,8 @@ Components:
 from .lexer import Lexer, Token, TokenType, SourceLocation, LexerError
 from .parser import Parser
 from .core import parse
+# Import ValidationError from ast.nodes for backward compatibility
+from fhir4ds.ast.nodes import ValidationError
 
 __all__ = [
     "Lexer",
@@ -28,5 +30,6 @@ __all__ = [
     "TokenType",
     "SourceLocation",
     "LexerError",
+    "ValidationError",
     "parse",
 ]

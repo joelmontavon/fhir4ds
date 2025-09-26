@@ -1,9 +1,7 @@
 """
 This module defines the custom exceptions used by the FHIRPath parser and lexer.
 """
-from dataclasses import dataclass
 from fhir4ds.parser.tokens import SourceLocation
-from fhir4ds.ast.nodes import FHIRPathNode
 
 
 class LexerError(Exception):
@@ -37,13 +35,3 @@ class ParseError(Exception):
         if self.line is not None and self.column is not None:
             return f"ParseError at line {self.line}, column {self.column}: {self.message}"
         return f"ParseError: {self.message}"
-
-
-@dataclass
-class ValidationError:
-    """
-    Semantic validation error.
-    """
-    message: str
-    node: FHIRPathNode
-    error_type: str

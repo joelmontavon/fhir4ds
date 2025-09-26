@@ -408,3 +408,13 @@ class Indexer(Expression):
 
     def accept(self, visitor: "ASTVisitor[T]") -> T:
         return visitor.visit_indexer(self)
+
+
+@dataclass
+class ValidationError:
+    """
+    Semantic validation error.
+    """
+    message: str
+    node: FHIRPathNode
+    error_type: str
