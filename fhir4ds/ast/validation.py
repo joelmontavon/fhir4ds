@@ -1,3 +1,4 @@
+from fhir4ds.parser.exceptions import ValidationError
 from fhir4ds.ast.visitors import ASTVisitor
 from fhir4ds.ast.nodes import (
     FHIRPathNode,
@@ -65,7 +66,13 @@ class SemanticValidator(ASTVisitor[None]):
             and isinstance(node.right, NumberLiteral)
             and node.right.value == 0
         ):
-            self.errors.append("Division by zero is not allowed.")
+            self.errors.append(
+                ValidationError(
+                    message="Division by zero is not allowed.",
+                    node=node,
+                    error_type="SemanticError",
+                )
+            )
         self._visit_children(node)
 
     def visit_unary_operation(self, node: UnaryOperation) -> None:
