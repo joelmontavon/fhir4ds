@@ -17,7 +17,10 @@ from typing import Dict, List, Optional, Set, Tuple, Any, Union
 from weakref import WeakValueDictionary
 
 from .base import ExecutionContext, SQLState, CompiledSQL
-from .builder import FHIRPathPipeline
+try:
+    from .builder import FHIRPathPipeline
+except ImportError:
+    FHIRPathPipeline = None
 
 logger = logging.getLogger(__name__)
 

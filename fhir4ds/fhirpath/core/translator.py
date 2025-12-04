@@ -2,22 +2,18 @@
 Legacy FHIRPath Translator - DEPRECATED
 
 This module has been replaced by the new pipeline architecture.
-Use fhir4ds.pipeline.converters.ast_converter instead.
-
-The new pipeline system provides:
-- Immutable pipeline operations
-- Advanced optimization passes
-- Dialect-aware compilation
-- CTE optimization
+However, it is maintained for backwards compatibility.
 """
 
 import warnings
+from ..legacy.translator import FHIRPathToSQL as LegacyFHIRPathToSQL
 
-class FHIRPathToSQL:
+class FHIRPathToSQL(LegacyFHIRPathToSQL):
     """
-    DEPRECATED: Legacy FHIRPath translator has been replaced by pipeline architecture.
+    DEPRECATED: Legacy FHIRPath translator.
     
-    Use fhir4ds.pipeline.converters.ast_converter.PipelineASTBridge instead.
+    This class is an alias to the legacy implementation for backwards compatibility.
+    New code should use fhir4ds.pipeline.converters.ast_converter.PipelineASTBridge.
     """
     
     def __init__(self, *args, **kwargs):
@@ -26,7 +22,4 @@ class FHIRPathToSQL:
             DeprecationWarning,
             stacklevel=2
         )
-        raise RuntimeError("Legacy FHIRPathToSQL translator is deprecated. Use pipeline system")
-    
-    def __getattr__(self, name):
-        raise RuntimeError("Legacy FHIRPathToSQL translator is deprecated. Use pipeline system")
+        super().__init__(*args, **kwargs)

@@ -9,7 +9,16 @@ from typing import Any, Dict, List, Optional, Union
 import json
 
 from .parser.parser import FHIRPathParser
-# Legacy translator removed - using pipeline system only
+# Legacy translator restored for backwards compatibility
+try:
+    from .legacy.translator import FHIRPathToSQL
+    from .legacy.generator import SQLGenerator
+    LEGACY_AVAILABLE = True
+except ImportError:
+    FHIRPathToSQL = None
+    SQLGenerator = None
+    LEGACY_AVAILABLE = False
+
 from .core.choice_types import fhir_choice_types
 from .parser.ast_nodes import ASTNode
 
@@ -51,14 +60,24 @@ class FHIRPath:
             use_pipeline: Whether to use new pipeline architecture (default: False)
         """
         self.dialect = dialect
+        # Check if pipeline is actually available, if not fallback to False
         self.use_pipeline = use_pipeline and PIPELINE_AVAILABLE
         
         # Initialize pipeline components if available and requested
         if self.use_pipeline:
             self.pipeline_bridge = PipelineASTBridge()
             self.pipeline_bridge.set_migration_mode('gradual')  # Use gradual mode by default
+            self.translator = None
+            self.generator = None
         else:
             self.pipeline_bridge = None
+            # Initialize legacy components if available
+            if LEGACY_AVAILABLE:
+                self.translator = FHIRPathToSQL()
+                self.generator = SQLGenerator(dialect=dialect) if dialect else SQLGenerator()
+            else:
+                self.translator = None
+                self.generator = None
     
     def parse(self, expression: str) -> ASTNode:
         """
@@ -98,43 +117,49 @@ class FHIRPath:
             >>> sql = fp.to_sql("Patient.name.family", "Patient", "p")
             >>> print(sql)  # JSON_EXTRACT(p.data, '$.name[*].family')
         """
-        # Always use pipeline system - legacy translator removed
-        if not self.use_pipeline or not self.pipeline_bridge:
-            # Enable pipeline if not already enabled
-            if PIPELINE_AVAILABLE:
-                self.use_pipeline = True
-                self.pipeline_bridge = PipelineASTBridge()
-                self.pipeline_bridge.set_migration_mode('gradual')
-            else:
-                raise RuntimeError("Pipeline system not available and legacy translator has been removed")
-        
-        try:
-            # Parse expression to AST
-            ast_node = self.parse(expression)
-            
-            # Create execution context with default dialect if none specified
-            if not self.dialect:
-                self.dialect = _get_default_dialect()
+        # Use pipeline system if enabled and available
+        if self.use_pipeline and self.pipeline_bridge:
+            try:
+                # Parse expression to AST
+                ast_node = self.parse(expression)
+
+                # Create execution context with default dialect if none specified
                 if not self.dialect:
-                    raise RuntimeError("No dialect available - pipeline system dependencies missing")
-            
-            context = ExecutionContext(dialect=self.dialect)
-            
-            # Use pipeline bridge to process
-            sql = self.pipeline_bridge.process_fhirpath_expression(ast_node, context)
-            
-            # Adjust table alias if needed
-            if table_alias != "fhir_resources":
-                sql = sql.replace("fhir_resources.resource", f"{table_alias}.data")
-            
+                    self.dialect = _get_default_dialect()
+                    if not self.dialect:
+                        raise RuntimeError("No dialect available - pipeline system dependencies missing")
+
+                context = ExecutionContext(dialect=self.dialect)
+
+                # Use pipeline bridge to process
+                sql = self.pipeline_bridge.process_fhirpath_expression(ast_node, context)
+
+                # Adjust table alias if needed
+                if table_alias != "fhir_resources":
+                    sql = sql.replace("fhir_resources.resource", f"{table_alias}.data")
+
+                return sql
+
+            except Exception as e:
+                # Log pipeline failure
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Pipeline SQL generation failed for '{expression}': {e}")
+                # If legacy is available, we might want to fall back, but strict mode says raise
+                # For now, just re-raise
+                raise RuntimeError(f"FHIRPath to SQL conversion failed: {e}") from e
+
+        # Fallback to legacy translator
+        elif LEGACY_AVAILABLE and self.translator:
+            result = self.translator.translate_to_parts(expression, resource_type)
+            sql = result["expression_sql"]
+            # Legacy translator uses table alias logic inside, or returns expression relative to resource.
+            # We might need to adjust alias if the legacy translator logic doesn't match new expectation.
+            # But here we are just returning what the old code returned, which is correct for backwards compatibility.
             return sql
             
-        except Exception as e:
-            # Log pipeline failure but don't fall back to deprecated translator
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Pipeline SQL generation failed for '{expression}': {e}")
-            raise RuntimeError(f"FHIRPath to SQL conversion failed: {e}") from e
+        else:
+            raise RuntimeError("Neither pipeline system nor legacy translator is available")
     
     def set_pipeline_mode(self, mode: str) -> None:
         """

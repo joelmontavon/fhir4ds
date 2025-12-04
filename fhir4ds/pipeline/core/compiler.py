@@ -11,7 +11,11 @@ from .base import (
     PipelineOperation, SQLState, ExecutionContext, CompiledSQL, 
     ContextMode, PipelineCompilationError, PipelineValidationError
 )
-from .builder import FHIRPathPipeline
+try:
+    from .builder import FHIRPathPipeline
+except ImportError:
+    FHIRPathPipeline = None
+
 from .advanced_features import (
     get_cte_optimizer, get_query_plan_cache, get_smart_indexing_hints,
     get_advanced_features_stats
