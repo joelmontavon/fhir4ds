@@ -1,3 +1,7 @@
+[!WARNING]
+**This repository is archived and no longer maintained.**
+Development has moved to [fhir4ds-v2](https://github.com/fhir4ds/fhir4ds).
+
 # FHIR for Data Science (FHIR4DS)
 
 Production-ready healthcare analytics platform providing 100% SQL-on-FHIR v2.0 compliance and 100% FHIRPath specification coverage with dual database support (DuckDB + PostgreSQL).
