@@ -80,6 +80,7 @@ dev = [
     "flake8>=5.0.0",
     "notebook>=6.0.0",
     "jupyter>=1.0.0",
+    "memory-profiler>=0.61.0",
 ]
 
 # All optional dependencies
