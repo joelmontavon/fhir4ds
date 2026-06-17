@@ -20,7 +20,6 @@ htmlcov/
 uv.lock
 
 # Project-specific exclusions
-archive/
 datasets/
 @work/
 work/
