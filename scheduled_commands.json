@@ -1,0 +1,13 @@
+{
+  "tasks": [
+    {
+      "name": "Start Claude code",
+      "command": "claude -c -p \"I'm leaning toward starting fresh? What are the pros/cons of this approach? I think we could keep a copy of the current code for reference and copy logic where possible. What do you think?\"",
+      "time": "05:05",
+      "days": [
+        "daily"
+      ],
+      "enabled": true
+    }
+  ]
+}
