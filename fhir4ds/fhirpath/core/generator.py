@@ -2,25 +2,18 @@
 Legacy SQL Generator - DEPRECATED
 
 This module has been replaced by the new pipeline architecture.
-Use fhir4ds.pipeline instead.
-
-All functionality has been migrated to:
-- fhir4ds.pipeline.operations.functions
-- fhir4ds.pipeline.core.compiler
-- fhir4ds.pipeline.converters.ast_converter
+However, it is maintained for backwards compatibility.
 """
 
 import warnings
+from ..legacy.generator import SQLGenerator as LegacySQLGenerator
 
-# Legacy imports for backward compatibility only
-from typing import Any, Dict, List, Optional, Union
-
-class SQLGenerator:
+class SQLGenerator(LegacySQLGenerator):
     """
-    DEPRECATED: Legacy SQL Generator has been replaced by pipeline architecture.
+    DEPRECATED: Legacy SQL Generator.
     
-    This class now raises an exception to prevent usage.
-    Use fhir4ds.pipeline.converters.ast_converter.PipelineASTBridge instead.
+    This class is an alias to the legacy implementation for backwards compatibility.
+    New code should use fhir4ds.pipeline instead.
     """
     
     def __init__(self, *args, **kwargs):
@@ -29,7 +22,4 @@ class SQLGenerator:
             DeprecationWarning,
             stacklevel=2
         )
-        raise RuntimeError("Legacy SQLGenerator translator is deprecated. Use pipeline system via FHIRPath class with use_pipeline=True")
-    
-    def __getattr__(self, name):
-        raise RuntimeError("Legacy SQLGenerator translator is deprecated. Use pipeline system via FHIRPath class with use_pipeline=True")
+        super().__init__(*args, **kwargs)

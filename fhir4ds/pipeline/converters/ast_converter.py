@@ -9,7 +9,11 @@ into pipeline operations, enabling gradual migration.
 import logging
 from typing import Union, Any, List
 from ..core.base import PipelineOperation, SQLState, ExecutionContext
-from ..core.builder import FHIRPathPipeline
+try:
+    from ..core.builder import FHIRPathPipeline
+except ImportError:
+    FHIRPathPipeline = None
+
 from ..operations.path import PathNavigationOperation, IndexerOperation
 from ..operations.literals import LiteralOperation, CollectionLiteralOperation
 from ..operations.functions import FunctionCallOperation

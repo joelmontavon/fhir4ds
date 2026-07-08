@@ -4,10 +4,19 @@ Unit tests for SQL generator module
 
 import pytest
 from fhir4ds.fhirpath.core.generator import SQLGenerator
-from fhir4ds.fhirpath.parser.ast_nodes import (
-    IdentifierNode, LiteralNode, FunctionCallNode, PathNode,
-    BinaryOpNode, ThisNode
-)
+
+# Use legacy AST nodes for testing legacy generator
+try:
+    from fhir4ds.fhirpath.legacy.parser.ast_nodes import (
+        IdentifierNode, LiteralNode, FunctionCallNode, PathNode,
+        BinaryOpNode, ThisNode
+    )
+except ImportError:
+    # Fallback if legacy not available (should not happen given setup)
+    from fhir4ds.fhirpath.parser.ast_nodes import (
+        IdentifierNode, LiteralNode, FunctionCallNode, PathNode,
+        BinaryOpNode, ThisNode
+    )
 
 
 class TestSQLGenerator:
