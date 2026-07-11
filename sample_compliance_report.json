@@ -1,0 +1,18 @@
+{
+  "summary": {
+    "total_tests": 3,
+    "passed": 1,
+    "failed": 1,
+    "skipped": 1,
+    "pass_rate_of_evaluated": "50.00%"
+  },
+  "failures_by_category": {
+    "evaluation_error": [
+      {
+        "test_name": "test_case_2",
+        "expression": "Patient.name.given[0]",
+        "error": "Index out of bounds"
+      }
+    ]
+  }
+}

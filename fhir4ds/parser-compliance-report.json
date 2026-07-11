@@ -1,0 +1,163 @@
+{
+  "summary": {
+    "total_tests": 934,
+    "passed": 24,
+    "failed": 30,
+    "skipped": 880,
+    "pass_rate_of_evaluated": "44.44%"
+  },
+  "failures_by_category": {
+    "parser_failure_on_valid_expression": [
+      {
+        "test_name": "testObservations_testPolymorphismAsBFunction",
+        "expression": "Observation.value.as(Period).start",
+        "error": "Expect identifier after '.'."
+      },
+      {
+        "test_name": "testDollar_testDollarThis1",
+        "expression": "Patient.name.given.where(substring($this.length()-3) = 'out')",
+        "error": "Lexer error at line 1, column 36: Unexpected character: '$'"
+      },
+      {
+        "test_name": "testLiterals_testDateNotEqual",
+        "expression": "Patient.birthDate != @1974-12-25T12:34:00",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testLiterals_testDateNotEqualTimezoneOffsetBefore",
+        "expression": "Patient.birthDate != @1974-12-25T12:34:00-10:00",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testLiterals_testDateNotEqualTimezoneOffsetAfter",
+        "expression": "Patient.birthDate != @1974-12-25T12:34:00+10:00",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testLiterals_testDateNotEqualUTC",
+        "expression": "Patient.birthDate != @1974-12-25T12:34:00Z",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testLiterals_testCollectionNotEqualEmpty",
+        "expression": "Patient.name.given != {}",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testTypes_testDecimalLiteralToInteger",
+        "expression": "'1.1'.toInteger() = {}",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testEquality_testEquality2",
+        "expression": "{} = {}",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testEquality_testEquality3",
+        "expression": "true = {}",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testEquality_testEquality19",
+        "expression": "@2012-04-15 = @2012-04-15T10:00:00",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testEquality_testEquality23",
+        "expression": "@2012-04-15T15:00:00Z = @2012-04-15T10:00:00",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testNEquality_testNEquality2",
+        "expression": "{} != {}",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testNEquality_testNEquality13",
+        "expression": "@2012-04-15 != @2012-04-15T10:00:00",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testNEquality_testNEquality17",
+        "expression": "@2012-04-15T15:00:00Z != @2012-04-15T10:00:00",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testLessThan_testLessThan23",
+        "expression": "@2018-03 < @2018-03-01",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testLessThan_testLessThan24",
+        "expression": "@2018-03-01T10:30 < @2018-03-01T10:30:00",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testLessThan_testLessThan25",
+        "expression": "@T10:30 < @T10:30:00",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testLessOrEqual_testLessOrEqual23",
+        "expression": "@2018-03 <= @2018-03-01",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testLessOrEqual_testLessOrEqual24",
+        "expression": "@2018-03-01T10:30 <= @2018-03-01T10:30:00",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testLessOrEqual_testLessOrEqual25",
+        "expression": "@T10:30 <= @T10:30:00",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testGreatorOrEqual_testGreatorOrEqual23",
+        "expression": "@2018-03 >= @2018-03-01",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testGreatorOrEqual_testGreatorOrEqual24",
+        "expression": "@2018-03-01T10:30 >= @2018-03-01T10:30:00",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testGreatorOrEqual_testGreatorOrEqual25",
+        "expression": "@T10:30 >= @T10:30:00",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testGreaterThan_testGreaterThan23",
+        "expression": "@2018-03 > @2018-03-01",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testGreaterThan_testGreaterThan24",
+        "expression": "@2018-03-01T10:30 > @2018-03-01T10:30:00",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testGreaterThan_testGreaterThan25",
+        "expression": "@T10:30 > @T10:30:00",
+        "error": "Expect expression."
+      },
+      {
+        "test_name": "testInheritance_testFHIRPathAsFunction11",
+        "expression": "Patient.gender.as(string)",
+        "error": "Expect identifier after '.'."
+      },
+      {
+        "test_name": "testInheritance_testFHIRPathAsFunction13",
+        "expression": "Patient.gender.as(id)",
+        "error": "Expect identifier after '.'."
+      },
+      {
+        "test_name": "testInheritance_testFHIRPathAsFunction15",
+        "expression": "ValueSet.version.as(code)",
+        "error": "Expect identifier after '.'."
+      }
+    ]
+  }
+}
